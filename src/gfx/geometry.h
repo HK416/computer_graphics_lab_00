@@ -68,6 +68,9 @@ struct GpuMaterial {
     uint32_t padding;
 };
 
+// 스킨이 없는 인스턴스의 조인트 오프셋. 셰이더가 이 값으로 스키닝 여부를 가른다.
+inline constexpr uint32_t NO_JOINTS = 0xFFFFFFFFU;
+
 struct GpuInstance {
     glm::mat4 model;
     glm::mat4 normalMatrix;
@@ -75,7 +78,8 @@ struct GpuInstance {
     // 재질 경로와 면 방향 조합. 컬링 컴퓨트가 이 값으로 그리기 명령 구간을 고른다.
     uint32_t bucket;
     uint32_t bucketBase;
-    uint32_t padding;
+    // 프레임 조인트 버퍼에서 이 인스턴스의 조인트 행렬이 시작하는 위치. 스킨이 없으면 NO_JOINTS.
+    uint32_t jointOffset;
 };
 
 // 모든 모델의 정점과 인덱스를 하나의 버퍼로 합쳐 간접 그리기 한 번으로 장면 전체를 그릴 수 있게 한다.

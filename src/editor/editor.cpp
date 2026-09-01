@@ -277,6 +277,27 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
     }
     ImGui::Separator();
 
+    // 스킨과 애니메이션은 모델 단위라 오브젝트 선택과 무관하게 장면 패널에서 다룬다.
+    if (!active.skeleton.animations.empty() && ImGui::CollapsingHeader("애니메이션", ImGuiTreeNodeFlags_DefaultOpen)) {
+        active.clip = std::min(active.clip, static_cast<uint32_t>(active.skeleton.animations.size()) - 1);
+        const asset::Animation& clip = active.skeleton.animations[active.clip];
+        if (ImGui::BeginCombo("클립", clip.name.c_str())) {
+            for (uint32_t i = 0; i < active.skeleton.animations.size(); ++i) {
+                if (ImGui::Selectable(active.skeleton.animations[i].name.c_str(), i == active.clip)) {
+                    active.clip = i;
+                    active.clipTime = 0.0F;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::Checkbox("재생", &active.playAnimation);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(90.0F);
+        ImGui::DragFloat("속도", &active.animationSpeed, 0.01F, -4.0F, 4.0F);
+        ImGui::SliderFloat("시간", &active.clipTime, 0.0F, std::max(clip.duration, 0.001F), "%.2f s");
+        ImGui::Separator();
+    }
+
     for (int i = 0; i < static_cast<int>(active.objects.size()); ++i) {
         scene::Object& object = active.objects[static_cast<size_t>(i)];
         ImGui::PushID(i);

@@ -175,14 +175,18 @@ void Application::loadScenes() {
         uint32_t meshBase = geometry->addModel(model, textureSlots);
 
         scene::Scene& created = scenes.create(model.name);
+        created.skeleton = std::move(model.skeleton);
         created.objects.reserve(model.instances.size());
         for (const asset::Instance& instance : model.instances) {
             scene::Object object;
             object.name = instance.name;
             object.meshIndex = meshBase + instance.meshIndex;
             object.transform = scene::Transform::fromMatrix(instance.transform);
+            object.skin = instance.skin;
             created.objects.push_back(std::move(object));
         }
+        // 바인드 포즈라도 조인트 행렬이 있어야 스킨 메쉬가 제자리에 선다.
+        created.update(0.0F);
     }
 
     uploader.flush();
@@ -239,6 +243,8 @@ void Application::run() {
         }
 
         scenes.active().camera.update(deltaSeconds);
+        // 애니메이션은 그리기 전에 진행시켜야 이번 프레임의 조인트 행렬이 올라간다.
+        scenes.active().update(deltaSeconds);
         // 밀린 크기 변경은 UI 가 렌더 타겟을 참조하기 전에 끝내야 한다.
         renderer->prepareFrame();
         renderer->setDisplayExtent(editorUi->desiredRenderExtent());

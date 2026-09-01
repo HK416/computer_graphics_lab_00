@@ -7,6 +7,7 @@
 #include <cgltf.h>
 #include <glm/geometric.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtx/matrix_decompose.hpp>
 #include <spdlog/spdlog.h>
 #include <stb_image.h>
 
@@ -30,6 +31,22 @@ void readFloats(const cgltf_accessor* accessor, cgltf_size index, float* out, cg
     if (accessor == nullptr || cgltf_accessor_read_float(accessor, index, out, count) == 0) {
         std::fill_n(out, count, 0.0F);
     }
+}
+
+// 조인트 번호 넷을 바이트 하나씩 담는다. 스킨 하나의 조인트 수는 MAX_SKIN_JOINTS 로 제한된다.
+uint32_t packJoints(const cgltf_uint indices[4]) {
+    return (indices[0] & 0xFFU) | ((indices[1] & 0xFFU) << 8U) | ((indices[2] & 0xFFU) << 16U) |
+           ((indices[3] & 0xFFU) << 24U);
+}
+
+// 가중치 넷을 unorm8 로 담는다. 셰이더에서 다시 정규화하므로 양자화 오차는 상쇄된다.
+uint32_t packWeights(const float weights[4]) {
+    uint32_t packed = 0;
+    for (uint32_t i = 0; i < 4; ++i) {
+        auto quantized = static_cast<uint32_t>(std::lround(std::clamp(weights[i], 0.0F, 1.0F) * 255.0F));
+        packed |= quantized << (i * 8U);
+    }
+    return packed;
 }
 
 // 노멀이 없는 프리미티브는 삼각형 면적 가중 평균으로 채운다.
@@ -228,6 +245,8 @@ void appendPrimitive(Model& model, const cgltf_data& data, const cgltf_primitive
     const cgltf_accessor* normals = findAttribute(primitive, cgltf_attribute_type_normal, 0);
     const cgltf_accessor* tangents = findAttribute(primitive, cgltf_attribute_type_tangent, 0);
     const cgltf_accessor* uvs = findAttribute(primitive, cgltf_attribute_type_texcoord, 0);
+    const cgltf_accessor* joints = findAttribute(primitive, cgltf_attribute_type_joints, 0);
+    const cgltf_accessor* weights = findAttribute(primitive, cgltf_attribute_type_weights, 0);
 
     Mesh mesh;
     mesh.name =
@@ -240,6 +259,14 @@ void appendPrimitive(Model& model, const cgltf_data& data, const cgltf_primitive
         readFloats(uvs, i, glm::value_ptr(vertex.uv), 2);
         if (tangents != nullptr) {
             readFloats(tangents, i, glm::value_ptr(vertex.tangent), 4);
+        }
+        if (joints != nullptr && weights != nullptr) {
+            cgltf_uint jointIndices[4] = {0, 0, 0, 0};
+            float jointWeights[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+            cgltf_accessor_read_uint(joints, i, jointIndices, 4);
+            readFloats(weights, i, jointWeights, 4);
+            vertex.joints = packJoints(jointIndices);
+            vertex.weights = packWeights(jointWeights);
         }
     }
 
@@ -270,6 +297,95 @@ void appendPrimitive(Model& model, const cgltf_data& data, const cgltf_primitive
     model.meshes.push_back(std::move(mesh));
 }
 
+AnimationPath toAnimationPath(cgltf_animation_path_type path) {
+    switch (path) {
+    case cgltf_animation_path_type_rotation:
+        return AnimationPath::ROTATION;
+    case cgltf_animation_path_type_scale:
+        return AnimationPath::SCALE;
+    default:
+        return AnimationPath::TRANSLATION;
+    }
+}
+
+// 노드 계층과 스킨, 애니메이션을 그대로 옮겨 둔다. 포즈 계산은 매 프레임 poseNodes 가 한다.
+void loadSkeleton(const cgltf_data& data, Skeleton& skeleton) {
+    skeleton.nodes.resize(data.nodes_count);
+    for (cgltf_size i = 0; i < data.nodes_count; ++i) {
+        const cgltf_node& source = data.nodes[i];
+        Node& node = skeleton.nodes[i];
+        node.parent = source.parent != nullptr ? static_cast<int32_t>(source.parent - data.nodes) : -1;
+        if (source.has_matrix != 0) {
+            // 행렬로만 주어진 노드는 채널이 덮어쓸 수 있도록 TRS 로 분해해 둔다.
+            glm::mat4 matrix = glm::make_mat4(source.matrix);
+            glm::vec3 skew;
+            glm::vec4 perspective;
+            glm::decompose(matrix, node.scale, node.rotation, node.translation, skew, perspective);
+        } else {
+            node.translation = glm::make_vec3(source.translation);
+            node.rotation = glm::quat{source.rotation[3], source.rotation[0], source.rotation[1], source.rotation[2]};
+            node.scale = glm::make_vec3(source.scale);
+        }
+    }
+
+    skeleton.skins.resize(data.skins_count);
+    for (cgltf_size i = 0; i < data.skins_count; ++i) {
+        const cgltf_skin& source = data.skins[i];
+        Skin& skin = skeleton.skins[i];
+        if (source.joints_count > MAX_SKIN_JOINTS) {
+            core::fatal("조인트가 {}개를 넘는 스킨은 지원하지 않습니다: {}", MAX_SKIN_JOINTS, source.joints_count);
+        }
+        skin.joints.reserve(source.joints_count);
+        skin.inverseBind.assign(source.joints_count, glm::mat4{1.0F});
+        for (cgltf_size j = 0; j < source.joints_count; ++j) {
+            skin.joints.push_back(static_cast<uint32_t>(source.joints[j] - data.nodes));
+            if (source.inverse_bind_matrices != nullptr) {
+                readFloats(source.inverse_bind_matrices, j, glm::value_ptr(skin.inverseBind[j]), 16);
+            }
+        }
+    }
+
+    skeleton.animations.resize(data.animations_count);
+    for (cgltf_size i = 0; i < data.animations_count; ++i) {
+        const cgltf_animation& source = data.animations[i];
+        Animation& animation = skeleton.animations[i];
+        animation.name = source.name != nullptr ? source.name : "클립";
+        animation.samplers.resize(source.samplers_count);
+        for (cgltf_size j = 0; j < source.samplers_count; ++j) {
+            const cgltf_animation_sampler& sampler = source.samplers[j];
+            AnimationSampler& target = animation.samplers[j];
+            target.step = sampler.interpolation == cgltf_interpolation_type_step;
+            // ponytail: CUBICSPLINE 은 접선을 버리고 값만 선형 보간한다. 필요하면 에르미트 보간을 넣으면 된다.
+            bool cubic = sampler.interpolation == cgltf_interpolation_type_cubic_spline;
+            cgltf_size stride = cubic ? 3 : 1;
+            cgltf_size offset = cubic ? 1 : 0;
+            cgltf_size count = sampler.input->count;
+            target.times.resize(count);
+            target.values.assign(count, glm::vec4{0.0F});
+            for (cgltf_size k = 0; k < count; ++k) {
+                readFloats(sampler.input, k, &target.times[k], 1);
+                readFloats(sampler.output, k * stride + offset, glm::value_ptr(target.values[k]), 4);
+            }
+            if (count > 0) {
+                animation.duration = std::max(animation.duration, target.times.back());
+            }
+        }
+        animation.channels.reserve(source.channels_count);
+        for (cgltf_size j = 0; j < source.channels_count; ++j) {
+            const cgltf_animation_channel& sourceChannel = source.channels[j];
+            if (sourceChannel.target_node == nullptr || sourceChannel.sampler == nullptr ||
+                sourceChannel.target_path == cgltf_animation_path_type_weights) {
+                continue;
+            }
+            AnimationChannel channel;
+            channel.sampler = static_cast<uint32_t>(sourceChannel.sampler - source.samplers);
+            channel.node = static_cast<uint32_t>(sourceChannel.target_node - data.nodes);
+            channel.path = toAnimationPath(sourceChannel.target_path);
+            animation.channels.push_back(channel);
+        }
+    }
+}
+
 void appendNode(Model& model,
                 const cgltf_node& node,
                 const std::vector<PrimitiveRange>& meshRanges,
@@ -278,15 +394,22 @@ void appendNode(Model& model,
         auto meshIndex = static_cast<size_t>(node.mesh - data.meshes);
         const PrimitiveRange& range = meshRanges[meshIndex];
 
-        cgltf_float world[16];
-        cgltf_node_transform_world(&node, world);
-        glm::mat4 transform = glm::make_mat4(world);
+        // glTF 는 스킨 메쉬 노드의 변환을 무시한다. 조인트 행렬이 이미 정점을 장면 공간으로 보내므로
+        // 인스턴스 변환은 단위 행렬로 두고, 사용자가 기즈모로 옮긴 값만 그 위에 곱해진다.
+        int32_t skin = node.skin != nullptr ? static_cast<int32_t>(node.skin - data.skins) : -1;
+        glm::mat4 transform{1.0F};
+        if (skin < 0) {
+            cgltf_float world[16];
+            cgltf_node_transform_world(&node, world);
+            transform = glm::make_mat4(world);
+        }
 
         for (uint32_t i = 0; i < range.count; ++i) {
             Instance instance;
             instance.name = node.name != nullptr ? node.name : "오브젝트";
             instance.meshIndex = range.first + i;
             instance.transform = transform;
+            instance.skin = skin;
             model.instances.push_back(std::move(instance));
         }
     }
@@ -341,6 +464,8 @@ Model loadGltf(const std::filesystem::path& path) {
     fallback.roughnessFactor = 1.0F;
     model.materials.push_back(fallback);
 
+    loadSkeleton(*data, model.skeleton);
+
     std::vector<PrimitiveRange> meshRanges(data->meshes_count);
     for (cgltf_size i = 0; i < data->meshes_count; ++i) {
         meshRanges[i].first = static_cast<uint32_t>(model.meshes.size());
@@ -369,13 +494,15 @@ Model loadGltf(const std::filesystem::path& path) {
     for (const Mesh& mesh : model.meshes) {
         triangleCount += mesh.indices.size() / 3;
     }
-    spdlog::info("glTF 적재: {} (메쉬 {}, 재질 {}, 텍스처 {}, 인스턴스 {}, 삼각형 {})",
+    spdlog::info("glTF 적재: {} (메쉬 {}, 재질 {}, 텍스처 {}, 인스턴스 {}, 삼각형 {}, 스킨 {}, 애니메이션 {})",
                  model.name,
                  model.meshes.size(),
                  model.materials.size(),
                  model.textures.size(),
                  model.instances.size(),
-                 triangleCount);
+                 triangleCount,
+                 model.skeleton.skins.size(),
+                 model.skeleton.animations.size());
     return model;
 }
 

@@ -180,6 +180,9 @@ private:
         Buffer meshletDrawBuffer;
         Buffer drawCountBuffer;
         Buffer lodNetworkBuffer;
+        // 스킨 인스턴스의 조인트 행렬을 이어 붙인다. 인스턴스마다 jointOffset 으로 자기 구간을 찾는다.
+        Buffer jointBuffer;
+        uint32_t jointCapacity = 0;
         uint32_t instanceCapacity = 0;
         uint32_t groupCapacity = 0;
         uint32_t meshletDrawCapacity = 0;
@@ -196,6 +199,7 @@ private:
     void reserveInstances(Frame& frame, uint32_t instanceCount);
     void reserveMeshletGroups(Frame& frame, uint32_t groupCount);
     void reserveMeshletDraws(Frame& frame, uint32_t drawCount);
+    void reserveJoints(Frame& frame, uint32_t jointCount);
     void createCullPipeline();
     void recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches& batches);
     void recordHzbPass(VkCommandBuffer commandBuffer);

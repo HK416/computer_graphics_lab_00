@@ -114,6 +114,7 @@ add_custom_target(cg_lab_shaders DEPENDS ${shader_binaries} SOURCES ${shader_sou
 add_executable(cg_lab
     src/main.cpp
     src/app/application.cpp
+    src/asset/animation.cpp
     src/asset/gltf_loader.cpp
     src/asset/meshlet.cpp
     src/core/error.cpp
@@ -174,6 +175,7 @@ file(CREATE_LINK "${CMAKE_BINARY_DIR}/compile_commands.json" "${CMAKE_SOURCE_DIR
 # LOD 신경망의 역전파가 실제로 손실을 줄이는지 확인하는 자체 점검.
 enable_testing()
 add_executable(cg_lab_tests tests/lod_network_test.cpp src/gfx/lod_network.cpp)
+add_executable(cg_lab_animation_tests tests/animation_test.cpp src/asset/animation.cpp)
 add_executable(cg_lab_concurrency_tests tests/lock_free_queue_test.cpp src/core/job_system.cpp)
 target_include_directories(cg_lab_concurrency_tests PRIVATE src)
 find_package(Threads REQUIRED)
@@ -184,7 +186,16 @@ if(MSVC)
 else()
     target_compile_options(cg_lab_tests PRIVATE -Wall -Wextra)
 endif()
+target_include_directories(cg_lab_animation_tests PRIVATE src)
+target_link_libraries(cg_lab_animation_tests PRIVATE glm::glm)
+if(MSVC)
+    target_compile_options(cg_lab_animation_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(cg_lab_animation_tests PRIVATE -Wall -Wextra)
+endif()
+
 add_test(NAME lod_network COMMAND cg_lab_tests)
+add_test(NAME animation COMMAND cg_lab_animation_tests)
 add_test(NAME concurrency COMMAND cg_lab_concurrency_tests)
 
 # cmake --build --preset debug --target run 으로 빌드한 뒤 바로 실행한다.

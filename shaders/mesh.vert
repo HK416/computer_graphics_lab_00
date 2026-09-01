@@ -13,13 +13,18 @@ void main() {
     Mesh mesh = pushConstants.meshes.items[instance.meshIndex];
     Vertex vertex = pushConstants.vertices.items[gl_VertexIndex];
 
-    vec4 worldPosition = instance.model * vec4(vertex.position, 1.0);
+    vec3 position = vertex.position;
+    vec3 normal = vertex.normal;
+    vec3 tangent = vertex.tangent.xyz;
+    skinVertex(instance, vertex, position, normal, tangent);
+
+    vec4 worldPosition = instance.model * vec4(position, 1.0);
     gl_Position = pushConstants.camera.item.viewProjection * worldPosition;
 
     mat3 normalMatrix = mat3(instance.normalMatrix);
     outWorldPosition = worldPosition.xyz;
-    outNormal = normalMatrix * vertex.normal;
-    outTangent = vec4(normalMatrix * vertex.tangent.xyz, vertex.tangent.w);
+    outNormal = normalMatrix * normal;
+    outTangent = vec4(normalMatrix * tangent, vertex.tangent.w);
     outUv = vertex.uv;
     outMaterialIndex = mesh.materialIndex;
     outMeshletIndex = pushConstants.vertexMeshlets.items[gl_VertexIndex];

@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include <glm/gtc/quaternion.hpp>
 #include <glm/mat4x4.hpp>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
@@ -53,6 +54,61 @@ struct Vertex {
     glm::vec3 normal;
     glm::vec4 tangent;
     glm::vec2 uv;
+    // 스킨 조인트 넷을 바이트 하나씩, 가중치 넷을 unorm8 로 담는다. 스킨이 없으면 둘 다 0 이다.
+    uint32_t joints = 0;
+    uint32_t weights = 0;
+};
+
+// 스킨 하나가 가질 수 있는 조인트 수. 정점이 조인트 번호를 바이트 하나에 담기 때문에 생기는 한계다.
+//
+// ponytail: 더 큰 스켈레톤이 필요하면 정점의 joints 를 uvec2 로 넓혀 16비트씩 담으면 된다.
+inline constexpr size_t MAX_SKIN_JOINTS = 256;
+
+enum class AnimationPath : uint32_t {
+    TRANSLATION = 0,
+    ROTATION = 1,
+    SCALE = 2,
+};
+
+// glTF 노드 하나의 지역 변환. 애니메이션이 이 값을 덮어쓴 뒤 계층을 따라 세계 변환을 만든다.
+struct Node {
+    int32_t parent = -1;
+    glm::vec3 translation{0.0F};
+    glm::quat rotation{1.0F, 0.0F, 0.0F, 0.0F};
+    glm::vec3 scale{1.0F};
+};
+
+struct Skin {
+    // Skeleton::nodes 인덱스. 정점의 조인트 번호는 이 배열 기준이다.
+    std::vector<uint32_t> joints;
+    std::vector<glm::mat4> inverseBind;
+};
+
+// 시간 표본과 값. 회전은 xyzw 사원수로, 나머지는 xyz 로 읽는다.
+struct AnimationSampler {
+    std::vector<float> times;
+    std::vector<glm::vec4> values;
+    bool step = false;
+};
+
+struct AnimationChannel {
+    uint32_t sampler = 0;
+    uint32_t node = 0;
+    AnimationPath path = AnimationPath::TRANSLATION;
+};
+
+struct Animation {
+    std::string name;
+    float duration = 0.0F;
+    std::vector<AnimationSampler> samplers;
+    std::vector<AnimationChannel> channels;
+};
+
+// 한 모델의 노드 계층과 스킨, 애니메이션. 인스턴스는 skin 으로 여기를 가리킨다.
+struct Skeleton {
+    std::vector<Node> nodes;
+    std::vector<Skin> skins;
+    std::vector<Animation> animations;
 };
 
 // meshoptimizer 로 나눈 meshlet 하나. mesh shader 경로와 클러스터 컬링, LOD 선정에 함께 쓴다.
@@ -125,6 +181,8 @@ struct Instance {
     std::string name;
     uint32_t meshIndex = 0;
     glm::mat4 transform{1.0F};
+    // Skeleton::skins 인덱스. 스킨이 없으면 -1.
+    int32_t skin = -1;
 };
 
 struct Model {
@@ -133,9 +191,19 @@ struct Model {
     std::vector<Mesh> meshes;
     std::vector<Material> materials;
     std::vector<Instance> instances;
+    Skeleton skeleton;
 };
 
 Model loadGltf(const std::filesystem::path& path);
+
+// clip 을 time 위치에서 표본화해 노드마다 세계 변환을 만든다. clip 이 범위를 벗어나면 바인드 포즈다.
+void poseNodes(const Skeleton& skeleton, uint32_t clip, float time, std::vector<glm::mat4>& worlds);
+
+// 세계 변환에서 스킨 하나의 조인트 행렬을 뽑는다. 셰이더가 이 행렬로 정점을 옮긴다.
+void skinMatrices(const Skeleton& skeleton,
+                  const std::vector<glm::mat4>& worlds,
+                  uint32_t skin,
+                  std::vector<glm::mat4>& out);
 
 // 정점 캐시와 오버드로를 최적화한 뒤 meshlet 으로 나누고, 단계별로 묶어 단순화해 LOD DAG 를 만든다.
 // 정점 버퍼는 meshlet 마다 정점을 소유하도록, 인덱스 버퍼는 LOD 단계별로 이어지도록 다시 만들어진다.

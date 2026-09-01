@@ -12,6 +12,9 @@ struct Vertex {
     vec3 normal;
     vec4 tangent;
     vec2 uv;
+    // 조인트 넷을 바이트 하나씩, 가중치 넷을 unorm8 로 담는다. 스킨이 없으면 둘 다 0 이다.
+    uint joints;
+    uint weights;
 };
 
 struct Mesh {
@@ -72,13 +75,16 @@ struct Material {
     uint padding;
 };
 
+// 스킨이 없는 인스턴스의 조인트 오프셋.
+#define NO_JOINTS 0xFFFFFFFFu
+
 struct Instance {
     mat4 model;
     mat4 normalMatrix;
     uint meshIndex;
     uint bucket;
     uint bucketBase;
-    uint padding;
+    uint jointOffset;
 };
 
 // 태스크 셰이더 워크그룹 하나가 처리할 meshlet 구간.
@@ -145,12 +151,29 @@ layout(buffer_reference, scalar) readonly buffer VertexMeshletBuffer {
 layout(buffer_reference, scalar) readonly buffer MeshletGroupBuffer {
     MeshletGroup items[];
 };
+layout(buffer_reference, scalar) readonly buffer JointBuffer {
+    mat4 items[];
+};
 layout(buffer_reference, scalar) buffer DrawCommandBuffer {
     DrawCommand items[];
 };
 layout(buffer_reference, scalar) buffer CounterBuffer {
     uint items[];
 };
+
+// 조인트 넷을 가중치로 섞은 스킨 행렬. 양자화된 가중치는 합이 1 이 아닐 수 있어 다시 정규화한다.
+mat4 skinMatrix(JointBuffer joints, uint offset, uint packedJoints, uint packedWeights) {
+    vec4 weights = unpackUnorm4x8(packedWeights);
+    float total = weights.x + weights.y + weights.z + weights.w;
+    if (total <= 0.0) {
+        return mat4(1.0);
+    }
+    weights /= total;
+
+    uvec4 indices = (uvec4(packedJoints) >> uvec4(0, 8, 16, 24)) & 0xFFu;
+    return weights.x * joints.items[offset + indices.x] + weights.y * joints.items[offset + indices.y] +
+           weights.z * joints.items[offset + indices.z] + weights.w * joints.items[offset + indices.w];
+}
 
 // 값을 색상환에 흩어 meshlet 이나 LOD 를 구분한다. 채도를 유지해야 인접 값이 잘 구별된다.
 vec3 debugPalette(uint value) {

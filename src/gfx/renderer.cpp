@@ -98,6 +98,7 @@ struct ScenePushConstants {
     VkDeviceAddress meshletTriangles;
     VkDeviceAddress vertexMeshlets;
     VkDeviceAddress meshletGroups;
+    VkDeviceAddress joints;
     uint32_t meshletGroupBase;
     uint32_t debugMode;
 };
@@ -237,6 +238,7 @@ Renderer::~Renderer() {
     vkDestroySemaphore(context.device, frameTimeline, nullptr);
     destroyPresentSemaphores();
     for (Frame& frame : frames) {
+        destroyBuffer(context, frame.jointBuffer);
         destroyBuffer(context, frame.lodNetworkBuffer);
         destroyBuffer(context, frame.drawCountBuffer);
         destroyBuffer(context, frame.meshletDrawBuffer);
@@ -518,6 +520,22 @@ void Renderer::reserveMeshletGroups(Frame& frame, uint32_t groupCount) {
                                             MemoryLocation::HOST_WRITE,
                                             "meshlet 그룹");
     frame.groupCapacity = capacity;
+}
+
+void Renderer::reserveJoints(Frame& frame, uint32_t jointCount) {
+    // 스킨이 없는 장면에서도 셰이더가 주소를 읽으므로 최소 하나는 잡아 둔다.
+    uint32_t needed = std::max(jointCount, 1U);
+    if (needed <= frame.jointCapacity) {
+        return;
+    }
+    uint32_t capacity = std::max(needed, frame.jointCapacity * 2);
+    destroyBuffer(context, frame.jointBuffer);
+    frame.jointBuffer = createBuffer(context,
+                                     static_cast<VkDeviceSize>(capacity) * sizeof(glm::mat4),
+                                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                     MemoryLocation::HOST_WRITE,
+                                     "조인트 행렬");
+    frame.jointCapacity = capacity;
 }
 
 void Renderer::reserveMeshletDraws(Frame& frame, uint32_t drawCount) {
@@ -992,6 +1010,24 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     reserveMeshletGroups(frame, totalGroups);
     reserveMeshletDraws(frame, totalMeshletDraws);
 
+    // 조인트 행렬은 스킨마다 한 번만 올리고 인스턴스는 그 구간의 시작점만 가리킨다.
+    std::vector<uint32_t> skinOffsets(scene.jointMatrices.size(), NO_JOINTS);
+    uint32_t totalJoints = 0;
+    for (size_t skin = 0; skin < scene.jointMatrices.size(); ++skin) {
+        if (scene.jointMatrices[skin].empty()) {
+            continue;
+        }
+        skinOffsets[skin] = totalJoints;
+        totalJoints += static_cast<uint32_t>(scene.jointMatrices[skin].size());
+    }
+    reserveJoints(frame, totalJoints);
+    auto* joints = static_cast<glm::mat4*>(frame.jointBuffer.mapped);
+    for (size_t skin = 0; skin < skinOffsets.size(); ++skin) {
+        if (skinOffsets[skin] != NO_JOINTS) {
+            std::ranges::copy(scene.jointMatrices[skin], joints + skinOffsets[skin]);
+        }
+    }
+
     uint32_t drawOffset = 0;
     uint32_t groupOffset = 0;
     uint32_t meshletDrawOffset = 0;
@@ -1035,7 +1071,9 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         instances[slot].meshIndex = object.meshIndex;
         instances[slot].bucket = static_cast<uint32_t>(mode * 2 + sided);
         instances[slot].bucketBase = batches.meshletDraws[mode][sided].first;
-        instances[slot].padding = 0;
+        instances[slot].jointOffset = object.skin >= 0 && static_cast<size_t>(object.skin) < skinOffsets.size()
+                                          ? skinOffsets[object.skin]
+                                          : NO_JOINTS;
 
         draws[slot].indexCount = lod.indexCount;
         draws[slot].instanceCount = 1;
@@ -1432,6 +1470,7 @@ void Renderer::recordCommands(Frame& frame,
                                               geometry.meshletTriangleBuffer.address,
                                               geometry.vertexMeshletBuffer.address,
                                               frame.meshletGroupBuffer.address,
+                                              frame.jointBuffer.address,
                                               0,
                                               debugMode};
         vkCmdBindDescriptorSets(

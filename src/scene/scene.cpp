@@ -1,5 +1,7 @@
 #include "scene/scene.h"
 
+#include <cmath>
+
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
 
@@ -19,6 +21,27 @@ Transform Transform::fromMatrix(const glm::mat4& matrix) {
     glm::vec4 perspective;
     glm::decompose(matrix, transform.scale, transform.rotation, transform.position, skew, perspective);
     return transform;
+}
+
+void Scene::update(float deltaSeconds) {
+    if (skeleton.skins.empty()) {
+        return;
+    }
+    if (playAnimation && clip < skeleton.animations.size()) {
+        float duration = skeleton.animations[clip].duration;
+        if (duration > 0.0F) {
+            clipTime = std::fmod(clipTime + deltaSeconds * animationSpeed, duration);
+            if (clipTime < 0.0F) {
+                clipTime += duration;
+            }
+        }
+    }
+
+    asset::poseNodes(skeleton, clip, clipTime, nodeWorlds);
+    jointMatrices.resize(skeleton.skins.size());
+    for (uint32_t i = 0; i < skeleton.skins.size(); ++i) {
+        asset::skinMatrices(skeleton, nodeWorlds, i, jointMatrices[i]);
+    }
 }
 
 Scene& SceneManager::create(std::string name) {
