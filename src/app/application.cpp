@@ -27,10 +27,12 @@ Application::Application() {
     spdlog::info("윈도우 생성 완료 ({}x{})", DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT);
 
     context = std::make_unique<gfx::Context>(window);
+    renderer = std::make_unique<gfx::Renderer>(*context, window);
 }
 
 Application::~Application() {
-    // 서피스가 윈도우보다 먼저 파괴되어야 한다.
+    // 렌더러가 쓰는 서피스는 윈도우보다 먼저 파괴되어야 한다.
+    renderer.reset();
     context.reset();
     SDL_DestroyWindow(window);
     SDL_Quit();
@@ -41,12 +43,25 @@ void Application::run() {
     while (running) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_EVENT_QUIT) {
+            switch (event.type) {
+            case SDL_EVENT_QUIT:
                 running = false;
+                break;
+            case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+                renderer->requestResize();
+                break;
+            default:
+                break;
             }
         }
-        SDL_Delay(1);
+
+        if ((SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) != 0) {
+            SDL_Delay(10);
+            continue;
+        }
+        renderer->drawFrame();
     }
+    renderer->waitIdle();
 }
 
 } // namespace app

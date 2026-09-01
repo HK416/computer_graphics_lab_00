@@ -62,12 +62,49 @@ find_package(SDL3 CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 
+# ---- 셰이더: GLSL 을 SPIR-V 로 컴파일한다 ----
+if(NOT Vulkan_GLSLC_EXECUTABLE)
+    message(FATAL_ERROR "glslc 를 찾지 못했습니다. Vulkan SDK 설치를 확인하십시오.")
+endif()
+
+set(shader_output_dir "${CMAKE_BINARY_DIR}/shaders")
+set(shader_sources
+    shaders/triangle.vert
+    shaders/triangle.frag)
+
+set(shader_binaries)
+foreach(shader IN LISTS shader_sources)
+    get_filename_component(shader_name "${shader}" NAME)
+    set(shader_binary "${shader_output_dir}/${shader_name}.spv")
+    add_custom_command(
+        OUTPUT "${shader_binary}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${shader_output_dir}"
+        COMMAND "${Vulkan_GLSLC_EXECUTABLE}"
+                --target-env=vulkan1.3
+                -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+                -MD -MF "${shader_binary}.d"
+                $<IF:$<CONFIG:Debug>,-g,-O>
+                -o "${shader_binary}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/${shader}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${shader}"
+        DEPFILE "${shader_binary}.d"
+        COMMENT "셰이더 컴파일: ${shader}"
+        VERBATIM)
+    list(APPEND shader_binaries "${shader_binary}")
+endforeach()
+
+add_custom_target(cg_lab_shaders DEPENDS ${shader_binaries} SOURCES ${shader_sources})
+
 add_executable(cg_lab
     src/main.cpp
     src/app/application.cpp
     src/core/error.cpp
     src/gfx/context.cpp
+    src/gfx/renderer.cpp
+    src/gfx/swapchain.cpp
     src/gfx/vma_impl.cpp)
+
+add_dependencies(cg_lab cg_lab_shaders)
 
 # VMA 구현부는 서드파티 코드이므로 경고 검사에서 제외한다.
 set_source_files_properties(src/gfx/vma_impl.cpp PROPERTIES COMPILE_OPTIONS "$<IF:$<BOOL:${MSVC}>,/w,-w>")
@@ -92,8 +129,10 @@ else()
     target_compile_options(cg_lab PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
 endif()
 
-# 런타임에 public/ 의 폰트와 에셋을 찾기 위한 경로.
-target_compile_definitions(cg_lab PRIVATE CG_LAB_ASSET_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/public")
+# 런타임에 public/ 의 폰트와 에셋, 그리고 컴파일된 셰이더를 찾기 위한 경로.
+target_compile_definitions(cg_lab PRIVATE
+    CG_LAB_ASSET_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/public"
+    CG_LAB_SHADER_ROOT="${shader_output_dir}")
 
 # VS Code 등 편집기가 인클루드 경로를 찾을 수 있도록 컴파일 데이터베이스를 소스 루트에 링크한다.
 file(CREATE_LINK "${CMAKE_BINARY_DIR}/compile_commands.json" "${CMAKE_SOURCE_DIR}/compile_commands.json"

@@ -3,6 +3,7 @@
 #include <memory>
 
 #include "gfx/context.h"
+#include "gfx/renderer.h"
 
 struct SDL_Window;
 
@@ -20,6 +21,7 @@ public:
 private:
     SDL_Window* window = nullptr;
     std::unique_ptr<gfx::Context> context;
+    std::unique_ptr<gfx::Renderer> renderer;
 };
 
 } // namespace app
