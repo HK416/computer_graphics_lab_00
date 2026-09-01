@@ -12,6 +12,7 @@
 #include <vulkan/vulkan.h>
 
 #include "gfx/lod_network.h"
+#include "gfx/profiler.h"
 #include "gfx/raytracing.h"
 #include "gfx/resources.h"
 
@@ -126,6 +127,8 @@ public:
     // 프레임을 시작하기 전에 밀린 크기 변경을 처리한다. UI 가 렌더 타겟을 참조하기 전에
     // 재생성이 끝나야 파괴된 이미지 뷰를 가리키는 디스크립터가 남지 않는다.
     void prepareFrame();
+    // 프레임 맨 앞에서 프로파일러 슬롯을 연다. CPU 구간이 그리기보다 먼저 기록되기 때문이다.
+    void beginProfilerFrame() { frameProfiler.beginFrame(static_cast<uint32_t>(frameIndex % FRAMES_IN_FLIGHT)); }
     // 지오메트리 저장소에 모델이 더해진 뒤 불린다. 가속 구조를 다시 만든다.
     void onGeometryChanged();
     void drawFrame(const scene::Scene& scene);
@@ -205,6 +208,9 @@ public:
     bool useMeshShader = false;
     bool meshShaderAvailable() const { return meshShaderPipelines[0] != VK_NULL_HANDLE; }
 
+    // GPU/CPU 구간 계측. 편집기가 켜고 끄며, 꺼져 있으면 기록 자체를 하지 않는다.
+    GpuProfiler& profiler() { return frameProfiler; }
+
     bool vsyncEnabled() const { return vsync; }
     void setVsync(bool enabled);
 
@@ -280,6 +286,8 @@ private:
     // buildLights 가 채운다. 그림자 패스와 푸시 상수가 함께 쓴다.
     std::vector<GpuLight> frameLights;
     std::vector<glm::mat4> shadowViews;
+
+    GpuProfiler frameProfiler;
 
     std::array<Frame, FRAMES_IN_FLIGHT> frames{};
     // 표시 완료 세마포어는 재사용 충돌을 피하려고 스왑체인 이미지마다 하나씩 둔다.

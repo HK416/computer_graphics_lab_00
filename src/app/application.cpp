@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <limits>
 #include <vector>
@@ -102,6 +103,7 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     }
     renderer->lodErrorThreshold = options.lodErrorThreshold;
     renderer->useNeuralLod = options.neuralLod;
+    renderer->profiler().enabled = options.profile;
     renderer->renderScale = options.renderScale;
     renderer->upscaler = static_cast<gfx::Upscaler>(options.upscaler);
     if (options.triangleBudget > 0.0F) {
@@ -437,13 +439,21 @@ void Application::run() {
             continue;
         }
 
+        // 프로파일러 슬롯은 프레임 맨 앞에서 연다. 아래 CPU 구간이 그리기보다 먼저 기록된다.
+        renderer->beginProfilerFrame();
         scenes.active().camera.update(deltaSeconds);
-        // 애니메이션은 그리기 전에 진행시켜야 이번 프레임의 조인트 행렬이 올라간다.
-        scenes.active().update(deltaSeconds);
+        {
+            gfx::ProfilerScope scope(renderer->profiler(), "장면 갱신");
+            // 애니메이션은 그리기 전에 진행시켜야 이번 프레임의 조인트 행렬이 올라간다.
+            scenes.active().update(deltaSeconds);
+        }
         // 밀린 크기 변경은 UI 가 렌더 타겟을 참조하기 전에 끝내야 한다.
         renderer->prepareFrame();
         renderer->setDisplayExtent(editorUi->desiredRenderExtent());
-        editorUi->build(scenes, *geometry, deltaSeconds);
+        {
+            gfx::ProfilerScope scope(renderer->profiler(), "편집기 UI");
+            editorUi->build(scenes, *geometry, deltaSeconds);
+        }
         renderer->drawFrame(scenes.active());
         ++frameCount;
 
@@ -456,6 +466,17 @@ void Application::run() {
         }
     }
     renderer->waitIdle();
+
+    // 창을 못 보는 실행(스크린샷, CI)에서도 결과를 남긴다.
+    if (renderer->profiler().enabled) {
+        spdlog::info("구간 계측 결과 (CPU / GPU, ms)");
+        for (const gfx::ProfilerZone& zone : renderer->profiler().zones()) {
+            spdlog::info("  {:<28} {:7.3f}  {:>7}",
+                         std::string(zone.depth * 2, ' ') + zone.name,
+                         zone.cpuMilliseconds,
+                         zone.hasGpu ? std::format("{:.3f}", zone.gpuMilliseconds) : std::string{"-"});
+        }
+    }
 }
 
 } // namespace app

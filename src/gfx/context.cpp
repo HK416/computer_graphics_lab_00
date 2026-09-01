@@ -197,6 +197,7 @@ bool selectQueueFamilies(VkPhysicalDevice device, VkSurfaceKHR surface, QueueFam
         VK_CHECK(vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupported));
         if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0 && presentSupported == VK_TRUE) {
             out.graphics = i;
+            out.graphicsTimestampBits = families[i].timestampValidBits;
             break;
         }
     }
@@ -323,6 +324,10 @@ DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
     }
 
     candidate.caps = queryCapabilities(candidate.features, extensions, subgroup);
+    // 타임스탬프는 주기와 큐의 유효 비트가 모두 있어야 쓸 수 있다. 어느 하나라도 0 이면 GPU 구간을
+    // 잴 수 없고 프로파일러는 CPU 만 잰다.
+    candidate.caps.timestamps =
+        candidate.properties.limits.timestampPeriod > 0.0F && candidate.queueFamilies.graphicsTimestampBits > 0;
 
     candidate.enabledExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     // 코어 1.3 로도 쓸 수 있지만 ImGui Vulkan 백엔드가 확장 활성화를 요구한다.
@@ -393,6 +398,10 @@ void logCapabilities(const VkPhysicalDeviceProperties& properties,
                  caps.drawIndirectCount,
                  caps.samplerFilterMinmax,
                  caps.subgroupSize);
+    spdlog::info("타임스탬프 쿼리: {} (주기 {:.2f} ns, 유효 비트 {})",
+                 caps.timestamps,
+                 properties.limits.timestampPeriod,
+                 families.graphicsTimestampBits);
 }
 
 } // namespace

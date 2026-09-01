@@ -129,6 +129,8 @@ add_executable(cg_lab
     src/gfx/bindless.cpp
     src/gfx/geometry.cpp
     src/gfx/lod_network.cpp
+    src/gfx/profiler.cpp
+    src/gfx/profiler_math.cpp
     src/gfx/raytracing.cpp
     src/gfx/renderer.cpp
     src/gfx/resources.cpp
@@ -186,6 +188,7 @@ add_executable(cg_lab_camera_tests tests/camera_test.cpp src/scene/camera.cpp)
 add_executable(cg_lab_scene_tests tests/scene_test.cpp src/scene/scene.cpp src/asset/animation.cpp src/core/error.cpp)
 add_executable(cg_lab_scene_io_tests tests/scene_io_test.cpp src/scene/scene_io.cpp src/scene/scene.cpp
     src/asset/animation.cpp src/core/error.cpp)
+add_executable(cg_lab_profiler_tests tests/profiler_test.cpp src/gfx/profiler_math.cpp)
 add_executable(cg_lab_concurrency_tests tests/lock_free_queue_test.cpp src/core/job_system.cpp)
 target_include_directories(cg_lab_concurrency_tests PRIVATE src)
 find_package(Threads REQUIRED)
@@ -230,11 +233,19 @@ else()
     target_compile_options(cg_lab_scene_io_tests PRIVATE -Wall -Wextra)
 endif()
 
+target_include_directories(cg_lab_profiler_tests PRIVATE src)
+if(MSVC)
+    target_compile_options(cg_lab_profiler_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(cg_lab_profiler_tests PRIVATE -Wall -Wextra)
+endif()
+
 add_test(NAME lod_network COMMAND cg_lab_tests)
 add_test(NAME animation COMMAND cg_lab_animation_tests)
 add_test(NAME camera COMMAND cg_lab_camera_tests)
 add_test(NAME scene COMMAND cg_lab_scene_tests)
 add_test(NAME scene_io COMMAND cg_lab_scene_io_tests)
+add_test(NAME profiler COMMAND cg_lab_profiler_tests)
 add_test(NAME concurrency COMMAND cg_lab_concurrency_tests)
 
 # cmake --build --preset debug --target run 으로 빌드한 뒤 바로 실행한다.

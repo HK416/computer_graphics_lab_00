@@ -30,6 +30,8 @@ struct Capabilities {
     bool textureCompressionAstc = false;
     bool memoryBudget = false;
     bool memoryPriority = false;
+    // 타임스탬프 쿼리로 GPU 구간 시간을 잴 수 있는지. 주기와 유효 비트가 모두 있어야 한다.
+    bool timestamps = false;
     uint32_t subgroupSize = 0;
 };
 
@@ -38,6 +40,8 @@ struct QueueFamilies {
     uint32_t graphics = VK_QUEUE_FAMILY_IGNORED;
     uint32_t compute = VK_QUEUE_FAMILY_IGNORED;
     uint32_t transfer = VK_QUEUE_FAMILY_IGNORED;
+    // 그래픽스 큐가 돌려주는 타임스탬프의 유효 비트 수. 0 이면 그 큐에서 타임스탬프를 쓸 수 없다.
+    uint32_t graphicsTimestampBits = 0;
 
     bool hasAsyncCompute() const { return compute != graphics; }
     bool hasSeparateTransfer() const { return transfer != graphics && transfer != compute; }

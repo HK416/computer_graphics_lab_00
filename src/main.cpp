@@ -27,6 +27,8 @@ int main(int argc, char* argv[]) {
             options.lodErrorThreshold = static_cast<float>(std::atof(argv[++i]));
         } else if (argument == "--neural-lod") {
             options.neuralLod = true;
+        } else if (argument == "--profile") {
+            options.profile = true;
         } else if (argument == "--triangle-budget" && i + 1 < argc) {
             options.triangleBudget = static_cast<float>(std::atof(argv[++i]));
         } else if (argument == "--render-scale" && i + 1 < argc) {

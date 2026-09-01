@@ -32,6 +32,8 @@ struct Options {
     uint32_t lodLevel = AUTOMATIC_LOD;
     float lodErrorThreshold = 1.0F;
     bool neuralLod = false;
+    // 시작하자마자 구간 계측을 켠다. 스크린샷으로 확인할 때 쓴다.
+    bool profile = false;
     float renderScale = 1.0F;
     // 0 통과, 1 내장 공간 업스케일
     uint32_t upscaler = 1;

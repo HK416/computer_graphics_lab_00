@@ -20,6 +20,7 @@
 #include "editor/log_sink.h"
 #include "gfx/context.h"
 #include "gfx/geometry.h"
+#include "gfx/profiler.h"
 #include "gfx/renderer.h"
 #include "scene/scene.h"
 
@@ -687,6 +688,41 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
                 frameTimeMilliseconds > 0.0F ? 1000.0F / frameTimeMilliseconds : 0.0F);
     ImGui::Text("렌더 해상도 %ux%u", renderer.renderExtent().width, renderer.renderExtent().height);
     ImGui::Text("작업 워커 %u", workerCount);
+
+    ImGui::SeparatorText("프로파일러");
+    gfx::GpuProfiler& profiler = renderer.profiler();
+    ImGui::Checkbox("구간 계측", &profiler.enabled);
+    if (!profiler.gpuAvailable()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(GPU 타임스탬프 미지원, CPU 만)");
+    }
+    if (profiler.enabled) {
+        ImGui::SliderFloat("평활", &profiler.smoothing, 0.01F, 1.0F, "%.2f");
+        const std::vector<gfx::ProfilerZone>& zones = profiler.zones();
+        if (zones.empty()) {
+            ImGui::TextDisabled("측정 중...");
+        } else if (ImGui::BeginTable("구간", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("구간");
+            ImGui::TableSetupColumn("CPU");
+            ImGui::TableSetupColumn("GPU");
+            ImGui::TableHeadersRow();
+            for (const gfx::ProfilerZone& zone : zones) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                // 중첩된 구간은 들여써서 상위 구간과 구분한다.
+                ImGui::Text("%*s%s", static_cast<int>(zone.depth) * 2, "", zone.name);
+                ImGui::TableNextColumn();
+                ImGui::Text("%.3f", static_cast<double>(zone.cpuMilliseconds));
+                ImGui::TableNextColumn();
+                if (zone.hasGpu) {
+                    ImGui::Text("%.3f", static_cast<double>(zone.gpuMilliseconds));
+                } else {
+                    ImGui::TextDisabled("-");
+                }
+            }
+            ImGui::EndTable();
+        }
+    }
     ImGui::Separator();
 
     ImGui::SliderFloat("노출", &renderer.exposure, 0.05F, 8.0F, "%.2f");

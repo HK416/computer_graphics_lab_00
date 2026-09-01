@@ -222,7 +222,7 @@ void setFullViewport(VkCommandBuffer commandBuffer, VkExtent2D extent) {
 } // namespace
 
 Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& bindless, SDL_Window* window)
-    : context(context), geometry(geometry), bindless(bindless) {
+    : context(context), geometry(geometry), bindless(bindless), frameProfiler(context, FRAMES_IN_FLIGHT) {
     swapchain = std::make_unique<Swapchain>(context, window, vsync);
     currentDisplayExtent = swapchain->extent;
     currentRenderExtent = swapchain->extent;
@@ -1878,6 +1878,7 @@ void Renderer::recordCommands(Frame& frame,
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+    uint32_t frameZone = frameProfiler.begin("프레임 전체", commandBuffer);
 
     bool hasTranslucent = batches.draws[TRANSLUCENT_MODE][0].count + batches.draws[TRANSLUCENT_MODE][1].count > 0;
     oitTargetsValid = hasTranslucent;
@@ -1949,7 +1950,9 @@ void Renderer::recordCommands(Frame& frame,
 
     // 그림자 아틀라스는 장면 패스보다 먼저 채워야 한다.
     if (!shadowViews.empty()) {
+        uint32_t shadowZone = frameProfiler.begin("그림자", commandBuffer);
         recordShadowPass(commandBuffer, batches);
+        frameProfiler.end(shadowZone, commandBuffer);
     }
 
     imageBarrier(commandBuffer,
@@ -1974,10 +1977,14 @@ void Renderer::recordCommands(Frame& frame,
     VkDescriptorSet bindlessSet = bindless.set();
     bool pathTracing = usePathTracing && rayTracer != nullptr;
     if (pathTracing) {
+        uint32_t pathZone = frameProfiler.begin("경로 추적", commandBuffer);
         recordPathTracePass(commandBuffer, frame, scene);
+        frameProfiler.end(pathZone, commandBuffer);
     } else {
         if (useComputeCulling) {
+            uint32_t cullZone = frameProfiler.begin("컬링", commandBuffer);
             recordCullPass(commandBuffer, batches);
+            frameProfiler.end(cullZone, commandBuffer);
         }
 
         ScenePushConstants scenePushConstants{geometry.vertexBuffer.address,
@@ -2001,6 +2008,7 @@ void Renderer::recordCommands(Frame& frame,
         vkCmdBindIndexBuffer(commandBuffer, geometry.indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
 
         // 1) 불투명과 컷오프 경로를 HDR 색상 대상에 그린다.
+        uint32_t opaqueZone = frameProfiler.begin("불투명", commandBuffer);
         VkRenderingAttachmentInfo opaqueColor =
             colorAttachment(targets.color.view, VK_ATTACHMENT_LOAD_OP_CLEAR, {{0.05F, 0.05F, 0.07F, 1.0F}});
 
@@ -2022,9 +2030,11 @@ void Renderer::recordCommands(Frame& frame,
         setFullViewport(commandBuffer, currentRenderExtent);
         recordGeometryPass(commandBuffer, batches, false);
         vkCmdEndRendering(commandBuffer);
+        frameProfiler.end(opaqueZone, commandBuffer);
 
         if (hasTranslucent) {
             // 2) 반투명은 누적과 잔여 투과율 대상에 순서 독립으로 기록한다.
+            uint32_t oitZone = frameProfiler.begin("OIT", commandBuffer);
             imageBarrier(commandBuffer,
                          targets.oitAccumulation.handle,
                          VK_IMAGE_ASPECT_COLOR_BIT,
@@ -2072,8 +2082,10 @@ void Renderer::recordCommands(Frame& frame,
             setFullViewport(commandBuffer, currentRenderExtent);
             recordGeometryPass(commandBuffer, batches, true);
             vkCmdEndRendering(commandBuffer);
+            frameProfiler.end(oitZone, commandBuffer);
 
             // 3) 누적 결과를 HDR 색상 위에 합성한다.
+            uint32_t compositeZone = frameProfiler.begin("OIT 합성", commandBuffer);
             imageBarrier(commandBuffer,
                          targets.oitAccumulation.handle,
                          VK_IMAGE_ASPECT_COLOR_BIT,
@@ -2124,6 +2136,7 @@ void Renderer::recordCommands(Frame& frame,
                                &compositePushConstants);
             vkCmdDraw(commandBuffer, 3, 1, 0, 0);
             vkCmdEndRendering(commandBuffer);
+            frameProfiler.end(compositeZone, commandBuffer);
         }
 
         // 4) 이번 프레임 깊이로 HZB 를 만들어 다음 프레임 컬링에 쓴다.
@@ -2136,17 +2149,22 @@ void Renderer::recordCommands(Frame& frame,
                      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        uint32_t hzbZone = frameProfiler.begin("HZB", commandBuffer);
         recordHzbPass(commandBuffer);
+        frameProfiler.end(hzbZone, commandBuffer);
         // SSAO 도 같은 깊이를 읽는다. 결과는 다음 프레임의 셰이딩이 쓴다.
         //
         // ponytail: 한 프레임 늦은 깊이라 카메라가 빠르게 움직이면 차폐가 살짝 밀린다. 정확히
         // 하려면 불투명 깊이 선행 패스를 넣고 같은 프레임 안에서 계산해야 한다.
         if (useSsao) {
+            uint32_t ssaoZone = frameProfiler.begin("SSAO", commandBuffer);
             recordSsaoPass(commandBuffer, frame);
+            frameProfiler.end(ssaoZone, commandBuffer);
         }
     }
 
     // 5) HDR 색상을 톤 매핑해 표시 이미지에 옮긴다. 편집기 뷰포트가 이 이미지를 그대로 보여준다.
+    uint32_t tonemapZone = frameProfiler.begin("톤 매핑", commandBuffer);
     imageBarrier(commandBuffer,
                  targets.color.handle,
                  VK_IMAGE_ASPECT_COLOR_BIT,
@@ -2192,7 +2210,10 @@ void Renderer::recordCommands(Frame& frame,
     vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     vkCmdEndRendering(commandBuffer);
 
+    frameProfiler.end(tonemapZone, commandBuffer);
+
     // 6) 렌더 해상도의 톤 매핑 결과를 표시 해상도로 확대한다.
+    uint32_t upscaleZone = frameProfiler.begin("업스케일", commandBuffer);
     imageBarrier(commandBuffer,
                  targets.tonemapped.handle,
                  VK_IMAGE_ASPECT_COLOR_BIT,
@@ -2244,6 +2265,8 @@ void Renderer::recordCommands(Frame& frame,
     vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     vkCmdEndRendering(commandBuffer);
 
+    frameProfiler.end(upscaleZone, commandBuffer);
+
     // 7) 편집기 UI 를 스왑체인에 그린다. 오프스크린 대상들은 UI 가 샘플링할 수 있는 레이아웃으로 옮긴다.
     imageBarrier(commandBuffer,
                  targets.present.handle,
@@ -2264,7 +2287,9 @@ void Renderer::recordCommands(Frame& frame,
                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
 
+    uint32_t uiZone = frameProfiler.begin("UI", commandBuffer);
     recordUiPass(commandBuffer, imageIndex);
+    frameProfiler.end(uiZone, commandBuffer);
 
     if (!capturePath.empty()) {
         imageBarrier(commandBuffer,
@@ -2310,6 +2335,7 @@ void Renderer::recordCommands(Frame& frame,
                      0);
     }
 
+    frameProfiler.end(frameZone, commandBuffer);
     VK_CHECK(vkEndCommandBuffer(commandBuffer));
 }
 
@@ -2365,6 +2391,9 @@ void Renderer::drawFrame(const scene::Scene& scene) {
         VK_CHECK(vkWaitSemaphores(context.device, &waitInfo, UINT64_MAX));
     }
 
+    // 타임라인 대기를 통과했으므로 이 슬롯의 지난 쿼리 결과를 대기 없이 읽을 수 있다.
+    frameProfiler.collect();
+
     uint32_t imageIndex = 0;
     VkResult acquireResult = vkAcquireNextImageKHR(
         context.device, swapchain->handle, UINT64_MAX, frame.imageAvailable, VK_NULL_HANDLE, &imageIndex);
@@ -2376,7 +2405,9 @@ void Renderer::drawFrame(const scene::Scene& scene) {
         core::fatal("스왑체인 이미지 획득에 실패했습니다: {}", toString(acquireResult));
     }
 
+    uint32_t buildZone = frameProfiler.begin("그리기 명령 구성");
     FrameBatches batches = buildDrawCommands(frame, scene);
+    frameProfiler.end(buildZone);
 
     if (!capturePath.empty()) {
         VkDeviceSize required = static_cast<VkDeviceSize>(swapchain->extent.width) * swapchain->extent.height * 4;
@@ -2388,7 +2419,10 @@ void Renderer::drawFrame(const scene::Scene& scene) {
     }
 
     VK_CHECK(vkResetCommandPool(context.device, frame.commandPool, 0));
+    uint32_t recordZone = frameProfiler.begin("명령 기록");
     recordCommands(frame, imageIndex, batches, scene);
+    frameProfiler.end(recordZone);
+    frameProfiler.endFrame();
 
     VkSemaphoreSubmitInfo waitSemaphore{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     waitSemaphore.semaphore = frame.imageAvailable;
