@@ -25,6 +25,10 @@ int main(int argc, char* argv[]) {
             options.lodLevel = static_cast<uint32_t>(std::atoi(argv[++i]));
         } else if (argument == "--lod-error" && i + 1 < argc) {
             options.lodErrorThreshold = static_cast<float>(std::atof(argv[++i]));
+        } else if (argument == "--neural-lod") {
+            options.neuralLod = true;
+        } else if (argument == "--triangle-budget" && i + 1 < argc) {
+            options.triangleBudget = static_cast<float>(std::atof(argv[++i]));
         }
     }
 

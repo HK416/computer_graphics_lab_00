@@ -20,11 +20,13 @@ layout(push_constant) uniform CullPushConstants {
     uint hzbTexture;
     float hzbMaxLevel;
     vec2 hzbSize;
+    LodNetworkBuffer network;
 } cull;
 
 #define CULL_FLAG_FRUSTUM 1u
 #define CULL_FLAG_CONE 2u
 #define CULL_FLAG_OCCLUSION 4u
+#define CULL_FLAG_NEURAL_LOD 8u
 
 void main() {
     uint instanceIndex = gl_WorkGroupID.x;
@@ -38,13 +40,22 @@ void main() {
 
     vec4 planes[5];
     extractFrustumPlanes(camera.viewProjection, planes);
+
+    bool useNetwork = (cull.flags & CULL_FLAG_NEURAL_LOD) != 0u;
+    LodNetwork network = cull.network.item;
     mat3 normalMatrix = mat3(instance.normalMatrix);
 
     for (uint i = gl_LocalInvocationIndex; i < mesh.meshletCount; i += gl_WorkGroupSize.x) {
         Meshlet meshlet = cull.meshlets.items[mesh.meshletOffset + i];
 
-        if (!selectLod(meshlet, instance.model, camera.position.xyz, camera.parameters.y, camera.parameters.z,
-                       camera.parameters.w)) {
+        if (!selectLod(meshlet,
+                       instance.model,
+                       camera.position.xyz,
+                       camera.parameters.y,
+                       camera.parameters.z,
+                       camera.parameters.w,
+                       useNetwork,
+                       network)) {
             continue;
         }
 

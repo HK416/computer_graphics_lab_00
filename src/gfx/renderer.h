@@ -9,6 +9,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include "gfx/lod_network.h"
 #include "gfx/resources.h"
 
 struct SDL_Window;
@@ -110,6 +111,13 @@ public:
     bool frustumCulling = true;
     bool coneCulling = true;
     bool occlusionCulling = true;
+
+    // 신경망이 LOD 임계값을 보정해 삼각형 예산을 맞춘다.
+    bool useNeuralLod = false;
+    bool trainLodNetwork = true;
+    float triangleBudget = 60000.0F;
+    LodNetwork lodNetwork;
+    uint32_t lastSelectedTriangles = 0;
     // mesh shader 미지원 장치에서는 켤 수 없다.
     bool useMeshShader = false;
     bool meshShaderAvailable() const { return meshShaderPipelines[0] != VK_NULL_HANDLE; }
@@ -130,6 +138,7 @@ private:
         // 컴퓨트 컬링이 채우는 meshlet 단위 간접 그리기 명령과 버킷별 개수.
         Buffer meshletDrawBuffer;
         Buffer drawCountBuffer;
+        Buffer lodNetworkBuffer;
         uint32_t instanceCapacity = 0;
         uint32_t groupCapacity = 0;
         uint32_t meshletDrawCapacity = 0;
@@ -148,6 +157,7 @@ private:
     void createCullPipeline();
     void recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches& batches);
     void recordHzbPass(VkCommandBuffer commandBuffer);
+    void updateLodNetwork(const scene::Scene& scene, Frame& frame, float projectionScale);
     // 장면을 순회하며 인스턴스와 간접 그리기 명령을 재질 경로별 구간으로 채운다.
     FrameBatches buildDrawCommands(Frame& frame, const scene::Scene& scene);
     void recordCommands(Frame& frame, uint32_t imageIndex, const FrameBatches& batches);

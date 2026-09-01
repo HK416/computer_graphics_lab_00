@@ -27,6 +27,8 @@ struct Options {
     // AUTOMATIC_LOD 면 오차 기반 자동 선정을 쓴다.
     uint32_t lodLevel = AUTOMATIC_LOD;
     float lodErrorThreshold = 1.0F;
+    bool neuralLod = false;
+    float triangleBudget = 0.0F;
 };
 
 class Application {

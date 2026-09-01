@@ -75,11 +75,15 @@ struct CullPushConstants {
     uint32_t hzbTexture;
     float hzbMaxLevel;
     float hzbSize[2];
+    VkDeviceAddress network;
 };
 
 constexpr uint32_t CULL_FLAG_FRUSTUM = 1;
 constexpr uint32_t CULL_FLAG_CONE = 2;
 constexpr uint32_t CULL_FLAG_OCCLUSION = 4;
+constexpr uint32_t CULL_FLAG_NEURAL_LOD = 8;
+// 학습 표본 수. 이보다 많으면 일정 간격으로 건너뛰며 뽑는다.
+constexpr uint32_t MAX_LOD_SAMPLES = 1024;
 constexpr uint32_t BUCKET_COUNT = ALPHA_MODE_COUNT * 2;
 
 struct ScenePushConstants {
@@ -214,6 +218,7 @@ Renderer::~Renderer() {
     vkDestroySemaphore(context.device, frameTimeline, nullptr);
     destroyPresentSemaphores();
     for (Frame& frame : frames) {
+        destroyBuffer(context, frame.lodNetworkBuffer);
         destroyBuffer(context, frame.drawCountBuffer);
         destroyBuffer(context, frame.meshletDrawBuffer);
         destroyBuffer(context, frame.meshTaskIndirectBuffer);
@@ -443,6 +448,13 @@ void Renderer::reserveMeshletGroups(Frame& frame, uint32_t groupCount) {
 }
 
 void Renderer::reserveMeshletDraws(Frame& frame, uint32_t drawCount) {
+    if (frame.lodNetworkBuffer.handle == VK_NULL_HANDLE) {
+        frame.lodNetworkBuffer = createBuffer(context,
+                                              sizeof(GpuLodNetwork),
+                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                              MemoryLocation::HOST_WRITE,
+                                              "LOD 신경망 가중치");
+    }
     if (frame.drawCountBuffer.handle == VK_NULL_HANDLE) {
         frame.drawCountBuffer = createBuffer(context,
                                              sizeof(uint32_t) * BUCKET_COUNT,
@@ -972,6 +984,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                                    lodErrorThreshold,
                                    automaticLod ? -1.0F : static_cast<float>(lodLevel)};
 
+    updateLodNetwork(scene, frame, projectionScale);
+
     return batches;
 }
 
@@ -1049,6 +1063,75 @@ void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer, const FrameBatc
     }
 }
 
+void Renderer::updateLodNetwork(const scene::Scene& scene, Frame& frame, float projectionScale) {
+    // 가중치는 매 프레임 올린다. 학습을 꺼도 GPU 가 마지막 가중치를 그대로 쓰게 된다.
+    auto uploadWeights = [&frame, this]() {
+        std::memcpy(frame.lodNetworkBuffer.mapped, &lodNetwork.weights(), sizeof(GpuLodNetwork));
+    };
+    if (!useNeuralLod || !trainLodNetwork) {
+        uploadWeights();
+        return;
+    }
+
+    uint32_t candidateCount = 0;
+    for (const scene::Object& object : scene.objects) {
+        if (object.visible && object.meshIndex < geometry.meshCount()) {
+            candidateCount += geometry.mesh(object.meshIndex).meshletCount;
+        }
+    }
+    if (candidateCount == 0) {
+        uploadWeights();
+        return;
+    }
+
+    uint32_t stride = std::max(candidateCount / MAX_LOD_SAMPLES, 1U);
+    std::vector<LodSample> samples;
+    samples.reserve(std::min(candidateCount, MAX_LOD_SAMPLES) + 1);
+
+    glm::vec3 cameraPosition = scene.camera.position;
+    uint32_t candidateIndex = 0;
+    for (const scene::Object& object : scene.objects) {
+        if (!object.visible || object.meshIndex >= geometry.meshCount()) {
+            continue;
+        }
+        const GpuMesh& mesh = geometry.mesh(object.meshIndex);
+        glm::mat4 model = object.transform.matrix();
+        float modelScale = std::sqrt(std::max({glm::dot(glm::vec3(model[0]), glm::vec3(model[0])),
+                                               glm::dot(glm::vec3(model[1]), glm::vec3(model[1])),
+                                               glm::dot(glm::vec3(model[2]), glm::vec3(model[2]))}));
+
+        for (uint32_t i = 0; i < mesh.meshletCount; ++i, ++candidateIndex) {
+            if (candidateIndex % stride != 0) {
+                continue;
+            }
+            const GpuMeshlet& meshlet = geometry.meshlet(mesh.meshletOffset + i);
+            // 최상위 meshlet 은 오차가 무한대라 학습 표본에서 뺀다.
+            if (!std::isfinite(meshlet.error) || meshlet.error <= 0.0F) {
+                continue;
+            }
+
+            glm::vec3 center = glm::vec3(model * glm::vec4{glm::vec3(meshlet.errorSphere), 1.0F});
+            float radius = meshlet.errorSphere.w * modelScale;
+            float viewDistance = std::max(glm::distance(center, cameraPosition) - radius, 1e-3F);
+            float projected = meshlet.error * projectionScale / viewDistance;
+
+            LodSample sample;
+            sample.features[0] = std::log2(std::max(viewDistance, 1e-3F)) / 8.0F;
+            sample.features[1] = std::log2(std::max(radius, 1e-6F)) / 8.0F;
+            sample.features[2] = std::log2(std::max(meshlet.error, 1e-6F)) / 8.0F;
+            sample.features[3] = std::log2(std::max(projected, 1e-6F)) / 8.0F;
+            sample.projectedError = projected;
+            sample.triangleCount = static_cast<float>(meshlet.triangleCount);
+            samples.push_back(sample);
+        }
+    }
+
+    // 표본은 전체의 일부이므로 예산도 같은 비율로 줄인다.
+    float sampleRatio = static_cast<float>(samples.size() * stride) / static_cast<float>(candidateCount);
+    lodNetwork.train(samples, lodErrorThreshold, triangleBudget * std::max(sampleRatio, 1e-3F));
+    uploadWeights();
+}
+
 void Renderer::recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches& batches) {
     Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];
 
@@ -1082,6 +1165,10 @@ void Renderer::recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches&
     pushConstants.hzbMaxLevel = static_cast<float>(targets.hzbStorageSlots.size() - 1);
     pushConstants.hzbSize[0] = static_cast<float>(targets.hzbExtent.width);
     pushConstants.hzbSize[1] = static_cast<float>(targets.hzbExtent.height);
+    pushConstants.network = frame.lodNetworkBuffer.address;
+    if (useNeuralLod) {
+        pushConstants.flags |= CULL_FLAG_NEURAL_LOD;
+    }
 
     VkDescriptorSet cullBindlessSet = bindless.set();
     vkCmdBindDescriptorSets(

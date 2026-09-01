@@ -455,6 +455,22 @@ void Editor::buildRenderSettings(float deltaSeconds) {
     ImGui::Checkbox("자동 LOD 선정", &renderer.automaticLod);
     if (renderer.automaticLod) {
         ImGui::SliderFloat("허용 화면 오차", &renderer.lodErrorThreshold, 0.1F, 32.0F, "%.2f px");
+
+        ImGui::Checkbox("신경망 보정", &renderer.useNeuralLod);
+        if (renderer.useNeuralLod) {
+            ImGui::Checkbox("학습", &renderer.trainLodNetwork);
+            ImGui::SameLine();
+            if (ImGui::Button("가중치 초기화")) {
+                renderer.lodNetwork.reset();
+            }
+            ImGui::SliderFloat(
+                "삼각형 예산", &renderer.triangleBudget, 1000.0F, 500000.0F, "%.0f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat(
+                "학습률", &renderer.lodNetwork.learningRate, 0.001F, 0.5F, "%.3f", ImGuiSliderFlags_Logarithmic);
+            ImGui::Text("손실 %.5f, 기대 삼각형 %.0f",
+                        static_cast<double>(renderer.lodNetwork.lastLoss()),
+                        static_cast<double>(renderer.lodNetwork.lastSoftTriangleCount()));
+        }
     } else {
         int lodLevel = static_cast<int>(renderer.lodLevel);
         int maxLod = static_cast<int>(geometryStore != nullptr ? geometryStore->maxLodCount() : 1) - 1;

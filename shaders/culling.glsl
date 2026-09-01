@@ -1,6 +1,7 @@
 #ifndef CULLING_GLSL
 #define CULLING_GLSL
 
+#include "lod_network.glsl"
 #include "scene_types.glsl"
 
 // 뷰 프로젝션 행렬에서 절두체 평면을 뽑는다 (Gribb-Hartmann).
@@ -60,15 +61,40 @@ float projectedError(vec3 cameraPosition, float projectionScale, vec4 sphere, fl
 
 // 자신의 오차는 허용되고 부모의 오차는 허용되지 않는 meshlet 만 그린다. 같은 그룹은 같은 판정을
 // 받으므로 서로 다른 단계가 맞닿아도 틈이 생기지 않는다.
-bool selectLod(
-    Meshlet meshlet, mat4 model, vec3 cameraPosition, float projectionScale, float threshold, float forcedLevel) {
+// 신경망 보정을 넣어도 입력이 (경계 구, 오차) 쌍뿐이므로, 자식의 부모 판정과 부모의 자기 판정이
+// 같은 값을 내놓아 LOD 경계에 틈이 생기지 않는다.
+float biasedProjectedError(vec3 cameraPosition,
+                           float projectionScale,
+                           vec4 sphere,
+                           float error,
+                           bool useNetwork,
+                           LodNetwork network) {
+    float projected = projectedError(cameraPosition, projectionScale, sphere, error);
+    if (!useNetwork || projected > 1.0e37) {
+        return projected;
+    }
+    float viewDistance = max(length(sphere.xyz - cameraPosition) - sphere.w, 1e-3);
+    float features[LOD_NETWORK_INPUTS];
+    lodNetworkFeatures(viewDistance, sphere.w, error, projected, features);
+    return projected * exp(lodNetworkBias(network, features));
+}
+
+bool selectLod(Meshlet meshlet,
+               mat4 model,
+               vec3 cameraPosition,
+               float projectionScale,
+               float threshold,
+               float forcedLevel,
+               bool useNetwork,
+               LodNetwork network) {
     if (forcedLevel >= 0.0) {
         return float(meshlet.level) == forcedLevel;
     }
     vec4 ownSphere = transformBoundingSphere(model, meshlet.errorSphere);
     vec4 parentSphere = transformBoundingSphere(model, meshlet.parentSphere);
-    float own = projectedError(cameraPosition, projectionScale, ownSphere, meshlet.error);
-    float parent = projectedError(cameraPosition, projectionScale, parentSphere, meshlet.parentError);
+    float own = biasedProjectedError(cameraPosition, projectionScale, ownSphere, meshlet.error, useNetwork, network);
+    float parent =
+        biasedProjectedError(cameraPosition, projectionScale, parentSphere, meshlet.parentError, useNetwork, network);
     return own <= threshold && parent > threshold;
 }
 

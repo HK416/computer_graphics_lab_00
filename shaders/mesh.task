@@ -31,7 +31,17 @@ void main() {
         vec4 planes[5];
         extractFrustumPlanes(pushConstants.camera.item.viewProjection, planes);
 
-        bool visible = sphereInFrustum(planes, sphere.xyz, sphere.w) &&
+        // 태스크 셰이더 경로에서는 아직 신경망 보정을 쓰지 않는다.
+        LodNetwork emptyNetwork;
+        bool visible = selectLod(meshlet,
+                                 instance.model,
+                                 pushConstants.camera.item.position.xyz,
+                                 pushConstants.camera.item.parameters.y,
+                                 pushConstants.camera.item.parameters.z,
+                                 pushConstants.camera.item.parameters.w,
+                                 false,
+                                 emptyNetwork) &&
+                       sphereInFrustum(planes, sphere.xyz, sphere.w) &&
                        coneVisible(sphere.xyz, sphere.w, coneAxis, meshlet.cone.w,
                                    pushConstants.camera.item.position.xyz);
         if (visible) {

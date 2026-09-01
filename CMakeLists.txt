@@ -117,6 +117,7 @@ add_executable(cg_lab
     src/gfx/context.cpp
     src/gfx/bindless.cpp
     src/gfx/geometry.cpp
+    src/gfx/lod_network.cpp
     src/gfx/renderer.cpp
     src/gfx/resources.cpp
     src/gfx/stb_impl.cpp
@@ -163,3 +164,14 @@ target_compile_definitions(cg_lab PRIVATE
 # VS Code 등 편집기가 인클루드 경로를 찾을 수 있도록 컴파일 데이터베이스를 소스 루트에 링크한다.
 file(CREATE_LINK "${CMAKE_BINARY_DIR}/compile_commands.json" "${CMAKE_SOURCE_DIR}/compile_commands.json"
      SYMBOLIC COPY_ON_ERROR)
+
+# LOD 신경망의 역전파가 실제로 손실을 줄이는지 확인하는 자체 점검.
+enable_testing()
+add_executable(cg_lab_tests tests/lod_network_test.cpp src/gfx/lod_network.cpp)
+target_include_directories(cg_lab_tests PRIVATE src)
+if(MSVC)
+    target_compile_options(cg_lab_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(cg_lab_tests PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME lod_network COMMAND cg_lab_tests)

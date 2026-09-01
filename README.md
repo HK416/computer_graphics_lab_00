@@ -18,7 +18,7 @@ cmake --build --preset debug
 ./build/debug/cg_lab
 ```
 
-`release` 프리셋은 RelWithDebInfo 로 구성된다.
+`release` 프리셋은 RelWithDebInfo 로 구성된다. `ctest --test-dir build/debug` 로 자체 점검을 돌린다.
 
 ## 실행 인자
 
@@ -29,6 +29,8 @@ cmake --build --preset debug
 | `--debug <n>` | 디버그 뷰: 0 셰이딩, 1 meshlet, 2 노멀, 3 UV, 4 깊이, 5 LOD |
 | `--lod <n>` | 고정 LOD 단계. 주지 않으면 오차 기반 자동 선정 |
 | `--lod-error <px>` | 자동 선정이 허용할 화면 공간 오차 |
+| `--neural-lod` | 신경망 LOD 임계값 보정 사용 |
+| `--triangle-budget <n>` | 신경망이 맞출 삼각형 예산 |
 
 장면 뷰 위에서 마우스 오른쪽 버튼을 누른 채 WASD/QE 로 카메라를 움직인다. 장면 전환은 계층 패널의
 드롭다운이나 숫자 키로 한다.

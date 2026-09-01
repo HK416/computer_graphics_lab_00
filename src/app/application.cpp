@@ -73,6 +73,10 @@ Application::Application(const Options& options) : options(options) {
         renderer->lodLevel = options.lodLevel;
     }
     renderer->lodErrorThreshold = options.lodErrorThreshold;
+    renderer->useNeuralLod = options.neuralLod;
+    if (options.triangleBudget > 0.0F) {
+        renderer->triangleBudget = options.triangleBudget;
+    }
     renderer->setUiCallback([this](VkCommandBuffer commandBuffer) { editorUi->record(commandBuffer); });
 }
 

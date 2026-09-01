@@ -97,6 +97,7 @@ public:
     uint32_t meshCount() const { return static_cast<uint32_t>(meshes.size()); }
     uint32_t meshletCount() const { return static_cast<uint32_t>(meshlets.size()); }
     const GpuMeshLod& lod(uint32_t index) const { return lods[index]; }
+    const GpuMeshlet& meshlet(uint32_t index) const { return meshlets[index]; }
     uint32_t maxLodCount() const { return maxLods; }
 
     Buffer vertexBuffer;
