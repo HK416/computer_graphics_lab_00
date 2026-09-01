@@ -38,6 +38,7 @@ constexpr size_t TRANSLUCENT_MODE = 2;
 struct GpuCamera {
     glm::mat4 viewProjection;
     glm::vec4 position;
+    glm::vec4 parameters; // x: 근평면
 };
 
 struct ScenePushConstants {
@@ -46,6 +47,10 @@ struct ScenePushConstants {
     VkDeviceAddress instances;
     VkDeviceAddress materials;
     VkDeviceAddress camera;
+    VkDeviceAddress meshlets;
+    VkDeviceAddress meshletTriangles;
+    VkDeviceAddress vertexMeshlets;
+    uint32_t debugMode;
 };
 
 struct CompositePushConstants {
@@ -617,6 +622,7 @@ DrawBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene)
     float aspect = static_cast<float>(currentRenderExtent.width) / static_cast<float>(currentRenderExtent.height);
     camera->viewProjection = scene.camera.projectionMatrix(aspect) * scene.camera.viewMatrix();
     camera->position = glm::vec4{scene.camera.position, 1.0F};
+    camera->parameters = glm::vec4{scene.camera.nearPlane, 0.0F, 0.0F, 0.0F};
 
     return batches;
 }
@@ -697,7 +703,11 @@ void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, const DrawBatch
                                           geometry.meshBuffer.address,
                                           frame.instanceBuffer.address,
                                           geometry.materialBuffer.address,
-                                          frame.cameraBuffer.address};
+                                          frame.cameraBuffer.address,
+                                          geometry.meshletBuffer.address,
+                                          geometry.meshletTriangleBuffer.address,
+                                          geometry.vertexMeshletBuffer.address,
+                                          debugMode};
     VkDescriptorSet bindlessSet = bindless.set();
     vkCmdBindDescriptorSets(
         commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);

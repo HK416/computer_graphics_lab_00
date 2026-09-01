@@ -27,17 +27,15 @@ void buildMeshlets(Mesh& mesh) {
     meshopt_optimizeVertexCache(mesh.indices.data(), mesh.indices.data(), indexCount, vertexCount);
     meshopt_optimizeOverdraw(
         mesh.indices.data(), mesh.indices.data(), indexCount, positions, vertexCount, sizeof(Vertex), 1.05F);
-    meshopt_optimizeVertexFetch(
-        mesh.vertices.data(), mesh.indices.data(), indexCount, mesh.vertices.data(), vertexCount, sizeof(Vertex));
 
     size_t maxMeshlets = meshopt_buildMeshletsBound(indexCount, MAX_MESHLET_VERTICES, MAX_MESHLET_TRIANGLES);
     std::vector<meshopt_Meshlet> rawMeshlets(maxMeshlets);
-    mesh.meshletVertices.resize(maxMeshlets * MAX_MESHLET_VERTICES);
-    mesh.meshletTriangles.resize(maxMeshlets * MAX_MESHLET_TRIANGLES * 3);
+    std::vector<uint32_t> meshletVertices(maxMeshlets * MAX_MESHLET_VERTICES);
+    std::vector<uint8_t> meshletTriangles(maxMeshlets * MAX_MESHLET_TRIANGLES * 3);
 
     size_t meshletCount = meshopt_buildMeshlets(rawMeshlets.data(),
-                                                mesh.meshletVertices.data(),
-                                                mesh.meshletTriangles.data(),
+                                                meshletVertices.data(),
+                                                meshletTriangles.data(),
                                                 mesh.indices.data(),
                                                 indexCount,
                                                 positions,
@@ -49,23 +47,26 @@ void buildMeshlets(Mesh& mesh) {
     if (meshletCount == 0) {
         return;
     }
-
-    const meshopt_Meshlet& last = rawMeshlets[meshletCount - 1];
-    mesh.meshletVertices.resize(last.vertex_offset + last.vertex_count);
-    mesh.meshletTriangles.resize(last.triangle_offset + ((last.triangle_count * 3 + 3) & ~3U));
     rawMeshlets.resize(meshletCount);
 
+    // meshlet 마다 정점을 따로 소유하도록 정점 버퍼를 다시 만든다. 경계 정점이 조금 중복되지만,
+    // mesh shader 경로가 지역 인덱스를 그대로 쓸 수 있고 고전 경로에서도 flat 보간으로 meshlet 을
+    // 프래그먼트까지 내릴 수 있다. gl_PrimitiveID 는 Geometry capability 를 요구해 쓰지 않는다.
+    std::vector<Vertex> rebuiltVertices;
+    std::vector<uint32_t> rebuiltIndices;
+    rebuiltVertices.reserve(vertexCount);
+    rebuiltIndices.reserve(indexCount);
+
+    mesh.meshlets.clear();
     mesh.meshlets.reserve(meshletCount);
-    // 고전 경로도 meshlet 순서로 그리도록 인덱스 버퍼를 다시 만든다. gl_PrimitiveID 가 곧 meshlet 조회 키가 된다.
-    std::vector<uint32_t> reordered;
-    reordered.reserve(indexCount);
-    mesh.triangleMeshlets.clear();
-    mesh.triangleMeshlets.reserve(indexCount / 3);
+    mesh.meshletTriangles.clear();
+    mesh.vertexMeshlets.clear();
+    mesh.vertexMeshlets.reserve(vertexCount);
 
     for (size_t i = 0; i < meshletCount; ++i) {
         const meshopt_Meshlet& raw = rawMeshlets[i];
-        meshopt_Bounds bounds = meshopt_computeMeshletBounds(&mesh.meshletVertices[raw.vertex_offset],
-                                                             &mesh.meshletTriangles[raw.triangle_offset],
+        meshopt_Bounds bounds = meshopt_computeMeshletBounds(&meshletVertices[raw.vertex_offset],
+                                                             &meshletTriangles[raw.triangle_offset],
                                                              raw.triangle_count,
                                                              positions,
                                                              vertexCount,
@@ -74,22 +75,26 @@ void buildMeshlets(Mesh& mesh) {
         Meshlet meshlet;
         meshlet.boundingSphere = glm::vec4{bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius};
         meshlet.cone = glm::vec4{bounds.cone_axis[0], bounds.cone_axis[1], bounds.cone_axis[2], bounds.cone_cutoff};
-        meshlet.vertexOffset = raw.vertex_offset;
-        meshlet.triangleOffset = raw.triangle_offset;
+        meshlet.vertexOffset = static_cast<uint32_t>(rebuiltVertices.size());
+        meshlet.triangleOffset = static_cast<uint32_t>(mesh.meshletTriangles.size());
         meshlet.vertexCount = raw.vertex_count;
         meshlet.triangleCount = raw.triangle_count;
-        mesh.meshlets.push_back(meshlet);
 
-        for (uint32_t triangle = 0; triangle < raw.triangle_count; ++triangle) {
-            for (uint32_t corner = 0; corner < 3; ++corner) {
-                uint32_t local = mesh.meshletTriangles[raw.triangle_offset + triangle * 3 + corner];
-                reordered.push_back(mesh.meshletVertices[raw.vertex_offset + local]);
-            }
-            mesh.triangleMeshlets.push_back(static_cast<uint32_t>(i));
+        for (uint32_t v = 0; v < raw.vertex_count; ++v) {
+            rebuiltVertices.push_back(mesh.vertices[meshletVertices[raw.vertex_offset + v]]);
+            mesh.vertexMeshlets.push_back(static_cast<uint32_t>(i));
         }
+        for (uint32_t index = 0; index < raw.triangle_count * 3; ++index) {
+            uint8_t local = meshletTriangles[raw.triangle_offset + index];
+            mesh.meshletTriangles.push_back(local);
+            rebuiltIndices.push_back(meshlet.vertexOffset + local);
+        }
+
+        mesh.meshlets.push_back(meshlet);
     }
 
-    mesh.indices = std::move(reordered);
+    mesh.vertices = std::move(rebuiltVertices);
+    mesh.indices = std::move(rebuiltIndices);
 }
 
 } // namespace asset

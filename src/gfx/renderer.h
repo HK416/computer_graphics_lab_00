@@ -80,6 +80,8 @@ public:
 
     float exposure = 1.0F;
     bool wireframe = false;
+    // shaders/scene_data.glsl 의 DEBUG_MODE_* 값.
+    uint32_t debugMode = 0;
 
     bool vsyncEnabled() const { return vsync; }
     void setVsync(bool enabled);

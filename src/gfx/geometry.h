@@ -21,6 +21,18 @@ struct GpuMesh {
     uint32_t indexCount;
     int32_t vertexOffset;
     uint32_t materialIndex;
+    uint32_t meshletOffset;
+    uint32_t meshletCount;
+    uint32_t padding[2];
+};
+
+struct GpuMeshlet {
+    glm::vec4 boundingSphere; // xyz 중심, w 반지름
+    glm::vec4 cone;           // xyz 법선 원뿔 축, w 컷오프
+    uint32_t vertexOffset;    // 전역 정점 버퍼 기준
+    uint32_t triangleOffset;  // 전역 meshlet 삼각형 버퍼 기준
+    uint32_t vertexCount;
+    uint32_t triangleCount;
 };
 
 struct GpuMaterial {
@@ -65,17 +77,26 @@ public:
     const asset::Material& material(uint32_t index) const { return sourceMaterials[index]; }
     const std::string& meshName(uint32_t index) const { return meshNames[index]; }
     uint32_t meshCount() const { return static_cast<uint32_t>(meshes.size()); }
+    uint32_t meshletCount() const { return static_cast<uint32_t>(meshlets.size()); }
 
     Buffer vertexBuffer;
     Buffer indexBuffer;
     Buffer meshBuffer;
     Buffer materialBuffer;
+    Buffer meshletBuffer;
+    // meshlet 안의 지역 정점 인덱스. 8비트 저장을 요구하지 않으려고 uint32 로 펼쳐 둔다.
+    Buffer meshletTriangleBuffer;
+    // 정점마다 속한 전역 meshlet 번호.
+    Buffer vertexMeshletBuffer;
 
 private:
     Context& context;
     std::vector<asset::Vertex> vertices;
     std::vector<uint32_t> indices;
     std::vector<GpuMesh> meshes;
+    std::vector<GpuMeshlet> meshlets;
+    std::vector<uint32_t> meshletTriangles;
+    std::vector<uint32_t> vertexMeshlets;
     std::vector<GpuMaterial> materials;
     std::vector<asset::Material> sourceMaterials;
     std::vector<std::string> meshNames;

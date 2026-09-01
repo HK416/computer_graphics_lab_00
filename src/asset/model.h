@@ -53,7 +53,7 @@ struct Vertex {
 struct Meshlet {
     glm::vec4 boundingSphere{0.0F}; // xyz 중심, w 반지름
     glm::vec4 cone{0.0F};           // xyz 법선 원뿔 축, w 컷오프
-    uint32_t vertexOffset = 0;      // Mesh::meshletVertices 기준
+    uint32_t vertexOffset = 0;      // Mesh::vertices 기준. meshlet 마다 정점을 따로 소유한다.
     uint32_t triangleOffset = 0;    // Mesh::meshletTriangles 기준
     uint32_t vertexCount = 0;
     uint32_t triangleCount = 0;
@@ -66,10 +66,10 @@ struct Mesh {
     std::vector<uint32_t> indices;
 
     std::vector<Meshlet> meshlets;
-    std::vector<uint32_t> meshletVertices;
+    // meshlet 안에서만 쓰는 지역 정점 인덱스. mesh shader 경로가 그대로 쓴다.
     std::vector<uint8_t> meshletTriangles;
-    // 삼각형마다 속한 meshlet 번호. 고전 경로의 meshlet 시각화에 쓴다.
-    std::vector<uint32_t> triangleMeshlets;
+    // 정점마다 속한 meshlet 번호. flat 보간으로 프래그먼트까지 내려 시각화에 쓴다.
+    std::vector<uint32_t> vertexMeshlets;
     glm::vec3 boundsCenter{0.0F};
     float boundsRadius = 0.0F;
     uint32_t materialIndex = 0;

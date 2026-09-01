@@ -443,6 +443,12 @@ void Editor::buildRenderSettings(float deltaSeconds) {
     ImGui::SliderFloat("노출", &renderer.exposure, 0.05F, 8.0F, "%.2f");
     ImGui::Checkbox("와이어프레임", &renderer.wireframe);
 
+    static constexpr const char* DEBUG_MODE_NAMES[] = {"셰이딩", "meshlet", "노멀", "UV", "깊이"};
+    int debugMode = static_cast<int>(renderer.debugMode);
+    if (ImGui::Combo("디버그 뷰", &debugMode, DEBUG_MODE_NAMES, IM_ARRAYSIZE(DEBUG_MODE_NAMES))) {
+        renderer.debugMode = static_cast<uint32_t>(debugMode);
+    }
+
     bool vsync = renderer.vsyncEnabled();
     if (ImGui::Checkbox("수직 동기화", &vsync)) {
         renderer.setVsync(vsync);

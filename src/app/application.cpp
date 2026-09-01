@@ -67,6 +67,7 @@ Application::Application(const Options& options) : options(options) {
     loadScenes();
     renderer = std::make_unique<gfx::Renderer>(*context, *geometry, *bindless, window);
     editorUi = std::make_unique<editor::Editor>(*context, *renderer, window);
+    renderer->debugMode = options.debugMode;
     renderer->setUiCallback([this](VkCommandBuffer commandBuffer) { editorUi->record(commandBuffer); });
 }
 

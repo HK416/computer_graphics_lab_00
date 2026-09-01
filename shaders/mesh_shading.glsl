@@ -9,6 +9,7 @@ layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec4 inTangent;
 layout(location = 3) in vec2 inUv;
 layout(location = 4) flat in uint inMaterialIndex;
+layout(location = 5) flat in uint inMeshletIndex;
 
 // 재질 경로별로 파이프라인을 나누어, 불투명 경로에서는 discard 자체가 컴파일에서 사라지게 한다.
 layout(constant_id = 0) const uint ALPHA_MODE_VARIANT = 0;

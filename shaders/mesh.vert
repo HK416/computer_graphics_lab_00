@@ -6,6 +6,7 @@ layout(location = 1) out vec3 outNormal;
 layout(location = 2) out vec4 outTangent;
 layout(location = 3) out vec2 outUv;
 layout(location = 4) flat out uint outMaterialIndex;
+layout(location = 5) flat out uint outMeshletIndex;
 
 void main() {
     Instance instance = pushConstants.instances.items[gl_InstanceIndex];
@@ -21,4 +22,5 @@ void main() {
     outTangent = vec4(normalMatrix * vertex.tangent.xyz, vertex.tangent.w);
     outUv = vertex.uv;
     outMaterialIndex = mesh.materialIndex;
+    outMeshletIndex = pushConstants.vertexMeshlets.items[gl_VertexIndex];
 }

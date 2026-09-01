@@ -19,6 +19,8 @@ int main(int argc, char* argv[]) {
             options.screenshotPath = argv[++i];
         } else if (argument == "--scene" && i + 1 < argc) {
             options.initialScene = static_cast<size_t>(std::atoi(argv[++i]));
+        } else if (argument == "--debug" && i + 1 < argc) {
+            options.debugMode = static_cast<uint32_t>(std::atoi(argv[++i]));
         }
     }
 
