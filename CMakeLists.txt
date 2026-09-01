@@ -82,7 +82,10 @@ set(shader_sources
     shaders/mesh.task
     shaders/mesh.mesh
     shaders/cull_meshlets.comp
-    shaders/hzb_reduce.comp)
+    shaders/hzb_reduce.comp
+    shaders/pathtrace.rgen
+    shaders/pathtrace.rmiss
+    shaders/pathtrace.rchit)
 
 set(shader_binaries)
 foreach(shader IN LISTS shader_sources)
@@ -118,6 +121,7 @@ add_executable(cg_lab
     src/gfx/bindless.cpp
     src/gfx/geometry.cpp
     src/gfx/lod_network.cpp
+    src/gfx/raytracing.cpp
     src/gfx/renderer.cpp
     src/gfx/resources.cpp
     src/gfx/stb_impl.cpp

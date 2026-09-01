@@ -30,6 +30,9 @@ public:
     // 컴퓨트가 쓰는 스토리지 이미지. 슬롯 번호는 이미지 배열과 별개로 센다.
     uint32_t addStorageImage(VkImageView view);
     void updateStorageImage(uint32_t slot, VkImageView view);
+    // rgba32f 로 쓰는 스토리지 이미지는 포맷 한정자가 달라 배열을 따로 둔다.
+    uint32_t addStorageImageRgba(VkImageView view);
+    void updateStorageImageRgba(uint32_t slot, VkImageView view);
 
     VkDescriptorSetLayout layout() const { return descriptorSetLayout; }
     VkDescriptorSet set() const { return descriptorSet; }
@@ -46,6 +49,7 @@ private:
     uint32_t imageCount = 0;
     uint32_t storageCapacity = 0;
     uint32_t storageCount = 0;
+    uint32_t storageRgbaCount = 0;
     uint32_t samplerCount = 0;
     VkSampler registeredSamplers[64]{};
 };

@@ -18,6 +18,7 @@ constexpr uint32_t MAX_BINDLESS_SAMPLERS = 64;
 constexpr uint32_t IMAGE_BINDING = 0;
 constexpr uint32_t SAMPLER_BINDING = 1;
 constexpr uint32_t STORAGE_IMAGE_BINDING = 2;
+constexpr uint32_t STORAGE_IMAGE_RGBA_BINDING = 3;
 constexpr uint32_t MAX_BINDLESS_STORAGE_IMAGES = 256;
 } // namespace
 
@@ -41,7 +42,7 @@ BindlessTextures::BindlessTextures(Context& context) : context(context) {
                                 properties12.maxPerStageDescriptorUpdateAfterBindStorageImages,
                                 MAX_BINDLESS_STORAGE_IMAGES});
 
-    std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
+    std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
     bindings[0].binding = IMAGE_BINDING;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     bindings[0].descriptorCount = imageCapacity;
@@ -54,11 +55,15 @@ BindlessTextures::BindlessTextures(Context& context) : context(context) {
     bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[2].descriptorCount = storageCapacity;
     bindings[2].stageFlags = VK_SHADER_STAGE_ALL;
+    bindings[3].binding = STORAGE_IMAGE_RGBA_BINDING;
+    bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[3].descriptorCount = storageCapacity;
+    bindings[3].stageFlags = VK_SHADER_STAGE_ALL;
 
     VkDescriptorBindingFlags commonFlags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
                                            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
                                            VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
-    std::array<VkDescriptorBindingFlags, 3> bindingFlags{commonFlags, commonFlags, commonFlags};
+    std::array<VkDescriptorBindingFlags, 4> bindingFlags{commonFlags, commonFlags, commonFlags, commonFlags};
     VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
     flagsInfo.bindingCount = static_cast<uint32_t>(bindingFlags.size());
@@ -74,7 +79,7 @@ BindlessTextures::BindlessTextures(Context& context) : context(context) {
     std::array<VkDescriptorPoolSize, 3> poolSizes{
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, imageCapacity},
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, samplerCapacity},
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, storageCapacity}};
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, storageCapacity * 2}};
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     poolInfo.maxSets = 1;
@@ -157,6 +162,30 @@ void BindlessTextures::updateStorageImage(uint32_t slot, VkImageView view) {
     write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     write.pImageInfo = &imageInfo;
     vkUpdateDescriptorSets(context.device, 1, &write, 0, nullptr);
+}
+
+void BindlessTextures::updateStorageImageRgba(uint32_t slot, VkImageView view) {
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageView = view;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = descriptorSet;
+    write.dstBinding = STORAGE_IMAGE_RGBA_BINDING;
+    write.dstArrayElement = slot;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(context.device, 1, &write, 0, nullptr);
+}
+
+uint32_t BindlessTextures::addStorageImageRgba(VkImageView view) {
+    if (storageRgbaCount >= storageCapacity) {
+        core::fatal("bindless rgba 스토리지 이미지 슬롯이 부족합니다 (한계 {})", storageCapacity);
+    }
+    uint32_t slot = storageRgbaCount++;
+    updateStorageImageRgba(slot, view);
+    return slot;
 }
 
 uint32_t BindlessTextures::addStorageImage(VkImageView view) {

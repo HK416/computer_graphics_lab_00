@@ -8,6 +8,7 @@
 layout(set = 0, binding = 0) uniform texture2D bindlessImages[];
 layout(set = 0, binding = 1) uniform sampler bindlessSamplers[];
 layout(set = 0, binding = 2, r32f) uniform image2D bindlessStorageImages[];
+layout(set = 0, binding = 3, rgba32f) uniform image2D bindlessStorageImagesRgba[];
 
 vec4 sampleBindless(uint slot, vec2 uv) {
     uint imageIndex = slot & 0x00FFFFFFu;

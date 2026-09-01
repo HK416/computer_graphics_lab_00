@@ -26,6 +26,13 @@ struct Mesh {
     uint lodCount;
 };
 
+struct MeshLod {
+    uint indexOffset;
+    uint indexCount;
+    uint meshletOffset;
+    uint meshletCount;
+};
+
 struct Meshlet {
     vec4 boundingSphere;
     vec4 cone;
@@ -107,6 +114,12 @@ struct DrawCommand {
 
 layout(buffer_reference, scalar) readonly buffer VertexBuffer {
     Vertex items[];
+};
+layout(buffer_reference, scalar) readonly buffer IndexBuffer {
+    uint items[];
+};
+layout(buffer_reference, scalar) readonly buffer MeshLodBuffer {
+    MeshLod items[];
 };
 layout(buffer_reference, scalar) readonly buffer MeshBuffer {
     Mesh items[];

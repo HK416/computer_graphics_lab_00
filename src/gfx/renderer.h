@@ -7,9 +7,11 @@
 #include <memory>
 #include <vector>
 
+#include <glm/mat4x4.hpp>
 #include <vulkan/vulkan.h>
 
 #include "gfx/lod_network.h"
+#include "gfx/raytracing.h"
 #include "gfx/resources.h"
 
 struct SDL_Window;
@@ -53,6 +55,10 @@ struct RenderTargets {
     Image present; // 톤 매핑 결과. 편집기 뷰포트에 그대로 표시한다.
     // 이전 프레임 깊이로 만든 계층적 Z 버퍼. 오클루전 컬링이 읽는다.
     Image hzb;
+    // 경로 추적 누적 버퍼. 카메라가 멈춰 있는 동안 표본을 쌓는다.
+    Image pathAccumulation;
+    uint32_t pathAccumulationStorageSlot = 0;
+    uint32_t pathAccumulationSampledSlot = 0;
     std::vector<VkImageView> hzbMipViews;
     std::vector<uint32_t> hzbStorageSlots;
     VkExtent2D hzbExtent{};
@@ -118,6 +124,12 @@ public:
     float triangleBudget = 60000.0F;
     LodNetwork lodNetwork;
     uint32_t lastSelectedTriangles = 0;
+
+    // 경로 추적. 하드웨어가 지원할 때만 켤 수 있다.
+    bool usePathTracing = false;
+    uint32_t pathTraceBounces = 3;
+    bool pathTracingAvailable() const { return rayTracer != nullptr; }
+    uint32_t pathTraceSamples() const { return pathSampleCount; }
     // mesh shader 미지원 장치에서는 켤 수 없다.
     bool useMeshShader = false;
     bool meshShaderAvailable() const { return meshShaderPipelines[0] != VK_NULL_HANDLE; }
@@ -160,7 +172,8 @@ private:
     void updateLodNetwork(const scene::Scene& scene, Frame& frame, float projectionScale);
     // 장면을 순회하며 인스턴스와 간접 그리기 명령을 재질 경로별 구간으로 채운다.
     FrameBatches buildDrawCommands(Frame& frame, const scene::Scene& scene);
-    void recordCommands(Frame& frame, uint32_t imageIndex, const FrameBatches& batches);
+    void recordCommands(Frame& frame, uint32_t imageIndex, const FrameBatches& batches, const scene::Scene& scene);
+    void recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, const scene::Scene& scene);
     void recordGeometryPass(VkCommandBuffer commandBuffer, const FrameBatches& batches, bool translucentPass);
     void recordUiPass(VkCommandBuffer commandBuffer, uint32_t imageIndex);
     void writeCapture();
@@ -199,6 +212,10 @@ private:
 
     std::filesystem::path capturePath;
     Buffer captureBuffer;
+
+    std::unique_ptr<RayTracer> rayTracer;
+    glm::mat4 lastViewProjection{0.0F};
+    uint32_t pathSampleCount = 0;
 
     bool hzbNeedsClear = true;
     bool resizeRequested = false;

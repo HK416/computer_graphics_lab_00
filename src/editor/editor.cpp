@@ -479,6 +479,22 @@ void Editor::buildRenderSettings(float deltaSeconds) {
         }
     }
 
+    ImGui::SeparatorText("경로 추적");
+    ImGui::BeginDisabled(!renderer.pathTracingAvailable());
+    ImGui::Checkbox("경로 추적", &renderer.usePathTracing);
+    ImGui::EndDisabled();
+    if (!renderer.pathTracingAvailable()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(미지원)");
+    } else if (renderer.usePathTracing) {
+        int bounces = static_cast<int>(renderer.pathTraceBounces);
+        if (ImGui::SliderInt("반사 횟수", &bounces, 1, 8)) {
+            renderer.pathTraceBounces = static_cast<uint32_t>(bounces);
+        }
+        ImGui::Text("누적 표본 %u", renderer.pathTraceSamples());
+    }
+
+    ImGui::SeparatorText("파이프라인");
     ImGui::BeginDisabled(!renderer.meshShaderAvailable());
     ImGui::Checkbox("mesh shader 경로", &renderer.useMeshShader);
     ImGui::EndDisabled();
