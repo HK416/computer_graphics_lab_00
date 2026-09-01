@@ -24,6 +24,8 @@ inline constexpr uint32_t AUTOMATIC_LOD = 0xFFFFFFFFU;
 struct Options {
     // 지정하면 몇 프레임 뒤에 화면을 PNG 로 저장하고 종료한다. 렌더 결과 검증용이다.
     std::filesystem::path screenshotPath;
+    // 몇 프레임째를 저장할지. 시간축 업스케일처럼 여러 프레임을 쌓는 기능은 뒤쪽을 봐야 한다.
+    uint64_t screenshotFrame = 8;
     size_t initialScene = 0;
     // 지정하면 시작할 때 이 장면 파일을 연다.
     std::filesystem::path scenePath;

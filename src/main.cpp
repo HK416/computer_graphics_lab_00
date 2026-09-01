@@ -26,6 +26,8 @@ int main(int argc, char* argv[]) {
         std::string_view argument = argv[i];
         if (argument == "--screenshot" && i + 1 < argc) {
             options.screenshotPath = argv[++i];
+        } else if (argument == "--screenshot-frame" && i + 1 < argc) {
+            options.screenshotFrame = static_cast<uint64_t>(std::atoll(argv[++i]));
         } else if (argument == "--scene" && i + 1 < argc) {
             options.initialScene = static_cast<size_t>(std::atoi(argv[++i]));
         } else if (argument == "--open" && i + 1 < argc) {

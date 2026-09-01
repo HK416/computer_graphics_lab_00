@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <glm/mat4x4.hpp>
+#include <glm/vec2.hpp>
 #include <glm/vec4.hpp>
 #include <vulkan/vulkan.h>
 
@@ -17,6 +18,7 @@
 #include "gfx/raytracing.h"
 #include "gfx/resources.h"
 #include "gfx/shadow_math.h"
+#include "gfx/upscaler.h"
 
 struct SDL_Window;
 
@@ -91,22 +93,6 @@ struct FrameBatches {
     uint32_t instanceCount = 0;
 };
 
-// 업스케일 방식. 벤더 SDK 가 필요한 것들은 감지만 하고 사용 가능 여부를 보고한다.
-enum class Upscaler : uint32_t {
-    NONE = 0,
-    SPATIAL = 1,
-    FSR = 2,
-    DLSS = 3,
-};
-
-struct UpscalerInfo {
-    Upscaler kind;
-    const char* name;
-    bool available;
-    // 쓸 수 없을 때의 이유. 사용 가능하면 비어 있다.
-    const char* reason;
-};
-
 // 화면 크기에 맞춰 다시 만들어지는 오프스크린 대상들. 셰이더에서 읽으려고 bindless 슬롯도 함께 잡는다.
 struct RenderTargets {
     Image color; // 선형 HDR
@@ -115,8 +101,10 @@ struct RenderTargets {
     Image oitRevealage;
     // 화면 UV 단위 모션 벡터. 불투명 패스가 함께 기록한다.
     Image velocity;
-    Image tonemapped; // 렌더 해상도의 톤 매핑 결과. 업스케일 입력이다.
-    Image present;    // 표시 해상도. 편집기 뷰포트가 그대로 보여준다.
+    Image tonemapped; // 렌더 해상도의 톤 매핑 결과. 공간 업스케일 입력이다.
+    // 시간축 업스케일이 내놓는 표시 해상도 선형 HDR. 톤 매핑이 이걸 읽는다.
+    Image upscaledColor;
+    Image present; // 표시 해상도. 편집기 뷰포트가 그대로 보여준다.
     // 이전 프레임 깊이로 만든 계층적 Z 버퍼. 오클루전 컬링이 읽는다.
     Image hzb;
     // 조명별 그림자 깊이. 층 하나가 시점 하나다. 화면 크기와 무관해 한 번만 만든다.
@@ -144,6 +132,8 @@ struct RenderTargets {
     uint32_t colorSlot = 0;
     uint32_t tonemappedSlot = 0;
     uint32_t velocitySlot = 0;
+    uint32_t upscaledColorSlot = 0;
+    uint32_t upscaledColorStorageSlot = 0;
     uint32_t accumulationSlot = 0;
     uint32_t revealageSlot = 0;
     bool slotsAllocated = false;
@@ -308,6 +298,8 @@ private:
     void createPresentSemaphores();
     void destroyPresentSemaphores();
     void createRenderTargets();
+    // 편집기가 방식을 바꾸면 시간축 업스케일러를 다시 만든다.
+    void updateUpscaler();
     void createMeshPipelines();
     void createPostPipelines();
     void updateRenderExtent();
@@ -435,6 +427,17 @@ private:
     VkPipeline compositePipeline = VK_NULL_HANDLE;
     VkPipeline tonemapPipeline = VK_NULL_HANDLE;
     std::array<VkPipeline, 2> upscalePipelines{};
+    // 아무것도 그려지지 않은 화소를 하늘로 채운다. 깊이 판정이 걸러 주므로 셰이더는 분기가 없다.
+    VkPipeline skyPipeline = VK_NULL_HANDLE;
+    std::unique_ptr<TemporalUpscaler> temporalUpscaler;
+    // temporalUpscaler 가 어느 방식으로 만들어졌는지. upscaler 와 어긋나면 다시 만든다.
+    Upscaler activeUpscaler = Upscaler::NONE;
+    // 이번 프레임 투영에 들어간 렌더 픽셀 단위 지터와, 히스토리를 버려야 하는지.
+    glm::vec2 currentJitter{0.0F};
+    bool temporalResetThisFrame = true;
+    uint32_t jitterIndex = 0;
+    // 경로에 따라 한쪽만 쓰이는 후처리 대상의 첫 레이아웃을 맞춘다.
+    bool postTargetsNeedInit = true;
 
     std::filesystem::path capturePath;
     Buffer captureBuffer;

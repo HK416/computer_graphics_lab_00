@@ -1,0 +1,130 @@
+#version 460
+
+#include "bindless.glsl"
+
+// 표시 해상도 화소 하나가 스레드 하나다.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(push_constant) uniform TaauPushConstants {
+    uint colorTexture;    // 렌더 해상도 선형 HDR
+    uint depthTexture;    // 렌더 해상도 reverse-Z
+    uint velocityTexture; // 렌더 해상도 화면 UV 변위
+    uint historyTexture;  // 표시 해상도. 지난 프레임 결과와 쌓인 표본 수
+    uint outputStorage;   // 표시 해상도. 이번 프레임 결과
+    uint historyStorage;  // 표시 해상도. 다음 프레임이 읽을 히스토리
+    // 히스토리를 버리고 이번 프레임만으로 채운다. 크기 변경이나 장면 전환 직후 1 이다.
+    uint reset;
+    uint padding;
+    // xy 크기, zw 그 역수.
+    vec4 renderSize;
+    vec4 displaySize;
+    // xy 렌더 픽셀 단위 지터, z 쌓을 표본 수 상한.
+    vec4 jitterSamples;
+} pushConstants;
+
+// 이웃 클리핑은 YCoCg 에서 한다. 밝기와 색차를 나눠야 색이 통째로 번지는 대신 밝기만 눌린다.
+vec3 rgbToYCoCg(vec3 c) {
+    return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * (c.r - c.b), -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
+}
+
+vec3 yCoCgToRgb(vec3 c) {
+    return vec3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
+}
+
+// 아주 밝은 표본 하나가 평균을 지배해 반딧불이로 남는 것을 막는다(Karis). 눌린 공간에서 평균을
+// 낸 뒤 되돌리므로 결과가 어두운 쪽으로 치우치지 않는다.
+vec3 compressRange(vec3 color) {
+    return color / (1.0 + max(max(color.r, color.g), color.b));
+}
+
+vec3 expandRange(vec3 color) {
+    return color / max(1.0 - max(max(color.r, color.g), color.b), 1e-4);
+}
+
+void main() {
+    ivec2 displaySize = ivec2(pushConstants.displaySize.xy);
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, displaySize))) {
+        return;
+    }
+
+    ivec2 renderSize = ivec2(pushConstants.renderSize.xy);
+    vec2 uv = (vec2(pixel) + 0.5) * pushConstants.displaySize.zw;
+    // 이 출력 화소에 대응하는 렌더 해상도 표본 좌표. 지터가 든 투영은 장면을 화면에서 +지터만큼
+    // 밀어 그리므로, 렌더 화소 i 가 실제로 담은 곳은 지터 없는 좌표로 (i + 0.5) - 지터다. 그
+    // 관계를 뒤집으면 출력 화소가 떨어지는 표본 좌표에는 지터를 더해야 한다.
+    vec2 sourcePixel = uv * pushConstants.renderSize.xy - 0.5 + pushConstants.jitterSamples.xy;
+    ivec2 base = ivec2(floor(sourcePixel));
+
+    // 3x3 이웃을 한 번 돌면서 셋을 동시에 구한다. 가우시안으로 모은 이번 프레임 색, 히스토리를
+    // 가둘 평균과 분산, 그리고 재투영에 쓸 가장 가까운 화소.
+    vec3 current = vec3(0.0);
+    float weightSum = 0.0;
+    vec3 moment1 = vec3(0.0);
+    vec3 moment2 = vec3(0.0);
+    float closestDepth = -1.0; // reverse-Z 라 클수록 가깝다
+    ivec2 closestTap = base;
+
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            ivec2 tap = clamp(base + ivec2(x, y), ivec2(0), renderSize - 1);
+            vec2 tapUv = (vec2(tap) + 0.5) * pushConstants.renderSize.zw;
+            vec3 sampled = compressRange(sampleBindless(pushConstants.colorTexture, tapUv).rgb);
+
+            // 커널 폭은 표시 화소 기준이다. 렌더 화소 기준으로 재면 확대 배율만큼 넓어져, 여러
+            // 프레임을 쌓아도 한 프레임의 흐림이 그대로 남는다. 한 프레임이 채우지 못하는 부분은
+            // 지터가 다음 프레임에 채운다.
+            vec2 delta = (vec2(tap) - sourcePixel) * pushConstants.displaySize.xy * pushConstants.renderSize.zw;
+            float weight = exp(-2.29 * dot(delta, delta));
+            current += sampled * weight;
+            weightSum += weight;
+
+            vec3 ycocg = rgbToYCoCg(sampled);
+            moment1 += ycocg;
+            moment2 += ycocg * ycocg;
+
+            float depth = sampleBindless(pushConstants.depthTexture, tapUv).r;
+            if (depth > closestDepth) {
+                closestDepth = depth;
+                closestTap = tap;
+            }
+        }
+    }
+    current /= max(weightSum, 1e-5);
+
+    // 변위는 이웃에서 가장 가까운 화소 것을 쓴다. 실루엣 안쪽 화소가 배경의 변위를 집어 히스토리가
+    // 엉뚱한 데서 오는 것을 줄인다.
+    vec2 motionUv = (vec2(closestTap) + 0.5) * pushConstants.renderSize.zw;
+    vec2 motion = sampleBindless(pushConstants.velocityTexture, motionUv).rg;
+    vec2 historyUv = uv + motion;
+
+    bool hasHistory = pushConstants.reset == 0u && all(greaterThanEqual(historyUv, vec2(0.0))) &&
+                      all(lessThanEqual(historyUv, vec2(1.0)));
+
+    vec3 result = current;
+    float samples = 1.0;
+    if (hasHistory) {
+        // ponytail: 히스토리를 이중 선형으로 읽는다. 프레임마다 다시 표본하므로 화면이 조금씩
+        // 뭉개진다. Catmull-Rom 으로 바꾸면 선명해지지만 탭이 아홉 개로 늘어난다.
+        vec4 historySample = sampleBindless(pushConstants.historyTexture, historyUv);
+
+        // 이웃 분산으로 히스토리를 가둔다. 최소/최대로 자르는 것보다 좁아 잔상이 덜 남는다.
+        //
+        // ponytail: 상자 폭이 고정 1.25σ 다. 정지 화면에서는 쌓인 평균을 매 프레임 상자 경계로
+        // 도로 끌어당겨 수렴이 조금 뒤로 밀린다. 움직임이 있을 때만 좁히도록 바꾸면 나아진다.
+        vec3 mean = moment1 / 9.0;
+        vec3 sigma = sqrt(max(moment2 / 9.0 - mean * mean, vec3(0.0)));
+        vec3 clamped = clamp(rgbToYCoCg(historySample.rgb), mean - 1.25 * sigma, mean + 1.25 * sigma);
+
+        // 알파에 지금까지 쌓인 표본 수가 들어 있다. 1/n 로 섞으면 처음 몇 프레임은 빠르게 채워지고
+        // 상한에 닿은 뒤에는 지수 이동 평균이 된다. 고정 계수로는 화면이 다 찰 때까지 오래 걸린다.
+        samples = min(historySample.a + 1.0, pushConstants.jitterSamples.z);
+        result = mix(yCoCgToRgb(clamped), current, 1.0 / samples);
+    }
+
+    vec4 stored = vec4(max(result, vec3(0.0)), samples);
+    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(pushConstants.historyStorage)], pixel, stored);
+    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(pushConstants.outputStorage)],
+               pixel,
+               vec4(expandRange(stored.rgb), 1.0));
+}

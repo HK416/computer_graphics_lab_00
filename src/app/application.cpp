@@ -23,7 +23,6 @@ constexpr int DEFAULT_WINDOW_WIDTH = 1600;
 constexpr int DEFAULT_WINDOW_HEIGHT = 900;
 constexpr float NANOSECONDS_PER_SECOND = 1.0e9F;
 // 캡처 전에 스왑체인 크기가 안정될 시간을 준다.
-constexpr uint64_t SCREENSHOT_FRAME = 8;
 
 // Unity 처럼 새 장면에는 방향광 하나를 기본으로 둔다.
 void addDefaultLight(scene::Scene& scene) {
@@ -479,9 +478,9 @@ void Application::run() {
         ++frameCount;
 
         if (!options.screenshotPath.empty()) {
-            if (frameCount == SCREENSHOT_FRAME) {
+            if (frameCount == options.screenshotFrame) {
                 renderer->requestCapture(options.screenshotPath);
-            } else if (frameCount > SCREENSHOT_FRAME) {
+            } else if (frameCount > options.screenshotFrame) {
                 running = false;
             }
         }

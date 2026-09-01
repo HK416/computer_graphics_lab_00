@@ -14,6 +14,8 @@ layout(set = 0, binding = 4) uniform texture2DArray bindlessArrays[];
 layout(set = 0, binding = 5) uniform textureCube bindlessCubes[];
 // 큐브맵을 굽는 컴퓨트가 면을 층으로 보고 쓴다.
 layout(set = 0, binding = 6, rgba16f) uniform image2DArray bindlessStorageArrays[];
+// 시간축 업스케일의 히스토리와 출력.
+layout(set = 0, binding = 7, rgba16f) uniform image2D bindlessStorageImagesRgba16[];
 
 vec4 sampleBindless(uint slot, vec2 uv) {
     uint imageIndex = slot & 0x00FFFFFFu;
