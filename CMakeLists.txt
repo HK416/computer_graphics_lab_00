@@ -70,8 +70,8 @@ endif()
 
 set(shader_output_dir "${CMAKE_BINARY_DIR}/shaders")
 set(shader_sources
-    shaders/triangle.vert
-    shaders/triangle.frag)
+    shaders/mesh.vert
+    shaders/mesh.frag)
 
 set(shader_binaries)
 foreach(shader IN LISTS shader_sources)
@@ -99,18 +99,24 @@ add_custom_target(cg_lab_shaders DEPENDS ${shader_binaries} SOURCES ${shader_sou
 add_executable(cg_lab
     src/main.cpp
     src/app/application.cpp
+    src/asset/gltf_loader.cpp
     src/core/error.cpp
     src/gfx/context.cpp
+    src/gfx/geometry.cpp
     src/gfx/renderer.cpp
     src/gfx/resources.cpp
+    src/gfx/stb_impl.cpp
     src/gfx/swapchain.cpp
     src/gfx/uploader.cpp
-    src/gfx/vma_impl.cpp)
+    src/gfx/vma_impl.cpp
+    src/scene/camera.cpp
+    src/scene/scene.cpp)
 
 add_dependencies(cg_lab cg_lab_shaders)
 
-# VMA 구현부는 서드파티 코드이므로 경고 검사에서 제외한다.
-set_source_files_properties(src/gfx/vma_impl.cpp PROPERTIES COMPILE_OPTIONS "$<IF:$<BOOL:${MSVC}>,/w,-w>")
+# 서드파티 단일 헤더 구현부는 경고 검사에서 제외한다.
+set_source_files_properties(src/gfx/vma_impl.cpp src/gfx/stb_impl.cpp src/asset/gltf_loader.cpp
+    PROPERTIES COMPILE_OPTIONS "$<IF:$<BOOL:${MSVC}>,/w,-w>")
 
 # VMA 헤더 설치 위치가 배포판마다 <vk_mem_alloc.h> 또는 <vma/vk_mem_alloc.h> 로 갈리므로,
 # 실제 헤더를 찾아 전달 헤더를 만들고 프로젝트에서는 <vma/vk_mem_alloc.h> 하나만 쓴다.
@@ -135,7 +141,9 @@ endif()
 # 런타임에 public/ 의 폰트와 에셋, 그리고 컴파일된 셰이더를 찾기 위한 경로.
 target_compile_definitions(cg_lab PRIVATE
     CG_LAB_ASSET_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/public"
-    CG_LAB_SHADER_ROOT="${shader_output_dir}")
+    CG_LAB_SHADER_ROOT="${shader_output_dir}"
+    GLM_ENABLE_EXPERIMENTAL
+    GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
 # VS Code 등 편집기가 인클루드 경로를 찾을 수 있도록 컴파일 데이터베이스를 소스 루트에 링크한다.
 file(CREATE_LINK "${CMAKE_BINARY_DIR}/compile_commands.json" "${CMAKE_SOURCE_DIR}/compile_commands.json"

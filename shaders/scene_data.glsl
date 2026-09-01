@@ -1,0 +1,60 @@
+#ifndef SCENE_DATA_GLSL
+#define SCENE_DATA_GLSL
+
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+// 아래 구조체는 src/gfx/geometry.h 및 src/asset/model.h 의 정의와 배치가 일치해야 한다.
+struct Vertex {
+    vec3 position;
+    vec3 normal;
+    vec4 tangent;
+    vec2 uv;
+};
+
+struct Mesh {
+    vec4 boundingSphere;
+    uint indexOffset;
+    uint indexCount;
+    int vertexOffset;
+    uint materialIndex;
+};
+
+struct Material {
+    vec4 baseColorFactor;
+    vec4 emissiveAndCutoff;
+    float metallicFactor;
+    float roughnessFactor;
+    uint alphaMode;
+    uint flags;
+};
+
+struct Instance {
+    mat4 model;
+    mat4 normalMatrix;
+    uint meshIndex;
+    uint padding0;
+    uint padding1;
+    uint padding2;
+};
+
+struct Camera {
+    mat4 viewProjection;
+    vec4 position;
+};
+
+layout(buffer_reference, scalar) readonly buffer VertexBuffer { Vertex items[]; };
+layout(buffer_reference, scalar) readonly buffer MeshBuffer { Mesh items[]; };
+layout(buffer_reference, scalar) readonly buffer InstanceBuffer { Instance items[]; };
+layout(buffer_reference, scalar) readonly buffer MaterialBuffer { Material items[]; };
+layout(buffer_reference, scalar) readonly buffer CameraBuffer { Camera item; };
+
+layout(push_constant) uniform PushConstants {
+    VertexBuffer vertices;
+    MeshBuffer meshes;
+    InstanceBuffer instances;
+    MaterialBuffer materials;
+    CameraBuffer camera;
+} pushConstants;
+
+#endif

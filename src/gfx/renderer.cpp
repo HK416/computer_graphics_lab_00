@@ -1,32 +1,43 @@
 #include "gfx/renderer.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <vector>
 
-#include <glm/vec2.hpp>
-#include <glm/vec3.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
+#include <glm/mat4x4.hpp>
 #include <SDL3/SDL.h>
 #include <spdlog/spdlog.h>
+#include <stb_image_write.h>
 
 #include "core/error.h"
 #include "gfx/context.h"
+#include "gfx/geometry.h"
 #include "gfx/swapchain.h"
-#include "gfx/uploader.h"
 #include "gfx/vk_check.h"
+#include "scene/scene.h"
 
 namespace gfx {
 namespace {
 
-// 셰이더의 scalar 레이아웃 구조체와 그대로 맞춘다.
-struct TriangleVertex {
-    glm::vec2 position;
-    glm::vec3 color;
+constexpr VkFormat DEPTH_FORMAT = VK_FORMAT_D32_SFLOAT;
+constexpr uint32_t MINIMUM_INSTANCE_CAPACITY = 1024;
+
+// shaders/scene_data.glsl 의 CameraBuffer 와 배치가 같아야 한다.
+struct GpuCamera {
+    glm::mat4 viewProjection;
+    glm::vec4 position;
 };
 
-struct TrianglePushConstants {
-    VkDeviceAddress vertexBuffer;
+struct ScenePushConstants {
+    VkDeviceAddress vertices;
+    VkDeviceAddress meshes;
+    VkDeviceAddress instances;
+    VkDeviceAddress materials;
+    VkDeviceAddress camera;
 };
 
 std::vector<uint32_t> readSpirv(const std::string& name) {
@@ -56,46 +67,18 @@ VkShaderModule createShaderModule(VkDevice device, const std::string& name) {
     return module;
 }
 
-void transitionImage(VkCommandBuffer commandBuffer,
-                     VkImage image,
-                     VkImageLayout oldLayout,
-                     VkImageLayout newLayout,
-                     VkPipelineStageFlags2 sourceStage,
-                     VkAccessFlags2 sourceAccess,
-                     VkPipelineStageFlags2 destinationStage,
-                     VkAccessFlags2 destinationAccess) {
-    VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-    barrier.srcStageMask = sourceStage;
-    barrier.srcAccessMask = sourceAccess;
-    barrier.dstStageMask = destinationStage;
-    barrier.dstAccessMask = destinationAccess;
-    barrier.oldLayout = oldLayout;
-    barrier.newLayout = newLayout;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
-    barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
-
-    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    dependency.imageMemoryBarrierCount = 1;
-    dependency.pImageMemoryBarriers = &barrier;
-    vkCmdPipelineBarrier2(commandBuffer, &dependency);
-}
-
 } // namespace
 
-Renderer::Renderer(Context& context, SDL_Window* window) : context(context) {
+Renderer::Renderer(Context& context, GeometryStore& geometry, SDL_Window* window)
+    : context(context), geometry(geometry) {
     swapchain = std::make_unique<Swapchain>(context, window, vsync);
+    createDepthImage();
     createFrames();
     createPresentSemaphores();
-    createTriangleResources();
-    createTrianglePipeline();
+    createMeshPipeline();
 
     VkSemaphoreTypeCreateInfo timelineInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
     timelineInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-    timelineInfo.initialValue = 0;
     VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     semaphoreInfo.pNext = &timelineInfo;
     VK_CHECK(vkCreateSemaphore(context.device, &semaphoreInfo, nullptr, &frameTimeline));
@@ -103,20 +86,34 @@ Renderer::Renderer(Context& context, SDL_Window* window) : context(context) {
 
 Renderer::~Renderer() {
     waitIdle();
-    destroyBuffer(context, triangleVertices);
-    vkDestroyPipeline(context.device, trianglePipeline, nullptr);
-    vkDestroyPipelineLayout(context.device, trianglePipelineLayout, nullptr);
+    vkDestroyPipeline(context.device, meshPipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, meshPipelineLayout, nullptr);
     vkDestroySemaphore(context.device, frameTimeline, nullptr);
     destroyPresentSemaphores();
     for (Frame& frame : frames) {
+        destroyBuffer(context, frame.drawBuffer);
+        destroyBuffer(context, frame.instanceBuffer);
+        destroyBuffer(context, frame.cameraBuffer);
         vkDestroySemaphore(context.device, frame.imageAvailable, nullptr);
         vkDestroyCommandPool(context.device, frame.commandPool, nullptr);
     }
+    destroyBuffer(context, captureBuffer);
+    destroyImage(context, depthImage);
     swapchain.reset();
 }
 
 void Renderer::waitIdle() {
     VK_CHECK(vkDeviceWaitIdle(context.device));
+}
+
+void Renderer::createDepthImage() {
+    destroyImage(context, depthImage);
+    ImageDesc desc;
+    desc.extent = {swapchain->extent.width, swapchain->extent.height, 1};
+    desc.format = DEPTH_FORMAT;
+    desc.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    desc.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+    depthImage = createImage(context, desc, "깊이");
 }
 
 void Renderer::createFrames() {
@@ -134,7 +131,31 @@ void Renderer::createFrames() {
 
         VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         VK_CHECK(vkCreateSemaphore(context.device, &semaphoreInfo, nullptr, &frame.imageAvailable));
+
+        frame.cameraBuffer = createBuffer(
+            context, sizeof(GpuCamera), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, MemoryLocation::HOST_WRITE, "카메라");
+        reserveInstances(frame, MINIMUM_INSTANCE_CAPACITY);
     }
+}
+
+void Renderer::reserveInstances(Frame& frame, uint32_t instanceCount) {
+    if (instanceCount <= frame.instanceCapacity) {
+        return;
+    }
+    uint32_t capacity = std::max(instanceCount, std::max(frame.instanceCapacity * 2, MINIMUM_INSTANCE_CAPACITY));
+    destroyBuffer(context, frame.instanceBuffer);
+    destroyBuffer(context, frame.drawBuffer);
+    frame.instanceBuffer = createBuffer(context,
+                                        static_cast<VkDeviceSize>(capacity) * sizeof(GpuInstance),
+                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                        MemoryLocation::HOST_WRITE,
+                                        "인스턴스");
+    frame.drawBuffer = createBuffer(context,
+                                    static_cast<VkDeviceSize>(capacity) * sizeof(VkDrawIndexedIndirectCommand),
+                                    VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                    MemoryLocation::HOST_WRITE,
+                                    "간접 그리기 명령");
+    frame.instanceCapacity = capacity;
 }
 
 void Renderer::createPresentSemaphores() {
@@ -153,33 +174,18 @@ void Renderer::destroyPresentSemaphores() {
     presentReady.clear();
 }
 
-void Renderer::createTriangleResources() {
-    const TriangleVertex VERTICES[3]{
-        {{0.0F, -0.6F}, {1.0F, 0.2F, 0.2F}}, {{0.6F, 0.6F}, {0.2F, 1.0F, 0.2F}}, {{-0.6F, 0.6F}, {0.2F, 0.4F, 1.0F}}};
-
-    triangleVertices = createBuffer(context,
-                                    sizeof(VERTICES),
-                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                    MemoryLocation::DEVICE,
-                                    "삼각형 정점");
-
-    Uploader uploader(context);
-    uploader.uploadBuffer(triangleVertices, 0, VERTICES, sizeof(VERTICES));
-    uploader.flush();
-}
-
-void Renderer::createTrianglePipeline() {
+void Renderer::createMeshPipeline() {
     VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-    pushConstantRange.size = sizeof(TrianglePushConstants);
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushConstantRange.size = sizeof(ScenePushConstants);
 
     VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushConstantRange;
-    VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &trianglePipelineLayout));
+    VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &meshPipelineLayout));
 
-    VkShaderModule vertexModule = createShaderModule(context.device, "triangle.vert.spv");
-    VkShaderModule fragmentModule = createShaderModule(context.device, "triangle.frag.spv");
+    VkShaderModule vertexModule = createShaderModule(context.device, "mesh.vert.spv");
+    VkShaderModule fragmentModule = createShaderModule(context.device, "mesh.frag.spv");
 
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -208,7 +214,11 @@ void Renderer::createTrianglePipeline() {
     VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
+    // reverse-Z 이므로 깊이 버퍼는 0 으로 지우고 더 큰 값을 통과시킨다.
     VkPipelineDepthStencilStateCreateInfo depthStencil{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
 
     VkPipelineColorBlendAttachmentState blendAttachment{};
     blendAttachment.colorWriteMask =
@@ -225,6 +235,7 @@ void Renderer::createTrianglePipeline() {
     VkPipelineRenderingCreateInfo renderingInfo{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     renderingInfo.colorAttachmentCount = 1;
     renderingInfo.pColorAttachmentFormats = &swapchain->format;
+    renderingInfo.depthAttachmentFormat = DEPTH_FORMAT;
 
     VkGraphicsPipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     pipelineInfo.pNext = &renderingInfo;
@@ -238,8 +249,8 @@ void Renderer::createTrianglePipeline() {
     pipelineInfo.pDepthStencilState = &depthStencil;
     pipelineInfo.pColorBlendState = &colorBlend;
     pipelineInfo.pDynamicState = &dynamicState;
-    pipelineInfo.layout = trianglePipelineLayout;
-    VK_CHECK(vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &trianglePipeline));
+    pipelineInfo.layout = meshPipelineLayout;
+    VK_CHECK(vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &meshPipeline));
 
     vkDestroyShaderModule(context.device, fragmentModule, nullptr);
     vkDestroyShaderModule(context.device, vertexModule, nullptr);
@@ -248,24 +259,71 @@ void Renderer::createTrianglePipeline() {
 void Renderer::recreateSwapchain() {
     waitIdle();
     swapchain->recreate(vsync);
+    createDepthImage();
     // 이미지 개수가 달라질 수 있으므로 표시 완료 세마포어도 다시 만든다.
     createPresentSemaphores();
     resizeRequested = false;
 }
 
-void Renderer::recordCommands(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
+uint32_t Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene) {
+    reserveInstances(frame, static_cast<uint32_t>(scene.objects.size()));
+
+    auto* instances = static_cast<GpuInstance*>(frame.instanceBuffer.mapped);
+    auto* draws = static_cast<VkDrawIndexedIndirectCommand*>(frame.drawBuffer.mapped);
+
+    uint32_t drawCount = 0;
+    for (const scene::Object& object : scene.objects) {
+        if (!object.visible || object.meshIndex >= geometry.meshCount()) {
+            continue;
+        }
+        const GpuMesh& mesh = geometry.mesh(object.meshIndex);
+        glm::mat4 model = object.transform.matrix();
+
+        instances[drawCount].model = model;
+        instances[drawCount].normalMatrix = glm::mat4(glm::inverseTranspose(glm::mat3(model)));
+        instances[drawCount].meshIndex = object.meshIndex;
+
+        draws[drawCount].indexCount = mesh.indexCount;
+        draws[drawCount].instanceCount = 1;
+        draws[drawCount].firstIndex = mesh.indexOffset;
+        draws[drawCount].vertexOffset = mesh.vertexOffset;
+        // 셰이더는 gl_InstanceIndex 로 인스턴스 배열을 참조한다.
+        draws[drawCount].firstInstance = drawCount;
+        ++drawCount;
+    }
+
+    auto* camera = static_cast<GpuCamera*>(frame.cameraBuffer.mapped);
+    float aspect = static_cast<float>(swapchain->extent.width) / static_cast<float>(swapchain->extent.height);
+    camera->viewProjection = scene.camera.projectionMatrix(aspect) * scene.camera.viewMatrix();
+    camera->position = glm::vec4{scene.camera.position, 1.0F};
+
+    return drawCount;
+}
+
+void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, uint32_t drawCount) {
+    VkCommandBuffer commandBuffer = frame.commandBuffer;
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
 
-    transitionImage(commandBuffer,
-                    swapchain->images[imageIndex],
-                    VK_IMAGE_LAYOUT_UNDEFINED,
-                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                    0,
-                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    imageBarrier(commandBuffer,
+                 swapchain->images[imageIndex],
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                 0,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    imageBarrier(commandBuffer,
+                 depthImage.handle,
+                 VK_IMAGE_ASPECT_DEPTH_BIT,
+                 VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                 0,
+                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 
     VkRenderingAttachmentInfo colorAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     colorAttachment.imageView = swapchain->imageViews[imageIndex];
@@ -274,11 +332,19 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, uint32_t imageIndex
     colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     colorAttachment.clearValue.color = {{0.05F, 0.05F, 0.07F, 1.0F}};
 
+    VkRenderingAttachmentInfo depthAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    depthAttachment.imageView = depthImage.view;
+    depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depthAttachment.clearValue.depthStencil.depth = 0.0F;
+
     VkRenderingInfo renderingInfo{VK_STRUCTURE_TYPE_RENDERING_INFO};
     renderingInfo.renderArea.extent = swapchain->extent;
     renderingInfo.layerCount = 1;
     renderingInfo.colorAttachmentCount = 1;
     renderingInfo.pColorAttachments = &colorAttachment;
+    renderingInfo.pDepthAttachment = &depthAttachment;
     vkCmdBeginRendering(commandBuffer, &renderingInfo);
 
     VkViewport viewport{};
@@ -291,27 +357,97 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, uint32_t imageIndex
     scissor.extent = swapchain->extent;
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, trianglePipeline);
-    TrianglePushConstants pushConstants{triangleVertices.address};
-    vkCmdPushConstants(
-        commandBuffer, trianglePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pushConstants), &pushConstants);
-    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    if (drawCount > 0) {
+        ScenePushConstants pushConstants{geometry.vertexBuffer.address,
+                                         geometry.meshBuffer.address,
+                                         frame.instanceBuffer.address,
+                                         geometry.materialBuffer.address,
+                                         frame.cameraBuffer.address};
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline);
+        vkCmdPushConstants(commandBuffer,
+                           meshPipelineLayout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0,
+                           sizeof(pushConstants),
+                           &pushConstants);
+        vkCmdBindIndexBuffer(commandBuffer, geometry.indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexedIndirect(
+            commandBuffer, frame.drawBuffer.handle, 0, drawCount, sizeof(VkDrawIndexedIndirectCommand));
+    }
 
     vkCmdEndRendering(commandBuffer);
 
-    transitionImage(commandBuffer,
-                    swapchain->images[imageIndex],
-                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                    VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
-                    0);
+    if (!capturePath.empty()) {
+        imageBarrier(commandBuffer,
+                     swapchain->images[imageIndex],
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_COPY_BIT,
+                     VK_ACCESS_2_TRANSFER_READ_BIT);
+
+        VkBufferImageCopy2 region{VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = {swapchain->extent.width, swapchain->extent.height, 1};
+        VkCopyImageToBufferInfo2 copyInfo{VK_STRUCTURE_TYPE_COPY_IMAGE_TO_BUFFER_INFO_2};
+        copyInfo.srcImage = swapchain->images[imageIndex];
+        copyInfo.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        copyInfo.dstBuffer = captureBuffer.handle;
+        copyInfo.regionCount = 1;
+        copyInfo.pRegions = &region;
+        vkCmdCopyImageToBuffer2(commandBuffer, &copyInfo);
+
+        imageBarrier(commandBuffer,
+                     swapchain->images[imageIndex],
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                     VK_PIPELINE_STAGE_2_COPY_BIT,
+                     VK_ACCESS_2_TRANSFER_READ_BIT,
+                     VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+                     0);
+    } else {
+        imageBarrier(commandBuffer,
+                     swapchain->images[imageIndex],
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+                     0);
+    }
 
     VK_CHECK(vkEndCommandBuffer(commandBuffer));
 }
 
-void Renderer::drawFrame() {
+void Renderer::writeCapture() {
+    uint32_t width = swapchain->extent.width;
+    uint32_t height = swapchain->extent.height;
+    std::vector<uint8_t> pixels(static_cast<size_t>(width) * height * 4);
+    std::memcpy(pixels.data(), captureBuffer.mapped, pixels.size());
+
+    bool isBgra = swapchain->format == VK_FORMAT_B8G8R8A8_SRGB || swapchain->format == VK_FORMAT_B8G8R8A8_UNORM;
+    if (isBgra) {
+        for (size_t i = 0; i < pixels.size(); i += 4) {
+            std::swap(pixels[i], pixels[i + 2]);
+        }
+    }
+
+    std::string path = capturePath.string();
+    int written = stbi_write_png(
+        path.c_str(), static_cast<int>(width), static_cast<int>(height), 4, pixels.data(), static_cast<int>(width) * 4);
+    if (written == 0) {
+        core::fatal("화면 캡처 저장에 실패했습니다: {}", path);
+    }
+    spdlog::info("화면 캡처 저장: {} ({}x{})", path, width, height);
+    capturePath.clear();
+}
+
+void Renderer::drawFrame(const scene::Scene& scene) {
     if (swapchain->extent.width == 0 || swapchain->extent.height == 0) {
         return;
     }
@@ -342,8 +478,19 @@ void Renderer::drawFrame() {
         core::fatal("스왑체인 이미지 획득에 실패했습니다: {}", toString(acquireResult));
     }
 
+    uint32_t drawCount = buildDrawCommands(frame, scene);
+
+    if (!capturePath.empty()) {
+        VkDeviceSize required = static_cast<VkDeviceSize>(swapchain->extent.width) * swapchain->extent.height * 4;
+        if (captureBuffer.size < required) {
+            destroyBuffer(context, captureBuffer);
+            captureBuffer = createBuffer(
+                context, required, VK_BUFFER_USAGE_TRANSFER_DST_BIT, MemoryLocation::HOST_READ, "화면 캡처");
+        }
+    }
+
     VK_CHECK(vkResetCommandPool(context.device, frame.commandPool, 0));
-    recordCommands(frame.commandBuffer, imageIndex);
+    recordCommands(frame, imageIndex, drawCount);
 
     VkSemaphoreSubmitInfo waitSemaphore{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     waitSemaphore.semaphore = frame.imageAvailable;
@@ -379,6 +526,11 @@ void Renderer::drawFrame() {
     VkResult presentResult = vkQueuePresentKHR(context.graphicsQueue, &presentInfo);
 
     ++frameIndex;
+
+    if (!capturePath.empty()) {
+        waitIdle();
+        writeCapture();
+    }
 
     if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
         resizeRequested = true;
