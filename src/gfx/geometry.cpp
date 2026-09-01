@@ -81,6 +81,7 @@ uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<ui
             meshlet.parentSphere = sourceMeshlet.parentSphere;
             meshlet.error = sourceMeshlet.error;
             meshlet.parentError = sourceMeshlet.parentError;
+            meshlet.indexOffset = mesh.indexOffset + sourceMeshlet.indexOffset;
             meshlet.vertexOffset = vertexBase + sourceMeshlet.vertexOffset;
             meshlet.triangleOffset = triangleBase + sourceMeshlet.triangleOffset;
             meshlet.vertexCount = sourceMeshlet.vertexCount;

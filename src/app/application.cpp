@@ -68,7 +68,11 @@ Application::Application(const Options& options) : options(options) {
     renderer = std::make_unique<gfx::Renderer>(*context, *geometry, *bindless, window);
     editorUi = std::make_unique<editor::Editor>(*context, *renderer, window);
     renderer->debugMode = options.debugMode;
-    renderer->lodLevel = options.lodLevel;
+    if (options.lodLevel != AUTOMATIC_LOD) {
+        renderer->automaticLod = false;
+        renderer->lodLevel = options.lodLevel;
+    }
+    renderer->lodErrorThreshold = options.lodErrorThreshold;
     renderer->setUiCallback([this](VkCommandBuffer commandBuffer) { editorUi->record(commandBuffer); });
 }
 

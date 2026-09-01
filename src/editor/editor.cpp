@@ -443,10 +443,23 @@ void Editor::buildRenderSettings(float deltaSeconds) {
     ImGui::SliderFloat("노출", &renderer.exposure, 0.05F, 8.0F, "%.2f");
     ImGui::Checkbox("와이어프레임", &renderer.wireframe);
 
-    int lodLevel = static_cast<int>(renderer.lodLevel);
-    int maxLod = static_cast<int>(geometryStore != nullptr ? geometryStore->maxLodCount() : 1) - 1;
-    if (ImGui::SliderInt("LOD 단계", &lodLevel, 0, std::max(maxLod, 0))) {
-        renderer.lodLevel = static_cast<uint32_t>(lodLevel);
+    ImGui::SeparatorText("컬링과 LOD");
+    ImGui::Checkbox("컴퓨트 컬링", &renderer.useComputeCulling);
+    ImGui::BeginDisabled(!renderer.useComputeCulling);
+    ImGui::Checkbox("절두체 컬링", &renderer.frustumCulling);
+    ImGui::SameLine();
+    ImGui::Checkbox("법선 원뿔 컬링", &renderer.coneCulling);
+    ImGui::EndDisabled();
+
+    ImGui::Checkbox("자동 LOD 선정", &renderer.automaticLod);
+    if (renderer.automaticLod) {
+        ImGui::SliderFloat("허용 화면 오차", &renderer.lodErrorThreshold, 0.1F, 32.0F, "%.2f px");
+    } else {
+        int lodLevel = static_cast<int>(renderer.lodLevel);
+        int maxLod = static_cast<int>(geometryStore != nullptr ? geometryStore->maxLodCount() : 1) - 1;
+        if (ImGui::SliderInt("LOD 단계", &lodLevel, 0, std::max(maxLod, 0))) {
+            renderer.lodLevel = static_cast<uint32_t>(lodLevel);
+        }
     }
 
     ImGui::BeginDisabled(!renderer.meshShaderAvailable());

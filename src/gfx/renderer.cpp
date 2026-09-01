@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -11,6 +12,7 @@
 
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/mat4x4.hpp>
+#include <glm/trigonometric.hpp>
 #include <SDL3/SDL.h>
 #include <spdlog/spdlog.h>
 #include <stb_image_write.h>
@@ -51,6 +53,21 @@ struct GpuMeshletGroup {
     uint32_t meshletCount;
     uint32_t padding;
 };
+
+struct CullPushConstants {
+    VkDeviceAddress instances;
+    VkDeviceAddress meshes;
+    VkDeviceAddress meshlets;
+    VkDeviceAddress camera;
+    VkDeviceAddress drawCommands;
+    VkDeviceAddress drawCounts;
+    uint32_t instanceCount;
+    uint32_t flags;
+};
+
+constexpr uint32_t CULL_FLAG_FRUSTUM = 1;
+constexpr uint32_t CULL_FLAG_CONE = 2;
+constexpr uint32_t BUCKET_COUNT = ALPHA_MODE_COUNT * 2;
 
 struct ScenePushConstants {
     VkDeviceAddress vertices;
@@ -155,6 +172,7 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& 
     createPresentSemaphores();
     createMeshPipelines();
     createPostPipelines();
+    createCullPipeline();
 
     VkSemaphoreTypeCreateInfo timelineInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
     timelineInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -175,10 +193,14 @@ Renderer::~Renderer() {
     for (VkPipeline pipeline : meshPipelines) {
         vkDestroyPipeline(context.device, pipeline, nullptr);
     }
+    vkDestroyPipeline(context.device, cullPipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, cullPipelineLayout, nullptr);
     vkDestroyPipelineLayout(context.device, meshPipelineLayout, nullptr);
     vkDestroySemaphore(context.device, frameTimeline, nullptr);
     destroyPresentSemaphores();
     for (Frame& frame : frames) {
+        destroyBuffer(context, frame.drawCountBuffer);
+        destroyBuffer(context, frame.meshletDrawBuffer);
         destroyBuffer(context, frame.meshTaskIndirectBuffer);
         destroyBuffer(context, frame.meshletGroupBuffer);
         destroyBuffer(context, frame.drawBuffer);
@@ -306,6 +328,7 @@ void Renderer::createFrames() {
             context, sizeof(GpuCamera), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, MemoryLocation::HOST_WRITE, "카메라");
         reserveInstances(frame, MINIMUM_INSTANCE_CAPACITY);
         reserveMeshletGroups(frame, MINIMUM_INSTANCE_CAPACITY);
+        reserveMeshletDraws(frame, MINIMUM_INSTANCE_CAPACITY);
     }
 }
 
@@ -349,6 +372,53 @@ void Renderer::reserveMeshletGroups(Frame& frame, uint32_t groupCount) {
                                             MemoryLocation::HOST_WRITE,
                                             "meshlet 그룹");
     frame.groupCapacity = capacity;
+}
+
+void Renderer::reserveMeshletDraws(Frame& frame, uint32_t drawCount) {
+    if (frame.drawCountBuffer.handle == VK_NULL_HANDLE) {
+        frame.drawCountBuffer = createBuffer(context,
+                                             sizeof(uint32_t) * BUCKET_COUNT,
+                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
+                                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                             MemoryLocation::DEVICE,
+                                             "그리기 개수");
+    }
+    if (drawCount <= frame.meshletDrawCapacity) {
+        return;
+    }
+    uint32_t capacity = std::max(drawCount, std::max(frame.meshletDrawCapacity * 2, MINIMUM_INSTANCE_CAPACITY));
+    destroyBuffer(context, frame.meshletDrawBuffer);
+    frame.meshletDrawBuffer = createBuffer(context,
+                                           static_cast<VkDeviceSize>(capacity) * sizeof(VkDrawIndexedIndirectCommand),
+                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
+                                               VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                           MemoryLocation::DEVICE,
+                                           "meshlet 그리기 명령");
+    frame.meshletDrawCapacity = capacity;
+}
+
+void Renderer::createCullPipeline() {
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushConstantRange.size = sizeof(CullPushConstants);
+
+    VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushConstantRange;
+    VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &cullPipelineLayout));
+
+    VkShaderModule module = createShaderModule(context.device, "cull_meshlets.comp.spv");
+    VkComputePipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    pipelineInfo.stage = shaderStage(VK_SHADER_STAGE_COMPUTE_BIT, module);
+    pipelineInfo.layout = cullPipelineLayout;
+    VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &cullPipeline));
+    vkDestroyShaderModule(context.device, module, nullptr);
+
+    if (context.caps.drawIndirectCount) {
+        drawIndexedIndirectCount = reinterpret_cast<PFN_vkCmdDrawIndexedIndirectCount>(
+            vkGetDeviceProcAddr(context.device, "vkCmdDrawIndexedIndirectCount"));
+    }
+    spdlog::info("컴퓨트 컬링 준비 완료 (압축 간접 그리기: {})", drawIndexedIndirectCount != nullptr);
 }
 
 void Renderer::createPresentSemaphores() {
@@ -669,6 +739,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
 
     FrameBatches batches{};
     uint32_t totalGroups = 0;
+    uint32_t totalMeshletDraws = 0;
     for (const scene::Object& object : scene.objects) {
         if (!drawable(object)) {
             continue;
@@ -678,17 +749,26 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         uint32_t groups = groupsFor(object);
         batches.groups[mode][sided].count += groups;
         totalGroups += groups;
+        // 컴퓨트 컬링은 모든 단계의 meshlet 을 후보로 보므로 상한도 전체 개수로 잡는다.
+        uint32_t candidates = geometry.mesh(object.meshIndex).meshletCount;
+        batches.meshletDraws[mode][sided].count += candidates;
+        totalMeshletDraws += candidates;
+        ++batches.instanceCount;
     }
     reserveMeshletGroups(frame, totalGroups);
+    reserveMeshletDraws(frame, totalMeshletDraws);
 
     uint32_t drawOffset = 0;
     uint32_t groupOffset = 0;
+    uint32_t meshletDrawOffset = 0;
     for (size_t mode = 0; mode < ALPHA_MODE_COUNT; ++mode) {
         for (size_t sided = 0; sided < 2; ++sided) {
             batches.draws[mode][sided].first = drawOffset;
             drawOffset += batches.draws[mode][sided].count;
             batches.groups[mode][sided].first = groupOffset;
             groupOffset += batches.groups[mode][sided].count;
+            batches.meshletDraws[mode][sided].first = meshletDrawOffset;
+            meshletDrawOffset += batches.meshletDraws[mode][sided].count;
         }
     }
 
@@ -719,6 +799,9 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         instances[slot].model = model;
         instances[slot].normalMatrix = glm::mat4(glm::inverseTranspose(glm::mat3(model)));
         instances[slot].meshIndex = object.meshIndex;
+        instances[slot].bucket = static_cast<uint32_t>(mode * 2 + sided);
+        instances[slot].bucketBase = batches.meshletDraws[mode][sided].first;
+        instances[slot].padding = 0;
 
         draws[slot].indexCount = lod.indexCount;
         draws[slot].instanceCount = 1;
@@ -751,7 +834,13 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     float aspect = static_cast<float>(currentRenderExtent.width) / static_cast<float>(currentRenderExtent.height);
     camera->viewProjection = scene.camera.projectionMatrix(aspect) * scene.camera.viewMatrix();
     camera->position = glm::vec4{scene.camera.position, 1.0F};
-    camera->parameters = glm::vec4{scene.camera.nearPlane, 0.0F, 0.0F, 0.0F};
+    // 화면 공간 오차 = 월드 오차 * projectionScale / 거리.
+    float projectionScale = static_cast<float>(currentRenderExtent.height) /
+                            (2.0F * std::tan(glm::radians(scene.camera.fovYDegrees) * 0.5F));
+    camera->parameters = glm::vec4{scene.camera.nearPlane,
+                                   projectionScale,
+                                   lodErrorThreshold,
+                                   automaticLod ? -1.0F : static_cast<float>(lodLevel)};
 
     return batches;
 }
@@ -763,6 +852,7 @@ void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer, const FrameBatc
     Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];
     // 와이어프레임 디버그 뷰는 고전 경로에만 있으므로 그때는 mesh shader 경로를 쓰지 않는다.
     bool meshPath = useMeshShader && meshShaderAvailable() && !wireframe;
+    bool cullPath = useComputeCulling && !meshPath;
 
     size_t firstMode = translucentPass ? TRANSLUCENT_MODE : 0;
     size_t lastMode = translucentPass ? TRANSLUCENT_MODE + 1 : TRANSLUCENT_MODE;
@@ -770,7 +860,9 @@ void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer, const FrameBatc
     for (size_t mode = firstMode; mode < lastMode; ++mode) {
         bool bound = false;
         for (size_t sided = 0; sided < 2; ++sided) {
-            const DrawBatch& batch = meshPath ? batches.groups[mode][sided] : batches.draws[mode][sided];
+            const DrawBatch& batch = meshPath   ? batches.groups[mode][sided]
+                                     : cullPath ? batches.meshletDraws[mode][sided]
+                                                : batches.draws[mode][sided];
             if (batch.count == 0) {
                 continue;
             }
@@ -797,6 +889,25 @@ void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer, const FrameBatc
                                       (mode * 2 + sided) * TASK_STRIDE,
                                       1,
                                       static_cast<uint32_t>(TASK_STRIDE));
+            } else if (cullPath) {
+                VkDeviceSize offset = batch.first * DRAW_STRIDE;
+                if (drawIndexedIndirectCount != nullptr) {
+                    // 압축 간접 그리기가 있으면 GPU 가 센 개수만 처리한다.
+                    drawIndexedIndirectCount(commandBuffer,
+                                             frame.meshletDrawBuffer.handle,
+                                             offset,
+                                             frame.drawCountBuffer.handle,
+                                             (mode * 2 + sided) * sizeof(uint32_t),
+                                             batch.count,
+                                             static_cast<uint32_t>(DRAW_STRIDE));
+                } else {
+                    // 없으면 상한만큼 넘기고 컬링된 자리는 0 으로 채워 둔 무효 명령이 걸러 낸다.
+                    vkCmdDrawIndexedIndirect(commandBuffer,
+                                             frame.meshletDrawBuffer.handle,
+                                             offset,
+                                             batch.count,
+                                             static_cast<uint32_t>(DRAW_STRIDE));
+                }
             } else {
                 vkCmdDrawIndexedIndirect(commandBuffer,
                                          frame.drawBuffer.handle,
@@ -806,6 +917,50 @@ void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer, const FrameBatc
             }
         }
     }
+}
+
+void Renderer::recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches& batches) {
+    Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];
+
+    vkCmdFillBuffer(commandBuffer, frame.drawCountBuffer.handle, 0, VK_WHOLE_SIZE, 0);
+    if (drawIndexedIndirectCount == nullptr) {
+        // 압축 간접 그리기가 없으면 상한만큼 그리므로, 남은 자리는 0 으로 채워 무효 명령으로 만든다.
+        vkCmdFillBuffer(commandBuffer, frame.meshletDrawBuffer.handle, 0, VK_WHOLE_SIZE, 0);
+    }
+
+    VkMemoryBarrier2 clearBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    clearBarrier.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+    clearBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    clearBarrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    clearBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    VkDependencyInfo clearDependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    clearDependency.memoryBarrierCount = 1;
+    clearDependency.pMemoryBarriers = &clearBarrier;
+    vkCmdPipelineBarrier2(commandBuffer, &clearDependency);
+
+    CullPushConstants pushConstants{frame.instanceBuffer.address,
+                                    geometry.meshBuffer.address,
+                                    geometry.meshletBuffer.address,
+                                    frame.cameraBuffer.address,
+                                    frame.meshletDrawBuffer.address,
+                                    frame.drawCountBuffer.address,
+                                    batches.instanceCount,
+                                    (frustumCulling ? CULL_FLAG_FRUSTUM : 0U) | (coneCulling ? CULL_FLAG_CONE : 0U)};
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, cullPipeline);
+    vkCmdPushConstants(
+        commandBuffer, cullPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+    vkCmdDispatch(commandBuffer, std::max(batches.instanceCount, 1U), 1, 1);
+
+    VkMemoryBarrier2 cullBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    cullBarrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    cullBarrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    cullBarrier.dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+    cullBarrier.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+    VkDependencyInfo cullDependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    cullDependency.memoryBarrierCount = 1;
+    cullDependency.pMemoryBarriers = &cullBarrier;
+    vkCmdPipelineBarrier2(commandBuffer, &cullDependency);
 }
 
 void Renderer::recordUiPass(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
@@ -852,6 +1007,10 @@ void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, const FrameBatc
                  0,
                  VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
                  VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+
+    if (useComputeCulling) {
+        recordCullPass(commandBuffer, batches);
+    }
 
     ScenePushConstants scenePushConstants{geometry.vertexBuffer.address,
                                           geometry.meshBuffer.address,

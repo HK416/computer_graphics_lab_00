@@ -80,7 +80,8 @@ set(shader_sources
     shaders/oit_composite.frag
     shaders/tonemap.frag
     shaders/mesh.task
-    shaders/mesh.mesh)
+    shaders/mesh.mesh
+    shaders/cull_meshlets.comp)
 
 set(shader_binaries)
 foreach(shader IN LISTS shader_sources)

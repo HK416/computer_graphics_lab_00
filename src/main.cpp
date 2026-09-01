@@ -23,6 +23,8 @@ int main(int argc, char* argv[]) {
             options.debugMode = static_cast<uint32_t>(std::atoi(argv[++i]));
         } else if (argument == "--lod" && i + 1 < argc) {
             options.lodLevel = static_cast<uint32_t>(std::atoi(argv[++i]));
+        } else if (argument == "--lod-error" && i + 1 < argc) {
+            options.lodErrorThreshold = static_cast<float>(std::atof(argv[++i]));
         }
     }
 

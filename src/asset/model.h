@@ -61,6 +61,7 @@ struct Meshlet {
     glm::vec4 parentSphere{0.0F};   // 부모 그룹의 경계 구
     float error = 0.0F;
     float parentError = 0.0F;
+    uint32_t indexOffset = 0;    // Mesh::indices 기준. meshlet 의 삼각형이 연속으로 놓인다.
     uint32_t vertexOffset = 0;   // Mesh::vertices 기준. meshlet 마다 정점을 따로 소유한다.
     uint32_t triangleOffset = 0; // Mesh::meshletTriangles 기준
     uint32_t vertexCount = 0;

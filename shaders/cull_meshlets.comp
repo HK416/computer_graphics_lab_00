@@ -1,0 +1,67 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+#include "culling.glsl"
+#include "scene_types.glsl"
+
+// 워크그룹 하나가 인스턴스 하나를 맡고, 그 인스턴스의 meshlet 을 나누어 검사한다.
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform CullPushConstants {
+    InstanceBuffer instances;
+    MeshBuffer meshes;
+    MeshletBuffer meshlets;
+    CameraBuffer camera;
+    DrawCommandBuffer drawCommands;
+    CounterBuffer drawCounts;
+    uint instanceCount;
+    uint flags; // bit 0: 절두체 컬링, bit 1: 법선 원뿔 컬링
+} cull;
+
+#define CULL_FLAG_FRUSTUM 1u
+#define CULL_FLAG_CONE 2u
+
+void main() {
+    uint instanceIndex = gl_WorkGroupID.x;
+    if (instanceIndex >= cull.instanceCount) {
+        return;
+    }
+
+    Instance instance = cull.instances.items[instanceIndex];
+    Mesh mesh = cull.meshes.items[instance.meshIndex];
+    Camera camera = cull.camera.item;
+
+    vec4 planes[5];
+    extractFrustumPlanes(camera.viewProjection, planes);
+    mat3 normalMatrix = mat3(instance.normalMatrix);
+
+    for (uint i = gl_LocalInvocationIndex; i < mesh.meshletCount; i += gl_WorkGroupSize.x) {
+        Meshlet meshlet = cull.meshlets.items[mesh.meshletOffset + i];
+
+        if (!selectLod(meshlet, instance.model, camera.position.xyz, camera.parameters.y, camera.parameters.z,
+                       camera.parameters.w)) {
+            continue;
+        }
+
+        vec4 sphere = transformBoundingSphere(instance.model, meshlet.boundingSphere);
+        if ((cull.flags & CULL_FLAG_FRUSTUM) != 0u && !sphereInFrustum(planes, sphere.xyz, sphere.w)) {
+            continue;
+        }
+        if ((cull.flags & CULL_FLAG_CONE) != 0u) {
+            vec3 coneAxis = normalize(normalMatrix * meshlet.cone.xyz);
+            if (!coneVisible(sphere.xyz, sphere.w, coneAxis, meshlet.cone.w, camera.position.xyz)) {
+                continue;
+            }
+        }
+
+        uint slot = atomicAdd(cull.drawCounts.items[instance.bucket], 1);
+        DrawCommand command;
+        command.indexCount = meshlet.triangleCount * 3;
+        command.instanceCount = 1;
+        command.firstIndex = meshlet.indexOffset;
+        command.vertexOffset = mesh.vertexOffset;
+        command.firstInstance = instanceIndex;
+        cull.drawCommands.items[instance.bucketBase + slot] = command;
+    }
+}

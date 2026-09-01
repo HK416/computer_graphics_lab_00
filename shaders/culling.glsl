@@ -1,6 +1,8 @@
 #ifndef CULLING_GLSL
 #define CULLING_GLSL
 
+#include "scene_types.glsl"
+
 // 뷰 프로젝션 행렬에서 절두체 평면을 뽑는다 (Gribb-Hartmann).
 // 무한 원거리 reverse-Z 에서는 원거리 평면이 존재하지 않고, row3 - row2 가 근평면이 된다.
 void extractFrustumPlanes(mat4 viewProjection, out vec4 planes[5]) {
@@ -45,6 +47,33 @@ vec4 transformBoundingSphere(mat4 model, vec4 sphere) {
     float scale = sqrt(max(max(dot(model[0].xyz, model[0].xyz), dot(model[1].xyz, model[1].xyz)),
                            dot(model[2].xyz, model[2].xyz)));
     return vec4(center, sphere.w * scale);
+}
+
+// 화면 공간 오차. 부모가 없는 meshlet 은 오차가 무한대로 들어와 항상 임계값을 넘는다.
+float projectedError(vec3 cameraPosition, float projectionScale, vec4 sphere, float error) {
+    if (isinf(error) || error > 3.0e37) {
+        return 1.0e38;
+    }
+    float viewDistance = max(length(sphere.xyz - cameraPosition) - sphere.w, 1e-3);
+    return error * projectionScale / viewDistance;
+}
+
+// 자신의 오차는 허용되고 부모의 오차는 허용되지 않는 meshlet 만 그린다. 같은 그룹은 같은 판정을
+// 받으므로 서로 다른 단계가 맞닿아도 틈이 생기지 않는다.
+bool selectLod(Meshlet meshlet,
+               mat4 model,
+               vec3 cameraPosition,
+               float projectionScale,
+               float threshold,
+               float forcedLevel) {
+    if (forcedLevel >= 0.0) {
+        return float(meshlet.level) == forcedLevel;
+    }
+    vec4 ownSphere = transformBoundingSphere(model, meshlet.errorSphere);
+    vec4 parentSphere = transformBoundingSphere(model, meshlet.parentSphere);
+    float own = projectedError(cameraPosition, projectionScale, ownSphere, meshlet.error);
+    float parent = projectedError(cameraPosition, projectionScale, parentSphere, meshlet.parentError);
+    return own <= threshold && parent > threshold;
 }
 
 #endif

@@ -41,6 +41,7 @@ struct GpuMeshlet {
     glm::vec4 parentSphere;   // 부모 그룹의 경계 구
     float error;
     float parentError;
+    uint32_t indexOffset;    // 전역 인덱스 버퍼 기준
     uint32_t vertexOffset;   // 전역 정점 버퍼 기준
     uint32_t triangleOffset; // 전역 meshlet 삼각형 버퍼 기준
     uint32_t vertexCount;
@@ -71,7 +72,10 @@ struct GpuInstance {
     glm::mat4 model;
     glm::mat4 normalMatrix;
     uint32_t meshIndex;
-    uint32_t padding[3];
+    // 재질 경로와 면 방향 조합. 컬링 컴퓨트가 이 값으로 그리기 명령 구간을 고른다.
+    uint32_t bucket;
+    uint32_t bucketBase;
+    uint32_t padding;
 };
 
 // 모든 모델의 정점과 인덱스를 하나의 버퍼로 합쳐 간접 그리기 한 번으로 장면 전체를 그릴 수 있게 한다.

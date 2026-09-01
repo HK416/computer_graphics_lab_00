@@ -38,6 +38,9 @@ using DrawBatches = std::array<std::array<DrawBatch, 2>, ALPHA_MODE_COUNT>;
 struct FrameBatches {
     DrawBatches draws;
     DrawBatches groups;
+    // 컴퓨트 컬링이 쓸 버킷별 간접 그리기 명령 구간. count 는 상한이고 실제 개수는 GPU 가 센다.
+    DrawBatches meshletDraws;
+    uint32_t instanceCount = 0;
 };
 
 // 화면 크기에 맞춰 다시 만들어지는 오프스크린 대상들. 셰이더에서 읽으려고 bindless 슬롯도 함께 잡는다.
@@ -88,8 +91,16 @@ public:
     bool wireframe = false;
     // shaders/scene_data.glsl 의 DEBUG_MODE_* 값.
     uint32_t debugMode = 0;
-    // 고정 LOD 단계. 자동 선정은 컴퓨트 컬링 단계에서 붙는다.
+    // 자동 LOD 선정을 끄면 이 단계를 강제한다.
+    bool automaticLod = true;
     uint32_t lodLevel = 0;
+    // 허용할 화면 공간 오차(픽셀). 클수록 낮은 단계를 고른다.
+    float lodErrorThreshold = 1.0F;
+
+    // GPU 컴퓨트가 meshlet 단위로 컬링하고 간접 그리기 명령을 만든다.
+    bool useComputeCulling = true;
+    bool frustumCulling = true;
+    bool coneCulling = true;
     // mesh shader 미지원 장치에서는 켤 수 없다.
     bool useMeshShader = false;
     bool meshShaderAvailable() const { return meshShaderPipelines[0] != VK_NULL_HANDLE; }
@@ -107,8 +118,12 @@ private:
         Buffer drawBuffer;
         Buffer meshletGroupBuffer;
         Buffer meshTaskIndirectBuffer;
+        // 컴퓨트 컬링이 채우는 meshlet 단위 간접 그리기 명령과 버킷별 개수.
+        Buffer meshletDrawBuffer;
+        Buffer drawCountBuffer;
         uint32_t instanceCapacity = 0;
         uint32_t groupCapacity = 0;
+        uint32_t meshletDrawCapacity = 0;
     };
 
     void createFrames();
@@ -120,6 +135,9 @@ private:
     void recreateSwapchain();
     void reserveInstances(Frame& frame, uint32_t instanceCount);
     void reserveMeshletGroups(Frame& frame, uint32_t groupCount);
+    void reserveMeshletDraws(Frame& frame, uint32_t drawCount);
+    void createCullPipeline();
+    void recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches& batches);
     // 장면을 순회하며 인스턴스와 간접 그리기 명령을 재질 경로별 구간으로 채운다.
     FrameBatches buildDrawCommands(Frame& frame, const scene::Scene& scene);
     void recordCommands(Frame& frame, uint32_t imageIndex, const FrameBatches& batches);
@@ -150,6 +168,9 @@ private:
     std::array<VkPipeline, ALPHA_MODE_COUNT> meshShaderPipelines{};
     PFN_vkCmdDrawMeshTasksIndirectEXT drawMeshTasksIndirect = nullptr;
     VkShaderStageFlags scenePushStages = 0;
+    VkPipelineLayout cullPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline cullPipeline = VK_NULL_HANDLE;
+    PFN_vkCmdDrawIndexedIndirectCount drawIndexedIndirectCount = nullptr;
     VkPipelineLayout postPipelineLayout = VK_NULL_HANDLE;
     VkPipeline compositePipeline = VK_NULL_HANDLE;
     VkPipeline tonemapPipeline = VK_NULL_HANDLE;

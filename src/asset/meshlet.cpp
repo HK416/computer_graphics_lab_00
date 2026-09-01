@@ -276,6 +276,7 @@ void buildLodHierarchy(Mesh& mesh) {
             meshlet.error = source.error;
             meshlet.parentError = source.parentError;
             meshlet.level = source.level;
+            meshlet.indexOffset = static_cast<uint32_t>(mesh.indices.size());
             meshlet.vertexOffset = static_cast<uint32_t>(mesh.vertices.size());
             meshlet.triangleOffset = static_cast<uint32_t>(mesh.meshletTriangles.size());
             meshlet.vertexCount = static_cast<uint32_t>(source.vertices.size());
