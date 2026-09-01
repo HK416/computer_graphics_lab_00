@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <memory>
 
+#include "asset/model.h"
 #include "core/job_system.h"
 #include "editor/editor.h"
 #include "gfx/bindless.h"
@@ -48,6 +49,10 @@ public:
 
 private:
     void loadScenes();
+    // 모델 하나를 지오메트리 저장소에 넣고 장면에 뿌리 오브젝트와 자식들을 만든다.
+    void addModelToScene(asset::Model& model, scene::Scene& scene);
+    // 편집기가 부르는 런타임 적재. 지오메트리 버퍼를 다시 만들고 활성 장면에 붙인다.
+    void loadModel(const std::filesystem::path& path);
 
     SDL_Window* window = nullptr;
     std::unique_ptr<gfx::Context> context;
@@ -58,6 +63,7 @@ private:
     std::unique_ptr<editor::Editor> editorUi;
     core::JobSystem jobs;
     scene::SceneManager scenes;
+    std::filesystem::path assetRoot;
     Options options;
 };
 

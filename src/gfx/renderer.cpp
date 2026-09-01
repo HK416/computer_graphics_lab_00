@@ -985,17 +985,19 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     auto groupsFor = [&lodFor](const scene::Object& object) {
         return (lodFor(object).meshletCount + MESHLET_GROUP_SIZE - 1) / MESHLET_GROUP_SIZE;
     };
-    auto drawable = [this](const scene::Object& object) {
-        return object.visible && object.meshIndex < geometry.meshCount();
+    // 조상이 숨겨져 있으면 자식도 그리지 않는다. 변환만 담는 노드는 메쉬가 없어 걸러진다.
+    auto drawable = [this, &scene](uint32_t index) {
+        return scene.visibleInTree(index) && scene.objects[index].meshIndex < geometry.meshCount();
     };
 
     FrameBatches batches{};
     uint32_t totalGroups = 0;
     uint32_t totalMeshletDraws = 0;
-    for (const scene::Object& object : scene.objects) {
-        if (!drawable(object)) {
+    for (uint32_t index = 0; index < scene.objects.size(); ++index) {
+        if (!drawable(index)) {
             continue;
         }
+        const scene::Object& object = scene.objects[index];
         auto [mode, sided] = bucketOf(object);
         ++batches.draws[mode][sided].count;
         uint32_t groups = groupsFor(object);
@@ -1010,23 +1012,37 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     reserveMeshletGroups(frame, totalGroups);
     reserveMeshletDraws(frame, totalMeshletDraws);
 
-    // 조인트 행렬은 스킨마다 한 번만 올리고 인스턴스는 그 구간의 시작점만 가리킨다.
-    std::vector<uint32_t> skinOffsets(scene.jointMatrices.size(), NO_JOINTS);
+    // 조인트 행렬은 (애니메이터, 스킨) 마다 한 번만 올리고 인스턴스는 그 구간의 시작점만 가리킨다.
+    std::vector<std::vector<uint32_t>> skinOffsets(scene.animators.size());
     uint32_t totalJoints = 0;
-    for (size_t skin = 0; skin < scene.jointMatrices.size(); ++skin) {
-        if (scene.jointMatrices[skin].empty()) {
-            continue;
+    for (size_t animator = 0; animator < scene.animators.size(); ++animator) {
+        const std::vector<std::vector<glm::mat4>>& matrices = scene.animators[animator].jointMatrices;
+        skinOffsets[animator].assign(matrices.size(), NO_JOINTS);
+        for (size_t skin = 0; skin < matrices.size(); ++skin) {
+            if (matrices[skin].empty()) {
+                continue;
+            }
+            skinOffsets[animator][skin] = totalJoints;
+            totalJoints += static_cast<uint32_t>(matrices[skin].size());
         }
-        skinOffsets[skin] = totalJoints;
-        totalJoints += static_cast<uint32_t>(scene.jointMatrices[skin].size());
     }
     reserveJoints(frame, totalJoints);
     auto* joints = static_cast<glm::mat4*>(frame.jointBuffer.mapped);
-    for (size_t skin = 0; skin < skinOffsets.size(); ++skin) {
-        if (skinOffsets[skin] != NO_JOINTS) {
-            std::ranges::copy(scene.jointMatrices[skin], joints + skinOffsets[skin]);
+    for (size_t animator = 0; animator < skinOffsets.size(); ++animator) {
+        for (size_t skin = 0; skin < skinOffsets[animator].size(); ++skin) {
+            if (skinOffsets[animator][skin] != NO_JOINTS) {
+                std::ranges::copy(scene.animators[animator].jointMatrices[skin], joints + skinOffsets[animator][skin]);
+            }
         }
     }
+    auto jointOffsetFor = [&skinOffsets](const scene::Object& object) {
+        if (object.animator < 0 || object.skin < 0) {
+            return NO_JOINTS;
+        }
+        const std::vector<uint32_t>& offsets = skinOffsets[static_cast<size_t>(object.animator)];
+        return static_cast<size_t>(object.skin) < offsets.size() ? offsets[static_cast<size_t>(object.skin)]
+                                                                 : NO_JOINTS;
+    };
 
     uint32_t drawOffset = 0;
     uint32_t groupOffset = 0;
@@ -1055,25 +1071,24 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         }
     }
 
-    for (const scene::Object& object : scene.objects) {
-        if (!drawable(object)) {
+    for (uint32_t index = 0; index < scene.objects.size(); ++index) {
+        if (!drawable(index)) {
             continue;
         }
+        const scene::Object& object = scene.objects[index];
         auto [mode, sided] = bucketOf(object);
         uint32_t slot = drawCursors[mode][sided]++;
 
         const GpuMesh& mesh = geometry.mesh(object.meshIndex);
         const GpuMeshLod& lod = lodFor(object);
-        glm::mat4 model = object.transform.matrix();
+        glm::mat4 model = scene.worldMatrix(index);
 
         instances[slot].model = model;
         instances[slot].normalMatrix = glm::mat4(glm::inverseTranspose(glm::mat3(model)));
         instances[slot].meshIndex = object.meshIndex;
         instances[slot].bucket = static_cast<uint32_t>(mode * 2 + sided);
         instances[slot].bucketBase = batches.meshletDraws[mode][sided].first;
-        instances[slot].jointOffset = object.skin >= 0 && static_cast<size_t>(object.skin) < skinOffsets.size()
-                                          ? skinOffsets[object.skin]
-                                          : NO_JOINTS;
+        instances[slot].jointOffset = jointOffsetFor(object);
 
         draws[slot].indexCount = lod.indexCount;
         draws[slot].instanceCount = 1;
@@ -1806,6 +1821,12 @@ void Renderer::writeCapture() {
     }
     spdlog::info("화면 캡처 저장: {} ({}x{})", path, width, height);
     capturePath.clear();
+}
+
+void Renderer::onGeometryChanged() {
+    if (rayTracer != nullptr) {
+        rayTracer->buildBottomLevel();
+    }
 }
 
 void Renderer::prepareFrame() {

@@ -1,6 +1,7 @@
 #include "app/application.h"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <limits>
 #include <vector>
@@ -23,18 +24,28 @@ constexpr uint64_t SCREENSHOT_FRAME = 8;
 
 // 장면 전체가 화면에 들어오도록 카메라를 뒤로 물린다.
 void frameCamera(scene::Scene& scene, const gfx::GeometryStore& geometry) {
-    if (scene.objects.empty()) {
-        return;
-    }
     glm::vec3 minimum{std::numeric_limits<float>::max()};
     glm::vec3 maximum{std::numeric_limits<float>::lowest()};
-    for (const scene::Object& object : scene.objects) {
+    bool found = false;
+    for (uint32_t i = 0; i < scene.objects.size(); ++i) {
+        const scene::Object& object = scene.objects[i];
+        if (object.meshIndex >= geometry.meshCount()) {
+            continue;
+        }
+        glm::mat4 world = scene.worldMatrix(i);
         glm::vec4 sphere = geometry.mesh(object.meshIndex).boundingSphere;
-        glm::vec3 center = glm::vec3(object.transform.matrix() * glm::vec4{glm::vec3(sphere), 1.0F});
-        float scale = std::max({object.transform.scale.x, object.transform.scale.y, object.transform.scale.z});
+        glm::vec3 center = glm::vec3(world * glm::vec4{glm::vec3(sphere), 1.0F});
+        // 비균등 스케일은 가장 긴 축으로 보수적으로 잡는다.
+        float scale = std::sqrt(std::max({glm::dot(glm::vec3(world[0]), glm::vec3(world[0])),
+                                          glm::dot(glm::vec3(world[1]), glm::vec3(world[1])),
+                                          glm::dot(glm::vec3(world[2]), glm::vec3(world[2]))}));
         float radius = sphere.w * scale;
         minimum = glm::min(minimum, center - radius);
         maximum = glm::max(maximum, center + radius);
+        found = true;
+    }
+    if (!found) {
+        return;
     }
 
     glm::vec3 center = (minimum + maximum) * 0.5F;
@@ -81,6 +92,7 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
         renderer->triangleBudget = options.triangleBudget;
     }
     renderer->setUiCallback([this](VkCommandBuffer commandBuffer) { editorUi->record(commandBuffer); });
+    editorUi->setModelLoader(assetRoot, [this](const std::filesystem::path& path) { loadModel(path); });
 }
 
 Application::~Application() {
@@ -96,7 +108,7 @@ Application::~Application() {
 }
 
 void Application::loadScenes() {
-    std::filesystem::path assetRoot = std::filesystem::path(CG_LAB_ASSET_ROOT) / "assets";
+    assetRoot = std::filesystem::path(CG_LAB_ASSET_ROOT) / "assets";
 
     std::vector<std::filesystem::path> files;
     std::error_code error;
@@ -165,31 +177,10 @@ void Application::loadScenes() {
                  jobs.workerCount());
 
     // GPU 자원 생성은 순서를 지켜 한 스레드에서만 한다.
-    gfx::Uploader uploader(*context);
     for (asset::Model& model : models) {
-        std::vector<uint32_t> textureSlots;
-        textureSlots.reserve(model.textures.size());
-        for (const asset::Texture& texture : model.textures) {
-            textureSlots.push_back(textures->add(uploader, texture));
-        }
-        uint32_t meshBase = geometry->addModel(model, textureSlots);
-
         scene::Scene& created = scenes.create(model.name);
-        created.skeleton = std::move(model.skeleton);
-        created.objects.reserve(model.instances.size());
-        for (const asset::Instance& instance : model.instances) {
-            scene::Object object;
-            object.name = instance.name;
-            object.meshIndex = meshBase + instance.meshIndex;
-            object.transform = scene::Transform::fromMatrix(instance.transform);
-            object.skin = instance.skin;
-            created.objects.push_back(std::move(object));
-        }
-        // 바인드 포즈라도 조인트 행렬이 있어야 스킨 메쉬가 제자리에 선다.
-        created.update(0.0F);
+        addModelToScene(model, created);
     }
-
-    uploader.flush();
     geometry->build();
     for (size_t i = 0; i < scenes.count(); ++i) {
         scenes.setActive(i);
@@ -197,6 +188,72 @@ void Application::loadScenes() {
     }
     scenes.setActive(std::min(options.initialScene, scenes.count() - 1));
     spdlog::info("장면 {}개 준비 완료, 현재 장면: {}", scenes.count(), scenes.active().name);
+}
+
+void Application::addModelToScene(asset::Model& model, scene::Scene& scene) {
+    gfx::Uploader uploader(*context);
+    std::vector<uint32_t> textureSlots;
+    textureSlots.reserve(model.textures.size());
+    for (const asset::Texture& texture : model.textures) {
+        textureSlots.push_back(textures->add(uploader, texture));
+    }
+    uint32_t meshBase = geometry->addModel(model, textureSlots);
+    uploader.flush();
+
+    // 모델 하나가 계층의 뿌리 하나를 이룬다. 기즈모로 뿌리를 옮기면 자식이 함께 따라간다.
+    auto root = static_cast<int32_t>(scene.objects.size());
+    scene::Object rootObject;
+    rootObject.name = model.name;
+    scene.objects.push_back(std::move(rootObject));
+
+    int32_t animator = -1;
+    if (!model.skeleton.skins.empty()) {
+        animator = static_cast<int32_t>(scene.animators.size());
+        scene::Animator created;
+        created.name = model.name;
+        created.skeleton = std::move(model.skeleton);
+        scene.animators.push_back(std::move(created));
+        // 애니메이션 컨트롤러는 Unity 처럼 뿌리 오브젝트에 붙인다.
+        scene.objects[static_cast<size_t>(root)].animator = animator;
+    }
+
+    for (const asset::Instance& instance : model.instances) {
+        scene::Object object;
+        object.name = instance.name;
+        object.parent = root;
+        object.meshIndex = meshBase + instance.meshIndex;
+        object.transform = scene::Transform::fromMatrix(instance.transform);
+        if (instance.skin >= 0) {
+            object.animator = animator;
+            object.skin = instance.skin;
+        }
+        scene.objects.push_back(std::move(object));
+    }
+
+    // 바인드 포즈라도 조인트 행렬이 있어야 스킨 메쉬가 제자리에 선다.
+    scene.update(0.0F);
+}
+
+void Application::loadModel(const std::filesystem::path& path) {
+    // 지오메트리 버퍼를 통째로 다시 만들기 때문에 진행 중인 프레임이 끝난 뒤에 손대야 한다.
+    renderer->waitIdle();
+
+    uint64_t start = SDL_GetTicksNS();
+    asset::Model model = asset::loadGltf(path);
+    jobs.parallelFor(static_cast<uint32_t>(model.textures.size()), 1, [&model](uint32_t begin, uint32_t end) {
+        for (uint32_t i = begin; i < end; ++i) {
+            asset::decodeTexture(model.textures[i]);
+        }
+    });
+    for (asset::Mesh& mesh : model.meshes) {
+        asset::buildLodHierarchy(mesh, &jobs);
+    }
+
+    addModelToScene(model, scenes.active());
+    geometry->build();
+    renderer->onGeometryChanged();
+    spdlog::info(
+        "모델 적재: {} ({:.1f} ms)", path.filename().string(), static_cast<double>(SDL_GetTicksNS() - start) / 1.0e6);
 }
 
 void Application::run() {

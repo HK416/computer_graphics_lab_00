@@ -259,11 +259,12 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer, const scene::Scene
     instances.reserve(sceneToTrace.objects.size());
 
     uint32_t slot = 0;
-    for (const scene::Object& object : sceneToTrace.objects) {
-        if (!object.visible || object.meshIndex >= bottomLevels.size()) {
+    for (uint32_t index = 0; index < sceneToTrace.objects.size(); ++index) {
+        const scene::Object& object = sceneToTrace.objects[index];
+        if (!sceneToTrace.visibleInTree(index) || object.meshIndex >= bottomLevels.size()) {
             continue;
         }
-        glm::mat4 model = glm::transpose(object.transform.matrix());
+        glm::mat4 model = glm::transpose(sceneToTrace.worldMatrix(index));
 
         VkAccelerationStructureInstanceKHR instance{};
         std::memcpy(&instance.transform, &model, sizeof(VkTransformMatrixKHR));

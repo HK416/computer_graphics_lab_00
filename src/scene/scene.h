@@ -13,6 +13,8 @@
 
 namespace scene {
 
+inline constexpr uint32_t INVALID_MESH = 0xFFFFFFFFU;
+
 struct Transform {
     glm::vec3 position{0.0F};
     glm::quat rotation{1.0F, 0.0F, 0.0F, 0.0F};
@@ -22,35 +24,59 @@ struct Transform {
     static Transform fromMatrix(const glm::mat4& matrix);
 };
 
+// 모델 하나의 스켈레톤과 재생 상태. Unity 의 Animator 처럼 오브젝트가 인덱스로 가리킨다.
+struct Animator {
+    std::string name;
+    asset::Skeleton skeleton;
+    uint32_t clip = 0;
+    float clipTime = 0.0F;
+    bool playing = true;
+    float speed = 1.0F;
+    // 스킨마다의 조인트 행렬. Scene::update 가 채우고 렌더러가 그대로 올린다.
+    std::vector<std::vector<glm::mat4>> jointMatrices;
+
+private:
+    friend struct Scene;
+    std::vector<glm::mat4> nodeWorlds;
+};
+
 struct Object {
     std::string name;
+    // 부모 기준 지역 변환. 세계 변환은 Scene::worldMatrix 가 부모를 거슬러 올라가 만든다.
     Transform transform;
-    // GeometryStore 의 전역 메쉬 인덱스.
-    uint32_t meshIndex = 0;
+    // Scene::objects 인덱스. 뿌리면 -1.
+    int32_t parent = -1;
+    // GeometryStore 의 전역 메쉬 인덱스. 변환만 담는 노드면 INVALID_MESH.
+    uint32_t meshIndex = INVALID_MESH;
     bool visible = true;
-    // Scene::skeleton 의 스킨 인덱스. 스킨이 없으면 -1.
+    // Scene::animators 인덱스와 그 스켈레톤의 스킨 번호. 없으면 -1.
+    int32_t animator = -1;
     int32_t skin = -1;
 };
 
 struct Scene {
     std::string name;
     std::vector<Object> objects;
+    std::vector<Animator> animators;
     Camera camera;
 
-    // 장면 하나는 모델 하나에서 만들어지므로 스켈레톤도 하나면 충분하다.
-    asset::Skeleton skeleton;
-    uint32_t clip = 0;
-    float clipTime = 0.0F;
-    bool playAnimation = true;
-    float animationSpeed = 1.0F;
-    // 스킨마다의 조인트 행렬. update() 가 채우고 렌더러가 그대로 올린다.
-    std::vector<std::vector<glm::mat4>> jointMatrices;
-
-    // 애니메이션 시간을 진행시키고 조인트 행렬을 다시 만든다. 스킨이 없으면 아무것도 하지 않는다.
+    // 애니메이션 시간을 진행시키고 조인트 행렬을 다시 만든다.
     void update(float deltaSeconds);
 
-private:
-    std::vector<glm::mat4> nodeWorlds;
+    // 부모를 거슬러 올라가며 곱한 세계 변환.
+    //
+    // ponytail: 오브젝트마다 부모 사슬을 다시 타므로 깊이에 비례한다. 편집기 규모에서는 문제가
+    // 없지만, 깊은 계층을 대량으로 다루게 되면 프레임마다 한 번 훑어 캐시해야 한다.
+    glm::mat4 worldMatrix(uint32_t index) const;
+    // 조상 중 하나라도 숨겨져 있으면 보이지 않는다.
+    bool visibleInTree(uint32_t index) const;
+
+    // candidate 가 ancestor 자신이거나 그 자손인지. 순환하는 부모 관계를 막는 데 쓴다.
+    bool isDescendant(uint32_t candidate, uint32_t ancestor) const;
+    // 대상과 그 자손을 모두 지운다. 남은 오브젝트의 부모 인덱스는 다시 맞춘다.
+    void removeObject(uint32_t index);
+    // 대상과 그 자손을 복제하고 새로 만든 뿌리의 인덱스를 돌려준다.
+    uint32_t duplicateObject(uint32_t index);
 };
 
 // 여러 장면을 담아 두고 전환한다.

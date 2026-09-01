@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <string>
+#include <utility>
 
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/quaternion.hpp>
@@ -31,6 +32,8 @@ constexpr const char* WINDOW_SCENE = "장면";
 constexpr const char* WINDOW_CONSOLE = "콘솔";
 constexpr const char* WINDOW_TARGETS = "렌더 타겟";
 constexpr const char* WINDOW_SETTINGS = "렌더 설정";
+// 계층 패널에서 오브젝트를 끌 때 쓰는 페이로드 이름.
+constexpr const char* HIERARCHY_PAYLOAD = "계층 오브젝트";
 
 void checkVulkanResult(VkResult result) {
     if (result != VK_SUCCESS) {
@@ -219,6 +222,59 @@ void Editor::buildDockspace() {
     ImGui::End();
 }
 
+void Editor::setModelLoader(std::filesystem::path root, std::function<void(const std::filesystem::path&)> loader) {
+    modelRoot = std::move(root);
+    modelLoader = std::move(loader);
+}
+
+void Editor::drawHierarchyNode(scene::Scene& active, int index) {
+    scene::Object& object = active.objects[static_cast<size_t>(index)];
+    bool hasChildren = std::ranges::any_of(
+        active.objects, [index](const scene::Object& candidate) { return candidate.parent == index; });
+
+    ImGui::PushID(index);
+    ImGui::Checkbox("##visible", &object.visible);
+    ImGui::SameLine();
+
+    ImGuiTreeNodeFlags flags =
+        ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_DefaultOpen;
+    if (!hasChildren) {
+        flags |= ImGuiTreeNodeFlags_Leaf;
+    }
+    if (selectedObject == index) {
+        flags |= ImGuiTreeNodeFlags_Selected;
+    }
+    bool open = ImGui::TreeNodeEx("##node", flags, "%s", object.name.c_str());
+    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+        selectedObject = index;
+    }
+
+    // 끌어다 놓아 부모를 바꾼다. 실제 적용은 순회가 끝난 뒤에 한다.
+    if (ImGui::BeginDragDropSource()) {
+        ImGui::SetDragDropPayload(HIERARCHY_PAYLOAD, &index, sizeof(index));
+        ImGui::TextUnformatted(object.name.c_str());
+        ImGui::EndDragDropSource();
+    }
+    if (ImGui::BeginDragDropTarget()) {
+        const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(HIERARCHY_PAYLOAD);
+        if (payload != nullptr) {
+            pendingChild = *static_cast<const int*>(payload->Data);
+            pendingParent = index;
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    if (open) {
+        for (int child = 0; child < static_cast<int>(active.objects.size()); ++child) {
+            if (active.objects[static_cast<size_t>(child)].parent == index) {
+                drawHierarchyNode(active, child);
+            }
+        }
+        ImGui::TreePop();
+    }
+    ImGui::PopID();
+}
+
 void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStore& geometry) {
     if (!ImGui::Begin(WINDOW_HIERARCHY)) {
         ImGui::End();
@@ -238,22 +294,33 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
     ImGui::Separator();
 
     scene::Scene& active = scenes.active();
+    bool hasSelection = selectedObject >= 0 && selectedObject < static_cast<int>(active.objects.size());
 
     if (ImGui::Button("추가")) {
         ImGui::OpenPopup("메쉬 선택");
     }
     ImGui::SameLine();
-    bool hasSelection = selectedObject >= 0 && selectedObject < static_cast<int>(active.objects.size());
+    if (ImGui::Button("모델")) {
+        // 팝업을 열 때마다 다시 훑는다. 실행 중에 파일이 늘어날 수 있다.
+        modelFiles.clear();
+        std::error_code error;
+        for (const auto& entry : std::filesystem::directory_iterator(modelRoot, error)) {
+            std::filesystem::path extension = entry.path().extension();
+            if (entry.is_regular_file() && (extension == ".glb" || extension == ".gltf")) {
+                modelFiles.push_back(entry.path());
+            }
+        }
+        std::ranges::sort(modelFiles);
+        ImGui::OpenPopup("모델 선택");
+    }
+    ImGui::SameLine();
     ImGui::BeginDisabled(!hasSelection);
     if (ImGui::Button("복제")) {
-        scene::Object copy = active.objects[static_cast<size_t>(selectedObject)];
-        copy.name += " (복사)";
-        active.objects.push_back(std::move(copy));
-        selectedObject = static_cast<int>(active.objects.size()) - 1;
+        selectedObject = static_cast<int>(active.duplicateObject(static_cast<uint32_t>(selectedObject)));
     }
     ImGui::SameLine();
     if (ImGui::Button("삭제") || (hasSelection && ImGui::IsKeyPressed(ImGuiKey_Delete))) {
-        active.objects.erase(active.objects.begin() + selectedObject);
+        active.removeObject(static_cast<uint32_t>(selectedObject));
         selectedObject = -1;
     }
     ImGui::EndDisabled();
@@ -275,39 +342,58 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
         }
         ImGui::EndPopup();
     }
+
+    if (ImGui::BeginPopup("모델 선택")) {
+        if (modelFiles.empty()) {
+            ImGui::TextDisabled("%s 에 glTF 파일이 없습니다", modelRoot.string().c_str());
+        }
+        for (const std::filesystem::path& file : modelFiles) {
+            if (ImGui::Selectable(file.filename().string().c_str())) {
+                pendingModel = file;
+            }
+        }
+        ImGui::Separator();
+        ImGui::SetNextItemWidth(320.0F);
+        ImGui::InputText("경로", modelPathInput.data(), modelPathInput.size());
+        ImGui::SameLine();
+        if (ImGui::Button("열기") && modelPathInput[0] != '\0') {
+            pendingModel = std::filesystem::path{modelPathInput.data()};
+        }
+        ImGui::EndPopup();
+    }
     ImGui::Separator();
 
-    // 스킨과 애니메이션은 모델 단위라 오브젝트 선택과 무관하게 장면 패널에서 다룬다.
-    if (!active.skeleton.animations.empty() && ImGui::CollapsingHeader("애니메이션", ImGuiTreeNodeFlags_DefaultOpen)) {
-        active.clip = std::min(active.clip, static_cast<uint32_t>(active.skeleton.animations.size()) - 1);
-        const asset::Animation& clip = active.skeleton.animations[active.clip];
-        if (ImGui::BeginCombo("클립", clip.name.c_str())) {
-            for (uint32_t i = 0; i < active.skeleton.animations.size(); ++i) {
-                if (ImGui::Selectable(active.skeleton.animations[i].name.c_str(), i == active.clip)) {
-                    active.clip = i;
-                    active.clipTime = 0.0F;
-                }
-            }
-            ImGui::EndCombo();
+    // 여기부터는 오브젝트의 부모-자식 구조만 보여준다.
+    for (int i = 0; i < static_cast<int>(active.objects.size()); ++i) {
+        if (active.objects[static_cast<size_t>(i)].parent < 0) {
+            drawHierarchyNode(active, i);
         }
-        ImGui::Checkbox("재생", &active.playAnimation);
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(90.0F);
-        ImGui::DragFloat("속도", &active.animationSpeed, 0.01F, -4.0F, 4.0F);
-        ImGui::SliderFloat("시간", &active.clipTime, 0.0F, std::max(clip.duration, 0.001F), "%.2f s");
-        ImGui::Separator();
     }
 
-    for (int i = 0; i < static_cast<int>(active.objects.size()); ++i) {
-        scene::Object& object = active.objects[static_cast<size_t>(i)];
-        ImGui::PushID(i);
-        ImGui::Checkbox("##visible", &object.visible);
-        ImGui::SameLine();
-        if (ImGui::Selectable(object.name.c_str(), selectedObject == i)) {
-            selectedObject = i;
+    // 남는 공간에 놓으면 뿌리로 끌어올린다.
+    ImGui::Dummy(ImGui::GetContentRegionAvail());
+    if (ImGui::BeginDragDropTarget()) {
+        const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(HIERARCHY_PAYLOAD);
+        if (payload != nullptr) {
+            pendingChild = *static_cast<const int*>(payload->Data);
+            pendingParent = -1;
         }
-        ImGui::PopID();
+        ImGui::EndDragDropTarget();
     }
+
+    // 부모가 바뀌어도 화면에서의 위치는 그대로 두려고 지역 변환을 다시 계산한다.
+    if (pendingChild >= 0 && pendingChild < static_cast<int>(active.objects.size()) &&
+        !active.isDescendant(static_cast<uint32_t>(pendingParent < 0 ? pendingChild : pendingParent),
+                             static_cast<uint32_t>(pendingChild))) {
+        glm::mat4 world = active.worldMatrix(static_cast<uint32_t>(pendingChild));
+        glm::mat4 parentWorld =
+            pendingParent >= 0 ? active.worldMatrix(static_cast<uint32_t>(pendingParent)) : glm::mat4{1.0F};
+        scene::Object& child = active.objects[static_cast<size_t>(pendingChild)];
+        child.parent = pendingParent;
+        child.transform = scene::Transform::fromMatrix(glm::inverse(parentWorld) * world);
+    }
+    pendingChild = -1;
+
     ImGui::End();
 }
 
@@ -334,6 +420,37 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
             object.transform.rotation = glm::quat(glm::radians(euler));
         }
         ImGui::DragFloat3("크기", glm::value_ptr(object.transform.scale), 0.01F, 0.001F, 1000.0F);
+        if (object.parent >= 0) {
+            ImGui::TextDisabled("부모: %s", active.objects[static_cast<size_t>(object.parent)].name.c_str());
+        }
+    }
+
+    // 애니메이션 컨트롤러. 스켈레톤을 가진 오브젝트에만 나온다.
+    if (object.animator >= 0 && object.animator < static_cast<int>(active.animators.size())) {
+        scene::Animator& animator = active.animators[static_cast<size_t>(object.animator)];
+        if (ImGui::CollapsingHeader("애니메이션", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (animator.skeleton.animations.empty()) {
+                ImGui::TextDisabled("클립이 없는 스켈레톤입니다");
+            } else {
+                animator.clip = std::min(animator.clip, static_cast<uint32_t>(animator.skeleton.animations.size()) - 1);
+                const asset::Animation& clip = animator.skeleton.animations[animator.clip];
+                if (ImGui::BeginCombo("클립", clip.name.c_str())) {
+                    for (uint32_t i = 0; i < animator.skeleton.animations.size(); ++i) {
+                        if (ImGui::Selectable(animator.skeleton.animations[i].name.c_str(), i == animator.clip)) {
+                            animator.clip = i;
+                            animator.clipTime = 0.0F;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::Checkbox("재생", &animator.playing);
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(90.0F);
+                ImGui::DragFloat("속도", &animator.speed, 0.01F, -4.0F, 4.0F);
+                ImGui::SliderFloat("시간", &animator.clipTime, 0.0F, std::max(clip.duration, 0.001F), "%.2f s");
+            }
+            ImGui::Text("조인트 %zu, 스킨 %zu", animator.skeleton.nodes.size(), animator.skeleton.skins.size());
+        }
     }
 
     if (object.meshIndex < geometry.meshCount() &&
@@ -402,7 +519,10 @@ void Editor::buildSceneView(scene::Scene& active) {
         glm::mat4 projection = active.camera.gizmoProjectionMatrix(aspect);
 
         scene::Object& object = active.objects[static_cast<size_t>(selectedObject)];
-        glm::mat4 model = object.transform.matrix();
+        // 기즈모는 세계 공간에서 조작하므로 부모 변환을 씌웠다가 결과에서 다시 걷어낸다.
+        glm::mat4 parentWorld =
+            object.parent >= 0 ? active.worldMatrix(static_cast<uint32_t>(object.parent)) : glm::mat4{1.0F};
+        glm::mat4 model = parentWorld * object.transform.matrix();
 
         // Ctrl 을 누르면 스냅을 건다. 조작 종류마다 단위가 다르다.
         glm::vec3 snapValue{0.25F};
@@ -420,7 +540,7 @@ void Editor::buildSceneView(scene::Scene& active) {
                                  glm::value_ptr(model),
                                  nullptr,
                                  snap)) {
-            object.transform = scene::Transform::fromMatrix(model);
+            object.transform = scene::Transform::fromMatrix(glm::inverse(parentWorld) * model);
         }
         gizmoUsing = ImGuizmo::IsUsing();
     }
@@ -642,6 +762,14 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
     buildRenderSettings(deltaSeconds);
     buildRenderTargets();
     buildConsole();
+
+    // 적재는 지오메트리 버퍼를 다시 만들기 때문에 패널을 다 그린 뒤에 한 번만 처리한다.
+    if (!pendingModel.empty()) {
+        std::filesystem::path path = std::exchange(pendingModel, {});
+        if (modelLoader) {
+            modelLoader(path);
+        }
+    }
 
     ImGui::Render();
 }

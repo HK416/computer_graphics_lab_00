@@ -115,6 +115,17 @@ void GeometryStore::build() {
         core::fatal("장면에 그릴 메쉬가 없습니다");
     }
 
+    // 런타임에 모델을 더 얹으면 다시 불린다. 이전 버퍼를 먼저 버려야 하며, 호출 전에 장치가
+    // 놀고 있어야 한다.
+    destroyBuffer(context, vertexMeshletBuffer);
+    destroyBuffer(context, meshletTriangleBuffer);
+    destroyBuffer(context, lodBuffer);
+    destroyBuffer(context, meshletBuffer);
+    destroyBuffer(context, materialBuffer);
+    destroyBuffer(context, meshBuffer);
+    destroyBuffer(context, indexBuffer);
+    destroyBuffer(context, vertexBuffer);
+
     vertexBuffer = createBuffer(context,
                                 vertices.size() * sizeof(asset::Vertex),
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -177,15 +188,7 @@ void GeometryStore::build() {
                  meshlets.size());
     spdlog::info("LOD 단계 최대 {}, 총 LOD 항목 {}", maxLods, lods.size());
 
-    // CPU 사본은 이후 meshlet 분할 단계에서 다시 필요하지만, 지금은 GPU 버퍼만 유지한다.
-    vertices.clear();
-    vertices.shrink_to_fit();
-    indices.clear();
-    indices.shrink_to_fit();
-    meshletTriangles.clear();
-    meshletTriangles.shrink_to_fit();
-    vertexMeshlets.clear();
-    vertexMeshlets.shrink_to_fit();
+    // CPU 사본은 남겨 둔다. 런타임에 모델을 더할 때 전체 버퍼를 다시 만들어야 하기 때문이다.
 }
 
 } // namespace gfx
