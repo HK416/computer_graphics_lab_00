@@ -69,6 +69,10 @@ public:
 
     bool ready() const { return topLevel.handle != VK_NULL_HANDLE; }
 
+    // 래스터 경로의 광선 질의 그림자가 같은 TLAS 를 집합 1 로 묶어 쓴다.
+    VkDescriptorSetLayout accelerationLayout() const { return descriptorSetLayout; }
+    VkDescriptorSet accelerationSet() const { return descriptorSet; }
+
 private:
     void loadFunctions();
     void createPipeline();

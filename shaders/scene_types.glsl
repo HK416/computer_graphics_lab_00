@@ -100,7 +100,7 @@ struct Camera {
     vec4 position;
     // x: 근평면, y: 화면 오차 환산 배율, z: LOD 오차 임계값, w: 고정 LOD 단계(-1 이면 자동)
     vec4 parameters;
-    // 균일 환경광.
+    // xyz 환경광 색조와 세기, w 광선 그림자를 쓸 최대 거리(0 이면 안 쓴다).
     vec4 ambient;
     // xy 렌더 해상도, zw 그 역수.
     vec4 viewport;

@@ -221,17 +221,17 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& 
     createRenderTargets();
     createFrames();
     createPresentSemaphores();
+    // 광선 질의 그림자 파이프라인이 TLAS 디스크립터 배치를 필요로 하므로 먼저 만든다.
+    if (context.caps.rayTracingPipeline) {
+        rayTracer = std::make_unique<RayTracer>(context, geometry, bindless);
+        rayTracer->buildBottomLevel();
+    }
     createMeshPipelines();
     createPostPipelines();
     createCullPipeline();
     createShadowPipeline();
     createSsaoPipelines();
     environment = std::make_unique<EnvironmentMap>(context, bindless);
-
-    if (context.caps.rayTracingPipeline) {
-        rayTracer = std::make_unique<RayTracer>(context, geometry, bindless);
-        rayTracer->buildBottomLevel();
-    }
 
     VkSemaphoreTypeCreateInfo timelineInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
     timelineInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -251,6 +251,13 @@ Renderer::~Renderer() {
     for (VkPipeline pipeline : meshShaderPipelines) {
         vkDestroyPipeline(context.device, pipeline, nullptr);
     }
+    for (VkPipeline pipeline : meshRayQueryPipelines) {
+        vkDestroyPipeline(context.device, pipeline, nullptr);
+    }
+    for (VkPipeline pipeline : meshShaderRayQueryPipelines) {
+        vkDestroyPipeline(context.device, pipeline, nullptr);
+    }
+    vkDestroyPipelineLayout(context.device, meshRayQueryPipelineLayout, nullptr);
     vkDestroyPipeline(context.device, wireframePipeline, nullptr);
     for (VkPipeline pipeline : meshPipelines) {
         vkDestroyPipeline(context.device, pipeline, nullptr);
@@ -1170,6 +1177,15 @@ void Renderer::destroyPresentSemaphores() {
     presentReady.clear();
 }
 
+// 광선 질의는 가속 구조와 함께여야 쓸모가 있다. 이 저장소는 TLAS 를 RayTracer 가 들고 있으므로
+// 경로 추적 파이프라인이 있는 장치에서만 켤 수 있다.
+//
+// ponytail: 광선 질의는 있는데 경로 추적 파이프라인이 없는 장치도 규격상 가능하다. 그런 장치까지
+// 받으려면 가속 구조 관리만 RayTracer 에서 떼어내야 한다.
+bool Renderer::rayQueryShadowsAvailable() const {
+    return context.caps.rayQuery && rayTracer != nullptr;
+}
+
 void Renderer::createMeshPipelines() {
     scenePushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     if (context.caps.meshShader) {
@@ -1191,6 +1207,19 @@ void Renderer::createMeshPipelines() {
     VkShaderModule vertexModule = createShaderModule(context.device, "mesh.vert.spv");
     VkShaderModule opaqueFragment = createShaderModule(context.device, "mesh.frag.spv");
     VkShaderModule oitFragment = createShaderModule(context.device, "mesh_oit.frag.spv");
+
+    // 광선 질의는 SPIR-V 능력을 요구해 런타임 분기가 안 된다. 같은 셰이더를 정의만 바꿔 한 벌 더
+    // 컴파일해 두고, 하드웨어가 지원할 때만 파이프라인을 만든다.
+    VkShaderModule rayQueryOpaque = VK_NULL_HANDLE;
+    VkShaderModule rayQueryOit = VK_NULL_HANDLE;
+    if (rayQueryShadowsAvailable()) {
+        std::array<VkDescriptorSetLayout, 2> rayQuerySets{bindlessLayout, rayTracer->accelerationLayout()};
+        layoutInfo.setLayoutCount = static_cast<uint32_t>(rayQuerySets.size());
+        layoutInfo.pSetLayouts = rayQuerySets.data();
+        VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &meshRayQueryPipelineLayout));
+        rayQueryOpaque = createShaderModule(context.device, "mesh_rq.frag.spv");
+        rayQueryOit = createShaderModule(context.device, "mesh_oit_rq.frag.spv");
+    }
 
     // 프래그먼트 셰이더의 알파 경로를 특수화 상수로 고정해, 불투명 경로에서는 discard 가 사라진다.
     uint32_t alphaVariant = 0;
@@ -1263,39 +1292,57 @@ void Renderer::createMeshPipelines() {
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = meshPipelineLayout;
 
-    for (uint32_t variant = 0; variant < ALPHA_MODE_COUNT; ++variant) {
-        alphaVariant = variant;
-        if (variant == TRANSLUCENT_MODE) {
-            // 반투명은 누적과 잔여 투과율 두 대상에 기록하고 깊이는 읽기만 한다.
-            stages[1].module = oitFragment;
-            depthStencil.depthWriteEnable = VK_FALSE;
-            renderingInfo.colorAttachmentCount = 2;
-            colorFormats[0] = OIT_ACCUMULATION_FORMAT;
-            colorBlend.attachmentCount = 2;
+    // 알파 경로 세 벌. 광선 질의 변종은 프래그먼트 모듈과 배치만 다르므로 상태를 되돌리고 한 번 더 돈다.
+    auto buildAlphaVariants =
+        [&](VkShaderModule opaque, VkShaderModule oit, VkPipelineLayout layout, VkPipeline* target) {
+            stages[1].module = opaque;
+            depthStencil.depthWriteEnable = VK_TRUE;
+            renderingInfo.colorAttachmentCount = 1;
+            colorFormats[0] = COLOR_FORMAT;
+            colorBlend.attachmentCount = 1;
+            blendAttachments = {};
+            blendAttachments[0].colorWriteMask = ALL_CHANNELS;
+            pipelineInfo.layout = layout;
+            for (uint32_t variant = 0; variant < ALPHA_MODE_COUNT; ++variant) {
+                alphaVariant = variant;
+                if (variant == TRANSLUCENT_MODE) {
+                    // 반투명은 누적과 잔여 투과율 두 대상에 기록하고 깊이는 읽기만 한다.
+                    stages[1].module = oit;
+                    depthStencil.depthWriteEnable = VK_FALSE;
+                    renderingInfo.colorAttachmentCount = 2;
+                    colorFormats[0] = OIT_ACCUMULATION_FORMAT;
+                    colorBlend.attachmentCount = 2;
 
-            blendAttachments[0].blendEnable = VK_TRUE;
-            blendAttachments[0].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
-            blendAttachments[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
-            blendAttachments[0].colorBlendOp = VK_BLEND_OP_ADD;
-            blendAttachments[0].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            blendAttachments[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            blendAttachments[0].alphaBlendOp = VK_BLEND_OP_ADD;
+                    blendAttachments[0].blendEnable = VK_TRUE;
+                    blendAttachments[0].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+                    blendAttachments[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+                    blendAttachments[0].colorBlendOp = VK_BLEND_OP_ADD;
+                    blendAttachments[0].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+                    blendAttachments[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+                    blendAttachments[0].alphaBlendOp = VK_BLEND_OP_ADD;
 
-            blendAttachments[1].blendEnable = VK_TRUE;
-            blendAttachments[1].srcColorBlendFactor = VK_BLEND_FACTOR_ZERO;
-            blendAttachments[1].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
-            blendAttachments[1].colorBlendOp = VK_BLEND_OP_ADD;
-            blendAttachments[1].srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-            blendAttachments[1].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            blendAttachments[1].alphaBlendOp = VK_BLEND_OP_ADD;
-            blendAttachments[1].colorWriteMask = VK_COLOR_COMPONENT_R_BIT;
-        }
-        VK_CHECK(vkCreateGraphicsPipelines(
-            context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &meshPipelines[variant]));
+                    blendAttachments[1].blendEnable = VK_TRUE;
+                    blendAttachments[1].srcColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+                    blendAttachments[1].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+                    blendAttachments[1].colorBlendOp = VK_BLEND_OP_ADD;
+                    blendAttachments[1].srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+                    blendAttachments[1].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                    blendAttachments[1].alphaBlendOp = VK_BLEND_OP_ADD;
+                    blendAttachments[1].colorWriteMask = VK_COLOR_COMPONENT_R_BIT;
+                }
+                VK_CHECK(vkCreateGraphicsPipelines(
+                    context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &target[variant]));
+            }
+        };
+
+    buildAlphaVariants(opaqueFragment, oitFragment, meshPipelineLayout, meshPipelines.data());
+    if (rayQueryShadowsAvailable()) {
+        buildAlphaVariants(rayQueryOpaque, rayQueryOit, meshRayQueryPipelineLayout, meshRayQueryPipelines.data());
     }
 
     // 와이어프레임 디버그 뷰는 불투명 경로를 선 모드로 한 벌 더 만든다.
     alphaVariant = 0;
+    pipelineInfo.layout = meshPipelineLayout;
     stages[1].module = opaqueFragment;
     depthStencil.depthWriteEnable = VK_TRUE;
     renderingInfo.colorAttachmentCount = 1;
@@ -1322,17 +1369,28 @@ void Renderer::createMeshPipelines() {
         pipelineInfo.pInputAssemblyState = nullptr;
         rasterization.polygonMode = VK_POLYGON_MODE_FILL;
 
-        for (uint32_t variant = 0; variant < ALPHA_MODE_COUNT; ++variant) {
-            alphaVariant = variant;
-            bool translucent = variant == static_cast<uint32_t>(asset::AlphaMode::TRANSLUCENT);
-            meshStages[2].module = translucent ? oitFragment : opaqueFragment;
-            depthStencil.depthWriteEnable = translucent ? VK_FALSE : VK_TRUE;
-            renderingInfo.colorAttachmentCount = translucent ? 2 : 1;
-            colorFormats[0] = translucent ? OIT_ACCUMULATION_FORMAT : COLOR_FORMAT;
-            colorBlend.attachmentCount = translucent ? 2 : 1;
-            blendAttachments[0].blendEnable = translucent ? VK_TRUE : VK_FALSE;
-            VK_CHECK(vkCreateGraphicsPipelines(
-                context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &meshShaderPipelines[variant]));
+        // 프래그먼트 셰이더만 다르므로 광선 질의 변종도 같은 방식으로 한 벌 더 만든다.
+        auto buildMeshVariants =
+            [&](VkShaderModule opaque, VkShaderModule oit, VkPipelineLayout layout, VkPipeline* target) {
+                pipelineInfo.layout = layout;
+                for (uint32_t variant = 0; variant < ALPHA_MODE_COUNT; ++variant) {
+                    alphaVariant = variant;
+                    bool translucent = variant == static_cast<uint32_t>(asset::AlphaMode::TRANSLUCENT);
+                    meshStages[2].module = translucent ? oit : opaque;
+                    depthStencil.depthWriteEnable = translucent ? VK_FALSE : VK_TRUE;
+                    renderingInfo.colorAttachmentCount = translucent ? 2 : 1;
+                    colorFormats[0] = translucent ? OIT_ACCUMULATION_FORMAT : COLOR_FORMAT;
+                    colorBlend.attachmentCount = translucent ? 2 : 1;
+                    blendAttachments[0].blendEnable = translucent ? VK_TRUE : VK_FALSE;
+                    VK_CHECK(vkCreateGraphicsPipelines(
+                        context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &target[variant]));
+                }
+            };
+
+        buildMeshVariants(opaqueFragment, oitFragment, meshPipelineLayout, meshShaderPipelines.data());
+        if (rayQueryShadowsAvailable()) {
+            buildMeshVariants(
+                rayQueryOpaque, rayQueryOit, meshRayQueryPipelineLayout, meshShaderRayQueryPipelines.data());
         }
 
         vkDestroyShaderModule(context.device, meshModule, nullptr);
@@ -1347,6 +1405,8 @@ void Renderer::createMeshPipelines() {
         spdlog::info("mesh shader 경로 사용 가능");
     }
 
+    vkDestroyShaderModule(context.device, rayQueryOit, nullptr);
+    vkDestroyShaderModule(context.device, rayQueryOpaque, nullptr);
     vkDestroyShaderModule(context.device, oitFragment, nullptr);
     vkDestroyShaderModule(context.device, opaqueFragment, nullptr);
     vkDestroyShaderModule(context.device, vertexModule, nullptr);
@@ -1808,7 +1868,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                                      environment->prefilterSlot(),
                                      environment->brdfSlot(),
                                      iblReady ? environment->prefilterMipCount() : 0U};
-    camera->ambient = glm::vec4{scene.ambientColor * scene.ambientIntensity, 0.0F};
+    bool rayShadows = useRayQueryShadows && rayQueryShadowsAvailable();
+    camera->ambient = glm::vec4{scene.ambientColor * scene.ambientIntensity, rayShadows ? rayShadowDistance : 0.0F};
     camera->viewport = glm::vec4{static_cast<float>(currentRenderExtent.width),
                                  static_cast<float>(currentRenderExtent.height),
                                  1.0F / static_cast<float>(currentRenderExtent.width),
@@ -1847,9 +1908,11 @@ void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer, const FrameBatc
                 continue;
             }
             if (!bound) {
-                VkPipeline pipeline = meshShaderPipelines[mode];
+                VkPipeline pipeline = rayQueryPass ? meshShaderRayQueryPipelines[mode] : meshShaderPipelines[mode];
                 if (!meshPath) {
-                    pipeline = wireframe && !translucentPass ? wireframePipeline : meshPipelines[mode];
+                    pipeline = wireframe && !translucentPass ? wireframePipeline
+                               : rayQueryPass                ? meshRayQueryPipelines[mode]
+                                                             : meshPipelines[mode];
                 }
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
                 bound = true;
@@ -2191,6 +2254,7 @@ void Renderer::recordCommands(Frame& frame,
     }
 
     bool pathTracing = usePathTracing && rayTracer != nullptr;
+    rayQueryPass = false;
 
     // 환경 맵은 설정이 바뀔 때만 다시 굽는다. 래스터와 경로 추적이 같은 환경을 본다.
     {
@@ -2253,10 +2317,25 @@ void Renderer::recordCommands(Frame& frame,
                                               frame.shadowMatrixBuffer.address,
                                               0,
                                               debugMode};
+        // 광선 질의 그림자를 쓰면 TLAS 를 집합 1 로 함께 묶고, 장면이 바뀌었으면 먼저 다시 만든다.
+        rayQueryPass = useRayQueryShadows && rayQueryShadowsAvailable();
+        if (rayQueryPass) {
+            if (sceneChangedThisFrame || !rayTracer->ready()) {
+                rayTracer->updateTopLevel(commandBuffer, scene, objectInstanceSlots);
+            }
+            rayQueryPass = rayTracer->ready();
+        }
+        VkPipelineLayout sceneLayout = rayQueryPass ? meshRayQueryPipelineLayout : meshPipelineLayout;
+
         vkCmdBindDescriptorSets(
-            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, sceneLayout, 0, 1, &bindlessSet, 0, nullptr);
+        if (rayQueryPass) {
+            VkDescriptorSet accelerationSet = rayTracer->accelerationSet();
+            vkCmdBindDescriptorSets(
+                commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, sceneLayout, 1, 1, &accelerationSet, 0, nullptr);
+        }
         vkCmdPushConstants(
-            commandBuffer, meshPipelineLayout, scenePushStages, 0, sizeof(scenePushConstants), &scenePushConstants);
+            commandBuffer, sceneLayout, scenePushStages, 0, sizeof(scenePushConstants), &scenePushConstants);
         vkCmdBindIndexBuffer(commandBuffer, geometry.indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
 
         // 1) 불투명과 컷오프 경로를 HDR 색상 대상에 그린다.

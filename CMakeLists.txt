@@ -119,6 +119,36 @@ foreach(shader IN LISTS shader_sources)
     list(APPEND shader_binaries "${shader_binary}")
 endforeach()
 
+# 광선 질의 그림자는 SPIR-V 능력을 요구해 런타임 분기가 안 된다. 같은 소스를 정의만 바꿔 한 벌 더
+# 컴파일하고, 하드웨어가 지원할 때만 그 파이프라인을 만든다.
+set(shader_variants
+    "shaders/mesh.frag|mesh_rq.frag.spv|RAY_QUERY_SHADOWS"
+    "shaders/mesh_oit.frag|mesh_oit_rq.frag.spv|RAY_QUERY_SHADOWS")
+
+foreach(variant IN LISTS shader_variants)
+    string(REPLACE "|" ";" variant_parts "${variant}")
+    list(GET variant_parts 0 variant_source)
+    list(GET variant_parts 1 variant_name)
+    list(GET variant_parts 2 variant_define)
+    set(shader_binary "${shader_output_dir}/${variant_name}")
+    add_custom_command(
+        OUTPUT "${shader_binary}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${shader_output_dir}"
+        COMMAND "${Vulkan_GLSLC_EXECUTABLE}"
+                --target-env=vulkan1.3
+                -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+                -D${variant_define}
+                -MD -MF "${shader_binary}.d"
+                $<IF:$<CONFIG:Debug>,-g,-O>
+                -o "${shader_binary}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/${variant_source}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${variant_source}"
+        DEPFILE "${shader_binary}.d"
+        COMMENT "셰이더 컴파일: ${variant_source} (${variant_define})"
+        VERBATIM)
+    list(APPEND shader_binaries "${shader_binary}")
+endforeach()
+
 add_custom_target(cg_lab_shaders DEPENDS ${shader_binaries} SOURCES ${shader_sources})
 
 add_executable(cg_lab

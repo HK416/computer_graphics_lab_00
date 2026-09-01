@@ -752,6 +752,19 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     ImGui::EndDisabled();
     ImGui::TextDisabled("그림자 시점 %u개까지 (방향광/스폿광 1, 점광 6)", gfx::MAX_SHADOW_VIEWS);
 
+    bool rayQueryReady = renderer.rayQueryShadowsAvailable();
+    ImGui::BeginDisabled(!rayQueryReady);
+    ImGui::Checkbox("광선 그림자 (하이브리드)", &renderer.useRayQueryShadows);
+    ImGui::BeginDisabled(!renderer.useRayQueryShadows);
+    ImGui::SliderFloat("광선 거리", &renderer.rayShadowDistance, 1.0F, 200.0F, "%.0f");
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    if (!rayQueryReady) {
+        ImGui::TextDisabled("이 장치는 광선 질의를 지원하지 않는다");
+    } else {
+        ImGui::TextDisabled("이 거리 안쪽만 광선으로 판정하고 바깥은 그림자 맵을 쓴다");
+    }
+
     ImGui::SeparatorText("환경 (IBL)");
     scene::Environment& env = active.environment;
     ImGui::Checkbox("IBL 사용", &renderer.useIbl);

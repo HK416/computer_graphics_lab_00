@@ -214,6 +214,11 @@ public:
     bool useSsao = true;
     // 환경광을 IBL 로 계산한다. 끄면 균일 환경광만 남는다.
     bool useIbl = true;
+    // 하이브리드 그림자: 카메라에서 이 거리 안쪽은 광선으로 가시성을 판정하고 나머지는 그림자 맵을
+    // 그대로 쓴다. 광선 질의를 지원하는 장치에서만 켤 수 있다.
+    bool useRayQueryShadows = false;
+    float rayShadowDistance = 12.0F;
+    bool rayQueryShadowsAvailable() const;
     // 장면 반지름에 대한 비율. 장면 크기가 제각각이라 절대 길이로 두지 않는다.
     float ssaoRadius = 0.04F;
     float ssaoIntensity = 1.0F;
@@ -365,8 +370,14 @@ private:
 
     VkPipelineLayout meshPipelineLayout = VK_NULL_HANDLE;
     std::array<VkPipeline, ALPHA_MODE_COUNT> meshPipelines{};
+    // 광선 질의로 그림자를 판정하는 같은 파이프라인. 하드웨어가 지원할 때만 만든다.
+    std::array<VkPipeline, ALPHA_MODE_COUNT> meshRayQueryPipelines{};
+    VkPipelineLayout meshRayQueryPipelineLayout = VK_NULL_HANDLE;
+    // 이번 프레임 장면 패스가 광선 질의 파이프라인을 쓰는지. 기록 중에만 뜻이 있다.
+    bool rayQueryPass = false;
     VkPipeline wireframePipeline = VK_NULL_HANDLE;
     std::array<VkPipeline, ALPHA_MODE_COUNT> meshShaderPipelines{};
+    std::array<VkPipeline, ALPHA_MODE_COUNT> meshShaderRayQueryPipelines{};
     PFN_vkCmdDrawMeshTasksIndirectEXT drawMeshTasksIndirect = nullptr;
     VkShaderStageFlags scenePushStages = 0;
     VkPipelineLayout depthPipelineLayout = VK_NULL_HANDLE;
