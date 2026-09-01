@@ -3,13 +3,13 @@
 
 #include "scene_data.glsl"
 
-// src/gfx/renderer.cpp 의 SHADOW_ATLAS_SIZE 와 같아야 한다.
-const float SHADOW_ATLAS_SIZE = 4096.0;
-// 표면을 광원 쪽으로 밀어 자기 그림자를 없앤다. 장면 크기에 비례하지 않는 고정 값이라
-// 아주 큰 장면에서는 키워야 할 수 있다.
-const float SHADOW_NORMAL_OFFSET = 0.05;
+// src/gfx/renderer.h 의 SHADOW_MAP_SIZE 와 같아야 한다.
+const float SHADOW_MAP_SIZE = 1024.0;
+// 노멀 오프셋 배율. 실제 오프셋은 캐스케이드의 월드 텍셀 크기에 이 값을 곱한 것이다. 캐스케이드마다
+// 텍셀 크기가 수십 배 다르므로 고정값으로는 가까운 쪽과 먼 쪽을 동시에 맞출 수 없다.
+const float SHADOW_NORMAL_OFFSET = 1.5;
 
-// 점광은 여섯 면을 타일 여섯 장에 담는다. 면 번호는 방향의 최대 성분으로 고른다.
+// 점광은 여섯 면을 층 여섯 장에 담는다. 면 번호는 방향의 최대 성분으로 고른다.
 uint cubeFaceIndex(vec3 direction) {
     vec3 magnitude = abs(direction);
     if (magnitude.x >= magnitude.y && magnitude.x >= magnitude.z) {
@@ -21,54 +21,89 @@ uint cubeFaceIndex(vec3 direction) {
     return direction.z > 0.0 ? 4u : 5u;
 }
 
-// 아틀라스는 정사각형 타일 격자다. 타일 안의 UV 를 아틀라스 UV 로 옮긴다.
-vec2 shadowAtlasUv(vec2 uv, uint tile, float tilesPerSide) {
-    float column = mod(float(tile), tilesPerSide);
-    float row = floor(float(tile) / tilesPerSide);
-    return (vec2(column, row) + uv) / tilesPerSide;
-}
-
-// 1 이면 완전히 밝고 0 이면 완전히 가려진 것이다.
-float shadowFactor(Light light, vec3 position, vec3 normal, vec3 lightDirection) {
-    int firstTile = int(light.rightShadow.w);
-    float tilesPerSide = float(pushConstants.camera.item.shading.w);
-    if (firstTile < 0 || tilesPerSide < 1.0) {
-        return 1.0;
-    }
-
-    uint tile = uint(firstTile);
-    if (uint(light.colorType.w) == LIGHT_TYPE_POINT) {
-        tile += cubeFaceIndex(position - light.positionRange.xyz);
-    }
-
-    float slope = clamp(1.0 - dot(normal, lightDirection), 0.0, 1.0);
-    vec3 offsetPosition = position + normal * (SHADOW_NORMAL_OFFSET * (0.5 + slope));
-
-    vec4 clip = pushConstants.shadowMatrices.items[tile] * vec4(offsetPosition, 1.0);
+// 한 층을 3x3 PCF 로 읽는다. 절두체를 벗어나면 -1 을 돌려준다.
+float sampleShadowLayer(uint layer, vec3 position, uint atlasSlot) {
+    vec4 clip = pushConstants.shadowMatrices.items[layer] * vec4(position, 1.0);
     if (clip.w <= 0.0) {
-        return 1.0;
+        return -1.0;
     }
     vec3 ndc = clip.xyz / clip.w;
-    // 그림자 절두체를 벗어난 곳은 판정하지 않는다.
     if (any(greaterThan(abs(ndc.xy), vec2(1.0))) || ndc.z < 0.0 || ndc.z > 1.0) {
-        return 1.0;
+        return -1.0;
     }
 
-    uint atlasSlot = pushConstants.camera.item.shading.y;
     vec2 uv = ndc.xy * 0.5 + 0.5;
-    // 아틀라스 한 텍셀은 타일 좌표계에서 이만큼이다.
-    float step = tilesPerSide / SHADOW_ATLAS_SIZE;
-
+    float step = 1.0 / SHADOW_MAP_SIZE;
     float lit = 0.0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
-            // 이웃 타일을 넘겨다보지 않도록 타일 안으로 자른다.
-            vec2 tap = clamp(uv + vec2(x, y) * step, vec2(0.0), vec2(1.0));
-            float depth = sampleBindless(atlasSlot, shadowAtlasUv(tap, tile, tilesPerSide)).r;
+            float depth = sampleBindlessArray(atlasSlot, uv + vec2(x, y) * step, float(layer)).r;
             lit += ndc.z <= depth ? 1.0 : 0.0;
         }
     }
     return lit / 9.0;
+}
+
+// 1 이면 완전히 밝고 0 이면 완전히 가려진 것이다.
+float shadowFactor(Light light, vec3 position, vec3 normal, vec3 lightDirection) {
+    int firstLayer = int(light.rightShadow.w);
+    uint layerCount = uint(light.up.w);
+    if (firstLayer < 0 || pushConstants.camera.item.shading.w == 0u || layerCount == 0u) {
+        return 1.0;
+    }
+
+    uint type = uint(light.colorType.w);
+    uint layer = uint(firstLayer);
+    float texelSize = light.cascadeTexelSizes.x;
+    uint cascade = 0u;
+
+    if (type == LIGHT_TYPE_POINT) {
+        layer += cubeFaceIndex(position - light.positionRange.xyz);
+        // 점광은 원근 투영이라 텍셀 크기가 거리에 따라 달라진다. 거리에 비례해 잡는다.
+        texelSize = 2.0 * length(position - light.positionRange.xyz) / SHADOW_MAP_SIZE;
+    } else if (type == LIGHT_TYPE_DIRECTIONAL) {
+        // 카메라까지의 반지름 거리로 후보를 고른다. 축 거리보다 크거나 같아 항상 더 넓은
+        // 캐스케이드를 골라 보수적으로 안전하다.
+        float distance = length(position - pushConstants.camera.item.position.xyz);
+        while (cascade + 1u < layerCount && distance > light.cascadeSplits[cascade]) {
+            ++cascade;
+        }
+    } else {
+        texelSize = 2.0 * length(position - light.positionRange.xyz) / SHADOW_MAP_SIZE;
+    }
+
+    // 표면을 광원 쪽으로 텍셀 크기만큼 밀어 자기 그림자를 없앤다.
+    float slope = clamp(1.0 - dot(normal, lightDirection), 0.0, 1.0);
+
+    // 방향광은 고른 캐스케이드가 범위를 벗어나면 한 단계씩 물러난다. 스냅 경계에서 아슬아슬하게
+    // 벗어나는 경우가 있다.
+    for (uint attempt = cascade; attempt < layerCount; ++attempt) {
+        float offset = SHADOW_NORMAL_OFFSET * (0.5 + slope) *
+                       (type == LIGHT_TYPE_DIRECTIONAL ? light.cascadeTexelSizes[attempt] : texelSize);
+        uint target = type == LIGHT_TYPE_DIRECTIONAL ? layer + attempt : layer;
+        float lit = sampleShadowLayer(target, position + normal * offset, pushConstants.camera.item.shading.y);
+        if (lit >= 0.0) {
+            return lit;
+        }
+        if (type != LIGHT_TYPE_DIRECTIONAL) {
+            break;
+        }
+    }
+    return 1.0;
+}
+
+// 캐스케이드 디버그 뷰가 쓰는 색. 방향광이 아니면 0 을 돌려준다.
+uint shadowCascadeIndex(Light light, vec3 position) {
+    if (uint(light.colorType.w) != LIGHT_TYPE_DIRECTIONAL || light.rightShadow.w < 0.0) {
+        return 0u;
+    }
+    uint layerCount = uint(light.up.w);
+    float distance = length(position - pushConstants.camera.item.position.xyz);
+    uint cascade = 0u;
+    while (cascade + 1u < layerCount && distance > light.cascadeSplits[cascade]) {
+        ++cascade;
+    }
+    return cascade;
 }
 
 #endif

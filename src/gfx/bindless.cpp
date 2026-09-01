@@ -19,7 +19,11 @@ constexpr uint32_t IMAGE_BINDING = 0;
 constexpr uint32_t SAMPLER_BINDING = 1;
 constexpr uint32_t STORAGE_IMAGE_BINDING = 2;
 constexpr uint32_t STORAGE_IMAGE_RGBA_BINDING = 3;
+constexpr uint32_t ARRAY_BINDING = 4;
+constexpr uint32_t CUBE_BINDING = 5;
 constexpr uint32_t MAX_BINDLESS_STORAGE_IMAGES = 256;
+// 배열 텍스처와 큐브맵은 몇 개면 충분하다. 그림자 아틀라스와 환경 맵 정도만 쓴다.
+constexpr uint32_t MAX_BINDLESS_ARRAYS = 16;
 } // namespace
 
 BindlessTextures::BindlessTextures(Context& context) : context(context) {
@@ -42,7 +46,9 @@ BindlessTextures::BindlessTextures(Context& context) : context(context) {
                                 properties12.maxPerStageDescriptorUpdateAfterBindStorageImages,
                                 MAX_BINDLESS_STORAGE_IMAGES});
 
-    std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
+    arrayCapacity = std::min(imageCapacity, MAX_BINDLESS_ARRAYS);
+
+    std::array<VkDescriptorSetLayoutBinding, 6> bindings{};
     bindings[0].binding = IMAGE_BINDING;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     bindings[0].descriptorCount = imageCapacity;
@@ -59,11 +65,20 @@ BindlessTextures::BindlessTextures(Context& context) : context(context) {
     bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[3].descriptorCount = storageCapacity;
     bindings[3].stageFlags = VK_SHADER_STAGE_ALL;
+    bindings[4].binding = ARRAY_BINDING;
+    bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    bindings[4].descriptorCount = arrayCapacity;
+    bindings[4].stageFlags = VK_SHADER_STAGE_ALL;
+    bindings[5].binding = CUBE_BINDING;
+    bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    bindings[5].descriptorCount = arrayCapacity;
+    bindings[5].stageFlags = VK_SHADER_STAGE_ALL;
 
     VkDescriptorBindingFlags commonFlags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
                                            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
                                            VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
-    std::array<VkDescriptorBindingFlags, 4> bindingFlags{commonFlags, commonFlags, commonFlags, commonFlags};
+    std::array<VkDescriptorBindingFlags, 6> bindingFlags{
+        commonFlags, commonFlags, commonFlags, commonFlags, commonFlags, commonFlags};
     VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
     flagsInfo.bindingCount = static_cast<uint32_t>(bindingFlags.size());
@@ -77,7 +92,7 @@ BindlessTextures::BindlessTextures(Context& context) : context(context) {
     VK_CHECK(vkCreateDescriptorSetLayout(context.device, &layoutInfo, nullptr, &descriptorSetLayout));
 
     std::array<VkDescriptorPoolSize, 3> poolSizes{
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, imageCapacity},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, imageCapacity + arrayCapacity * 2},
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, samplerCapacity},
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, storageCapacity * 2}};
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -93,8 +108,11 @@ BindlessTextures::BindlessTextures(Context& context) : context(context) {
     allocateInfo.pSetLayouts = &descriptorSetLayout;
     VK_CHECK(vkAllocateDescriptorSets(context.device, &allocateInfo, &descriptorSet));
 
-    spdlog::info(
-        "bindless 슬롯: 이미지 {}, 샘플러 {}, 스토리지 이미지 {}", imageCapacity, samplerCapacity, storageCapacity);
+    spdlog::info("bindless 슬롯: 이미지 {}, 샘플러 {}, 스토리지 이미지 {}, 배열/큐브 {}",
+                 imageCapacity,
+                 samplerCapacity,
+                 storageCapacity,
+                 arrayCapacity);
 }
 
 BindlessTextures::~BindlessTextures() {
@@ -195,6 +213,56 @@ uint32_t BindlessTextures::addStorageImage(VkImageView view) {
     uint32_t slot = storageCount++;
     updateStorageImage(slot, view);
     return slot;
+}
+
+void BindlessTextures::updateArray(uint32_t slot, VkImageView view, VkSampler sampler) {
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageView = view;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = descriptorSet;
+    write.dstBinding = ARRAY_BINDING;
+    write.dstArrayElement = slot & TEXTURE_IMAGE_MASK;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(context.device, 1, &write, 0, nullptr);
+    addSampler(sampler);
+}
+
+uint32_t BindlessTextures::addArray(VkImageView view, VkSampler sampler) {
+    if (arrayCount >= arrayCapacity) {
+        core::fatal("bindless 배열 텍스처 슬롯이 부족합니다 (한계 {})", arrayCapacity);
+    }
+    uint32_t index = arrayCount++;
+    updateArray(index, view, sampler);
+    return index | (addSampler(sampler) << TEXTURE_SAMPLER_SHIFT);
+}
+
+void BindlessTextures::updateCube(uint32_t slot, VkImageView view, VkSampler sampler) {
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageView = view;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = descriptorSet;
+    write.dstBinding = CUBE_BINDING;
+    write.dstArrayElement = slot & TEXTURE_IMAGE_MASK;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(context.device, 1, &write, 0, nullptr);
+    addSampler(sampler);
+}
+
+uint32_t BindlessTextures::addCube(VkImageView view, VkSampler sampler) {
+    if (cubeCount >= arrayCapacity) {
+        core::fatal("bindless 큐브맵 슬롯이 부족합니다 (한계 {})", arrayCapacity);
+    }
+    uint32_t index = cubeCount++;
+    updateCube(index, view, sampler);
+    return index | (addSampler(sampler) << TEXTURE_SAMPLER_SHIFT);
 }
 
 uint32_t BindlessTextures::add(VkImageView view, VkSampler sampler, VkImageLayout layout) {

@@ -115,6 +115,10 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
         sceneRoot,
         [this](const std::filesystem::path& path) { saveScene(path); },
         [this](const std::filesystem::path& path) { openScene(path); });
+    // 렌더러가 있어야 지오메트리 재구축을 알릴 수 있으므로 여기서 연다.
+    if (!options.scenePath.empty()) {
+        openScene(options.scenePath);
+    }
 }
 
 Application::~Application() {

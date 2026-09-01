@@ -251,6 +251,18 @@ else()
     target_compile_options(cg_lab_shadow_tests PRIVATE -Wall -Wextra)
 endif()
 
+# 테스트는 assert 로 확인한다. RelWithDebInfo 의 NDEBUG 를 그대로 두면 검사가 통째로 사라지고
+# 쓰지 않는 변수 경고만 남는다.
+foreach(test_target
+        cg_lab_tests cg_lab_animation_tests cg_lab_camera_tests cg_lab_scene_tests
+        cg_lab_scene_io_tests cg_lab_profiler_tests cg_lab_shadow_tests cg_lab_concurrency_tests)
+    if(MSVC)
+        target_compile_options(${test_target} PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(${test_target} PRIVATE -UNDEBUG)
+    endif()
+endforeach()
+
 add_test(NAME lod_network COMMAND cg_lab_tests)
 add_test(NAME animation COMMAND cg_lab_animation_tests)
 add_test(NAME camera COMMAND cg_lab_camera_tests)

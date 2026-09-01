@@ -106,7 +106,7 @@ struct Camera {
     vec4 viewport;
     // 깊이에서 월드 위치를 되돌릴 때 쓴다.
     mat4 inverseViewProjection;
-    // x: 조명 수, y: 그림자 아틀라스 슬롯, z: SSAO 슬롯, w: 아틀라스 한 변의 타일 수.
+    // x: 조명 수, y: 그림자 배열 슬롯, z: SSAO 슬롯, w: 그림자 사용 여부.
     // bindless 슬롯은 상위 8비트에 샘플러 번호가 들어가 float 로는 정확히 담기지 않으므로 정수로 둔다.
     uvec4 shading;
 };
@@ -122,8 +122,10 @@ struct Light {
     vec4 directionIntensity; // xyz 앞 방향, w 세기
     vec4 colorType;          // xyz 색, w 종류
     vec4 coneSize;           // xy 원뿔 cos(안/바깥), zw 영역광 반크기
-    vec4 rightShadow;        // xyz 가로축, w 그림자 아틀라스 첫 타일(-1 이면 없음)
-    vec4 up;                 // xyz 세로축
+    vec4 rightShadow;        // xyz 가로축, w 그림자 첫 층(-1 이면 없음)
+    vec4 up;                 // xyz 세로축, w 이 조명이 쓰는 그림자 시점 수
+    vec4 cascadeSplits;      // 캐스케이드 i 의 끝 거리
+    vec4 cascadeTexelSizes;  // 캐스케이드 i 의 월드 텍셀 크기
 };
 
 // 간접 그리기 명령. VkDrawIndexedIndirectCommand 와 배치가 같다.
@@ -141,6 +143,8 @@ struct DrawCommand {
 #define DEBUG_MODE_UV 3u
 #define DEBUG_MODE_DEPTH 4u
 #define DEBUG_MODE_LOD 5u
+#define DEBUG_MODE_CASCADE 6u
+#define DEBUG_MODE_SHADOW 7u
 
 layout(buffer_reference, scalar) readonly buffer VertexBuffer {
     Vertex items[];

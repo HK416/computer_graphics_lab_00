@@ -24,6 +24,8 @@ struct Options {
     // 지정하면 몇 프레임 뒤에 화면을 PNG 로 저장하고 종료한다. 렌더 결과 검증용이다.
     std::filesystem::path screenshotPath;
     size_t initialScene = 0;
+    // 지정하면 시작할 때 이 장면 파일을 연다.
+    std::filesystem::path scenePath;
     // shaders/scene_data.glsl 의 DEBUG_MODE_* 값.
     uint32_t debugMode = 0;
     // 0 이면 하드웨어 동시성에 맞춰 정한다.

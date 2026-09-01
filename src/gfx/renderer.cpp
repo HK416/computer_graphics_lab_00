@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -290,6 +291,7 @@ Renderer::~Renderer() {
     vkDestroySemaphore(context.device, frameTimeline, nullptr);
     destroyPresentSemaphores();
     for (Frame& frame : frames) {
+        destroyBuffer(context, frame.shadowDrawBuffer);
         destroyBuffer(context, frame.shadowMatrixBuffer);
         destroyBuffer(context, frame.lightBuffer);
         destroyBuffer(context, frame.jointBuffer);
@@ -309,6 +311,9 @@ Renderer::~Renderer() {
         vkDestroyImageView(context.device, view, nullptr);
     }
     destroyImage(context, targets.hzb);
+    for (VkImageView view : targets.shadowLayerViews) {
+        vkDestroyImageView(context.device, view, nullptr);
+    }
     destroyImage(context, targets.shadowAtlas);
     destroyImage(context, targets.ssao);
     destroyImage(context, targets.ssaoRaw);
@@ -458,14 +463,29 @@ void Renderer::createRenderTargets() {
     hzbDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     targets.hzb = createImage(context, hzbDesc, "HZB");
 
-    // 그림자 아틀라스는 화면 크기와 무관하므로 한 번만 만든다.
+    // 그림자 맵은 화면 크기와 무관하므로 한 번만 만든다. 층 하나가 시점 하나다.
     if (targets.shadowAtlas.handle == VK_NULL_HANDLE) {
         ImageDesc shadowDesc;
-        shadowDesc.extent = {SHADOW_ATLAS_SIZE, SHADOW_ATLAS_SIZE, 1};
+        shadowDesc.extent = {SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 1};
         shadowDesc.format = SHADOW_FORMAT;
         shadowDesc.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         shadowDesc.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
-        targets.shadowAtlas = createImage(context, shadowDesc, "그림자 아틀라스");
+        shadowDesc.arrayLayers = MAX_SHADOW_VIEWS;
+        shadowDesc.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        targets.shadowAtlas = createImage(context, shadowDesc, "그림자 맵");
+
+        targets.shadowLayerViews.resize(MAX_SHADOW_VIEWS);
+        for (uint32_t layer = 0; layer < MAX_SHADOW_VIEWS; ++layer) {
+            VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            viewInfo.image = targets.shadowAtlas.handle;
+            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewInfo.format = SHADOW_FORMAT;
+            viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            viewInfo.subresourceRange.levelCount = 1;
+            viewInfo.subresourceRange.baseArrayLayer = layer;
+            viewInfo.subresourceRange.layerCount = 1;
+            VK_CHECK(vkCreateImageView(context.device, &viewInfo, nullptr, &targets.shadowLayerViews[layer]));
+        }
     }
 
     destroyImage(context, targets.ssao);
@@ -504,7 +524,7 @@ void Renderer::createRenderTargets() {
         targets.pathAccumulationStorageSlot = bindless.addStorageImageRgba(targets.pathAccumulation.view);
         targets.pathAccumulationSampledSlot =
             bindless.add(targets.pathAccumulation.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
-        targets.shadowAtlasSlot = bindless.add(targets.shadowAtlas.view, postSampler);
+        targets.shadowAtlasSlot = bindless.addArray(targets.shadowAtlas.view, postSampler);
         // SSAO 도 컴퓨트가 쓰고 프래그먼트가 읽으므로 계속 GENERAL 에 둔다.
         targets.ssaoRawSlot = bindless.add(targets.ssaoRaw.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
         targets.ssaoSlot = bindless.add(targets.ssao.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
@@ -669,15 +689,32 @@ void Renderer::reserveShadowDraws(Frame& frame, uint32_t drawCount) {
 //
 // ponytail: 압축 간접 그리기가 있는 장치라면 시점을 컬 컴퓨트의 두 번째 디스패치 축으로 넘겨
 // meshlet 단위까지 걸러 내는 편이 낫다.
-void Renderer::buildShadowDraws(Frame& frame,
-                                const scene::Scene& scene,
-                                const FrameBatches& batches,
-                                const glm::mat4& cameraViewProjection) {
+void Renderer::buildShadowDraws(Frame& frame, const FrameBatches& batches, const glm::mat4& cameraViewProjection) {
     shadowBatches.assign(shadowViews.size() * TRANSLUCENT_MODE, DrawBatch{});
     shadowDrawsIssued = 0;
     shadowDrawsTotal = 0;
+    shadowLayerDirty.assign(MAX_SHADOW_VIEWS, 0);
     if (shadowViews.empty()) {
         return;
+    }
+
+    // 어떤 층을 다시 그릴지 먼저 정한다. 설정이 바뀌면 그리는 집합 자체가 달라지므로 전부 무효화한다.
+    uint64_t settings = static_cast<uint64_t>(lodLevel) | (static_cast<uint64_t>(automaticLod) << 8U) |
+                        (static_cast<uint64_t>(shadowViews.size()) << 16U) |
+                        (static_cast<uint64_t>(shadowViewCulling) << 24U) |
+                        (static_cast<uint64_t>(shadowCasterCulling) << 25U) |
+                        (static_cast<uint64_t>(std::bit_cast<uint32_t>(lodErrorThreshold)) << 32U);
+    //
+    // ponytail: 장면이 조금이라도 바뀌면 층을 전부 다시 그린다. 움직인 캐스터의 이전/현재 경계구를
+    // 시점 절두체와 비교해 걸린 층만 무효화하면 더 아낄 수 있지만, 지금은 카메라만 움직이는 경우가
+    // 대부분이고 그때는 이 조건이 걸리지 않아 이득이 이미 나온다.
+    bool invalidateAll = !shadowCaching || settings != lastShadowSettings || sceneChangedThisFrame;
+    lastShadowSettings = settings;
+    for (uint32_t layer = 0; layer < shadowViews.size(); ++layer) {
+        // 캐스케이드 텍셀 스냅 덕에 카메라가 텍셀 안에서 움직이는 동안에는 행렬이 그대로다.
+        bool changed = invalidateAll || !shadowLayers[layer].valid ||
+                       shadowLayers[layer].drawnViewProjection != shadowViews[layer].viewProjection;
+        shadowLayerDirty[layer] = changed ? 1 : 0;
     }
 
     uint32_t casterCount = 0;
@@ -935,95 +972,123 @@ void Renderer::createCullPipeline() {
 void Renderer::recordShadowPass(VkCommandBuffer commandBuffer) {
     constexpr VkDeviceSize DRAW_STRIDE = sizeof(VkDrawIndexedIndirectCommand);
     Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];
-
-    // 시점마다 압축된 그리기 명령을 쓴다. buildShadowDraws 가 절두체와 캐스터 스윕으로 걸러 둔 것이다.
     std::array<VkPipeline, TRANSLUCENT_MODE> casterPipelines{shadowPipeline, shadowCutoffPipeline};
 
-    imageBarrier(commandBuffer,
-                 targets.shadowAtlas.handle,
-                 VK_IMAGE_ASPECT_DEPTH_BIT,
-                 VK_IMAGE_LAYOUT_UNDEFINED,
-                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                 0,
-                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-
-    VkRenderingAttachmentInfo depthAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    depthAttachment.imageView = targets.shadowAtlas.view;
-    depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    depthAttachment.clearValue.depthStencil.depth = 1.0F;
-
-    VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    rendering.renderArea = {{0, 0}, {SHADOW_ATLAS_SIZE, SHADOW_ATLAS_SIZE}};
-    rendering.layerCount = 1;
-    rendering.pDepthAttachment = &depthAttachment;
-    vkCmdBeginRendering(commandBuffer, &rendering);
-
-    if (shadowDrawsIssued > 0) {
-        VkDescriptorSet bindlessSet = bindless.set();
-        vkCmdBindDescriptorSets(
-            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, depthPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
-        vkCmdBindIndexBuffer(commandBuffer, geometry.indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
-
-        DepthPushConstants pushConstants{};
-        pushConstants.vertices = geometry.vertexBuffer.address;
-        pushConstants.instances = frame.instanceBuffer.address;
-        pushConstants.joints = frame.jointBuffer.address;
-        pushConstants.meshes = geometry.meshBuffer.address;
-        pushConstants.materials = geometry.materialBuffer.address;
-
-        // 시점마다 아틀라스의 타일 하나만 뷰포트로 잡는다.
-        for (size_t view = 0; view < shadowViews.size(); ++view) {
-            auto column = static_cast<float>(view % SHADOW_TILES_PER_SIDE);
-            auto row = static_cast<float>(view / SHADOW_TILES_PER_SIDE);
-            VkViewport viewport{column * SHADOW_TILE_SIZE,
-                                row * SHADOW_TILE_SIZE,
-                                static_cast<float>(SHADOW_TILE_SIZE),
-                                static_cast<float>(SHADOW_TILE_SIZE),
-                                0.0F,
-                                1.0F};
-            VkRect2D scissor{{static_cast<int32_t>(column) * static_cast<int32_t>(SHADOW_TILE_SIZE),
-                              static_cast<int32_t>(row) * static_cast<int32_t>(SHADOW_TILE_SIZE)},
-                             {SHADOW_TILE_SIZE, SHADOW_TILE_SIZE}};
-            vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-            vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-
-            pushConstants.viewProjection = shadowViews[view].viewProjection;
-            vkCmdPushConstants(commandBuffer,
-                               depthPipelineLayout,
-                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                               0,
-                               sizeof(pushConstants),
-                               &pushConstants);
-
-            for (size_t mode = 0; mode < TRANSLUCENT_MODE; ++mode) {
-                const DrawBatch& batch = shadowBatches[view * TRANSLUCENT_MODE + mode];
-                if (batch.count == 0) {
-                    continue;
-                }
-                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, casterPipelines[mode]);
-                vkCmdDrawIndexedIndirect(commandBuffer,
-                                         frame.shadowDrawBuffer.handle,
-                                         batch.first * DRAW_STRIDE,
-                                         batch.count,
-                                         static_cast<uint32_t>(DRAW_STRIDE));
-            }
-        }
+    // 다시 그릴 층이 하나도 없으면 지난 프레임 내용을 그대로 쓴다. 렌더 패스를 시작하지 않으므로
+    // 타일 기반 GPU 에서도 읽기/쓰기 비용이 없다.
+    shadowLayersRedrawn = 0;
+    for (uint32_t layer = 0; layer < shadowViews.size(); ++layer) {
+        shadowLayersRedrawn += shadowLayerDirty[layer] != 0 ? 1 : 0;
     }
-    vkCmdEndRendering(commandBuffer);
+    if (shadowLayersRedrawn == 0) {
+        return;
+    }
 
-    imageBarrier(commandBuffer,
-                 targets.shadowAtlas.handle,
-                 VK_IMAGE_ASPECT_DEPTH_BIT,
-                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    // 캐시된 층의 내용이 살아남아야 하므로 다시 그릴 층만 골라 전이한다. 이미지 전체를
+    // UNDEFINED 로 전이하면 캐시가 통째로 날아간다.
+    for (uint32_t layer = 0; layer < shadowViews.size(); ++layer) {
+        if (shadowLayerDirty[layer] == 0) {
+            continue;
+        }
+        imageBarrier(commandBuffer,
+                     targets.shadowAtlas.handle,
+                     VK_IMAGE_ASPECT_DEPTH_BIT,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                     VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                     VK_QUEUE_FAMILY_IGNORED,
+                     VK_QUEUE_FAMILY_IGNORED,
+                     0,
+                     VK_REMAINING_MIP_LEVELS,
+                     layer,
+                     1);
+    }
+
+    VkDescriptorSet bindlessSet = bindless.set();
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, depthPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+    vkCmdBindIndexBuffer(commandBuffer, geometry.indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
+
+    DepthPushConstants pushConstants{};
+    pushConstants.vertices = geometry.vertexBuffer.address;
+    pushConstants.instances = frame.instanceBuffer.address;
+    pushConstants.joints = frame.jointBuffer.address;
+    pushConstants.meshes = geometry.meshBuffer.address;
+    pushConstants.materials = geometry.materialBuffer.address;
+
+    VkViewport viewport{
+        0.0F, 0.0F, static_cast<float>(SHADOW_MAP_SIZE), static_cast<float>(SHADOW_MAP_SIZE), 0.0F, 1.0F};
+    VkRect2D scissor{{0, 0}, {SHADOW_MAP_SIZE, SHADOW_MAP_SIZE}};
+
+    for (uint32_t layer = 0; layer < shadowViews.size(); ++layer) {
+        if (shadowLayerDirty[layer] == 0) {
+            continue;
+        }
+
+        VkRenderingAttachmentInfo depthAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        depthAttachment.imageView = targets.shadowLayerViews[layer];
+        depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        depthAttachment.clearValue.depthStencil.depth = 1.0F;
+
+        VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        rendering.renderArea = scissor;
+        rendering.layerCount = 1;
+        rendering.pDepthAttachment = &depthAttachment;
+        vkCmdBeginRendering(commandBuffer, &rendering);
+
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        pushConstants.viewProjection = shadowViews[layer].viewProjection;
+        vkCmdPushConstants(commandBuffer,
+                           depthPipelineLayout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0,
+                           sizeof(pushConstants),
+                           &pushConstants);
+
+        for (size_t mode = 0; mode < TRANSLUCENT_MODE; ++mode) {
+            const DrawBatch& batch = shadowBatches[layer * TRANSLUCENT_MODE + mode];
+            if (batch.count == 0) {
+                continue;
+            }
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, casterPipelines[mode]);
+            vkCmdDrawIndexedIndirect(commandBuffer,
+                                     frame.shadowDrawBuffer.handle,
+                                     batch.first * DRAW_STRIDE,
+                                     batch.count,
+                                     static_cast<uint32_t>(DRAW_STRIDE));
+        }
+        vkCmdEndRendering(commandBuffer);
+
+        shadowLayers[layer].drawnViewProjection = shadowViews[layer].viewProjection;
+        shadowLayers[layer].valid = true;
+    }
+
+    for (uint32_t layer = 0; layer < shadowViews.size(); ++layer) {
+        if (shadowLayerDirty[layer] == 0) {
+            continue;
+        }
+        imageBarrier(commandBuffer,
+                     targets.shadowAtlas.handle,
+                     VK_IMAGE_ASPECT_DEPTH_BIT,
+                     VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                     VK_QUEUE_FAMILY_IGNORED,
+                     VK_QUEUE_FAMILY_IGNORED,
+                     0,
+                     VK_REMAINING_MIP_LEVELS,
+                     layer,
+                     1);
+    }
 }
 
 void Renderer::recordSsaoPass(VkCommandBuffer commandBuffer, const Frame& frame) {
@@ -1507,17 +1572,47 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
                 break;
             }
         }
+        // 방향광은 캐스케이드 수만큼 층을 쓴다. 층이 모자라면 버리지 말고 캐스케이드를 줄인다.
+        if (source.type == scene::LightType::DIRECTIONAL && viewsNeeded > 0) {
+            viewsNeeded = std::min(std::clamp(shadowCascades, 1U, MAX_SHADOW_CASCADES),
+                                   static_cast<uint32_t>(MAX_SHADOW_VIEWS - shadowViews.size()));
+        }
+
         if (viewsNeeded > 0 && shadowViews.size() + viewsNeeded <= MAX_SHADOW_VIEWS) {
             light.rightShadow.w = static_cast<float>(shadowViews.size());
+            light.up.w = static_cast<float>(viewsNeeded);
             ShadowView view{};
             view.origin = position;
             view.sweepDirection = direction;
             if (source.type == scene::LightType::DIRECTIONAL) {
                 view.directional = true;
-                view.viewProjection =
-                    glm::orthoRH_ZO(-sceneRadius, sceneRadius, -sceneRadius, sceneRadius, 0.0F, 2.0F * sceneRadius) *
-                    lookAlong(sceneCenter - direction * sceneRadius, direction);
-                shadowViews.push_back(view);
+                // 평행이동 없는 회전만의 광 시점. 광원을 카메라 쪽으로 옮겨 가며 스냅하면
+                // 격자가 카메라를 따라다녀 스냅이 무의미해진다.
+                glm::mat4 lightRotation = lookAlong(glm::vec3{0.0F}, direction);
+                glm::vec3 sceneInLight = glm::vec3(lightRotation * glm::vec4{sceneCenter, 1.0F});
+                float depthNear = -(sceneInLight.z + sceneRadius);
+                float depthFar = -(sceneInLight.z - sceneRadius);
+
+                float farDistance = shadowDistance > 0.0F ? shadowDistance : std::min(4.0F * sceneRadius, 500.0F);
+                std::array<float, MAX_SHADOW_CASCADES> splits{};
+                cascadeSplits(scene.camera.nearPlane, farDistance, viewsNeeded, shadowSplitLambda, splits);
+
+                float aspect =
+                    static_cast<float>(currentRenderExtent.width) / static_cast<float>(currentRenderExtent.height);
+                float fov = glm::radians(scene.camera.fovYDegrees);
+                glm::vec3 forward = scene.camera.forward();
+                float previous = scene.camera.nearPlane;
+                for (uint32_t cascade = 0; cascade < viewsNeeded; ++cascade) {
+                    CascadeSphere sphere = fitCascadeSphere(previous, splits[cascade], fov, aspect);
+                    glm::vec3 center = scene.camera.position + forward * sphere.distance;
+                    view.viewProjection =
+                        snapCascadeMatrix(lightRotation, center, sphere.radius, depthNear, depthFar, SHADOW_MAP_SIZE);
+                    shadowViews.push_back(view);
+
+                    light.cascadeSplits[cascade] = splits[cascade];
+                    light.cascadeTexelSizes[cascade] = 2.0F * sphere.radius / static_cast<float>(SHADOW_MAP_SIZE);
+                    previous = splits[cascade];
+                }
             } else if (source.type == scene::LightType::SPOT) {
                 float fov = std::min(glm::radians(source.outerConeDegrees) * 2.0F, glm::radians(170.0F));
                 view.viewProjection =
@@ -1706,7 +1801,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     glm::mat4 cameraViewProjection = scene.camera.projectionMatrix(aspect) * scene.camera.viewMatrix();
 
     buildLights(frame, scene);
-    buildShadowDraws(frame, scene, batches, cameraViewProjection);
+    buildShadowDraws(frame, batches, cameraViewProjection);
 
     auto* camera = static_cast<GpuCamera*>(frame.cameraBuffer.mapped);
     camera->viewProjection = cameraViewProjection;
@@ -1721,7 +1816,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     camera->shading = glm::uvec4{static_cast<uint32_t>(frameLights.size()),
                                  targets.shadowAtlasSlot,
                                  useSsao ? targets.ssaoSlot : asset::INVALID_TEXTURE,
-                                 shadowViews.empty() ? 0U : SHADOW_TILES_PER_SIDE};
+                                 shadowViews.empty() ? 0U : 1U};
     camera->ambient = glm::vec4{scene.ambientColor * scene.ambientIntensity, 0.0F};
     camera->viewport = glm::vec4{static_cast<float>(currentRenderExtent.width),
                                  static_cast<float>(currentRenderExtent.height),
@@ -2053,6 +2148,21 @@ void Renderer::recordCommands(Frame& frame,
         clearDependency.pMemoryBarriers = &clearBarrier;
         vkCmdPipelineBarrier2(commandBuffer, &clearDependency);
         hzbNeedsClear = false;
+    }
+
+    if (shadowNeedsInit) {
+        // 층 전체를 한 번 읽기 좋은 레이아웃으로 옮긴다. 이후 프레임은 층마다 따로 전이하므로
+        // 여기서 맞춰 두지 않으면 한 번도 안 그린 층이 잘못된 레이아웃으로 남는다.
+        imageBarrier(commandBuffer,
+                     targets.shadowAtlas.handle,
+                     VK_IMAGE_ASPECT_DEPTH_BIT,
+                     VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                     0,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        shadowNeedsInit = false;
     }
 
     if (ssaoNeedsClear) {

@@ -22,6 +22,7 @@
 #include "gfx/geometry.h"
 #include "gfx/profiler.h"
 #include "gfx/renderer.h"
+#include "gfx/shadow_math.h"
 #include "scene/scene.h"
 
 namespace editor {
@@ -737,7 +738,17 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     ImGui::Checkbox("시점 절두체 컬링", &renderer.shadowViewCulling);
     ImGui::SameLine();
     ImGui::Checkbox("캐스터 컬링", &renderer.shadowCasterCulling);
-    ImGui::Text("그림자 드로우 %u / %u", renderer.shadowDrawCount(), renderer.shadowDrawCandidates());
+    ImGui::Checkbox("시점 캐싱", &renderer.shadowCaching);
+    int cascades = static_cast<int>(renderer.shadowCascades);
+    if (ImGui::SliderInt("캐스케이드", &cascades, 1, static_cast<int>(gfx::MAX_SHADOW_CASCADES))) {
+        renderer.shadowCascades = static_cast<uint32_t>(cascades);
+    }
+    ImGui::SliderFloat("분할 혼합", &renderer.shadowSplitLambda, 0.0F, 1.0F, "%.2f");
+    ImGui::DragFloat("그림자 거리", &renderer.shadowDistance, 1.0F, 0.0F, 10000.0F, "%.0f (0 이면 자동)");
+    ImGui::Text("드로우 %u / %u, 다시 그린 층 %u",
+                renderer.shadowDrawCount(),
+                renderer.shadowDrawCandidates(),
+                renderer.shadowLayersDrawn());
     ImGui::EndDisabled();
     ImGui::TextDisabled("그림자 시점 %u개까지 (방향광/스폿광 1, 점광 6)", gfx::MAX_SHADOW_VIEWS);
 
@@ -857,7 +868,8 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::TextDisabled("(미지원)");
     }
 
-    static constexpr const char* DEBUG_MODE_NAMES[] = {"셰이딩", "meshlet", "노멀", "UV", "깊이", "LOD"};
+    static constexpr const char* DEBUG_MODE_NAMES[] = {
+        "셰이딩", "meshlet", "노멀", "UV", "깊이", "LOD", "캐스케이드", "그림자"};
     int debugMode = static_cast<int>(renderer.debugMode);
     if (ImGui::Combo("디버그 뷰", &debugMode, DEBUG_MODE_NAMES, IM_ARRAYSIZE(DEBUG_MODE_NAMES))) {
         renderer.debugMode = static_cast<uint32_t>(debugMode);

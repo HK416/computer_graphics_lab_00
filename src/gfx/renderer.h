@@ -39,8 +39,10 @@ struct GpuLight {
     glm::vec4 directionIntensity; // xyz 앞 방향, w 세기
     glm::vec4 colorType;          // xyz 색, w 종류
     glm::vec4 coneSize;           // xy 원뿔 cos(안/바깥), zw 영역광 반크기
-    glm::vec4 rightShadow;        // xyz 가로축, w 그림자 아틀라스 첫 타일(-1 이면 없음)
-    glm::vec4 up;                 // xyz 세로축
+    glm::vec4 rightShadow;        // xyz 가로축, w 그림자 첫 층(-1 이면 없음)
+    glm::vec4 up;                 // xyz 세로축, w 이 조명이 쓰는 그림자 시점 수
+    glm::vec4 cascadeSplits;      // 캐스케이드 i 의 끝 거리. 방향광이 아니면 쓰지 않는다
+    glm::vec4 cascadeTexelSizes;  // 캐스케이드 i 의 월드 텍셀 크기. 노멀 오프셋 배율이다
 };
 
 // 그림자 시점 하나. 컬링에 쓸 정보까지 함께 담는다.
@@ -52,11 +54,17 @@ struct ShadowView {
     bool directional = false;
 };
 
-// 그림자 아틀라스 한 변의 픽셀 수. shaders/shadow.glsl 의 SHADOW_ATLAS_SIZE 와 같아야 한다.
-inline constexpr uint32_t SHADOW_ATLAS_SIZE = 4096;
-inline constexpr uint32_t SHADOW_TILES_PER_SIDE = 4;
-inline constexpr uint32_t SHADOW_TILE_SIZE = SHADOW_ATLAS_SIZE / SHADOW_TILES_PER_SIDE;
-inline constexpr uint32_t MAX_SHADOW_VIEWS = SHADOW_TILES_PER_SIDE * SHADOW_TILES_PER_SIDE;
+// 층마다의 캐싱 상태. 실제로 그려 둔 시점 행렬과 비교해 다시 그릴지 정한다.
+struct ShadowLayerState {
+    glm::mat4 drawnViewProjection{0.0F};
+    bool valid = false;
+};
+
+// 그림자 맵 한 장의 크기와 층 수. 아틀라스를 타일로 자르지 않고 2D 배열의 층 하나씩 쓴다.
+// 그래야 다시 그릴 필요 없는 시점은 렌더 패스를 아예 시작하지 않아, 타일 기반 GPU 에서
+// 첨부물을 통째로 읽어 오는 비용이 생기지 않는다.
+inline constexpr uint32_t SHADOW_MAP_SIZE = 1024;
+inline constexpr uint32_t MAX_SHADOW_VIEWS = 16;
 
 // 간접 그리기 버퍼 안의 연속 구간. 재질 경로와 면 방향 조합마다 하나씩 둔다.
 struct DrawBatch {
@@ -100,8 +108,10 @@ struct RenderTargets {
     Image present;    // 표시 해상도. 편집기 뷰포트가 그대로 보여준다.
     // 이전 프레임 깊이로 만든 계층적 Z 버퍼. 오클루전 컬링이 읽는다.
     Image hzb;
-    // 조명별 그림자 깊이를 담는 타일 아틀라스. 화면 크기와 무관해 한 번만 만든다.
+    // 조명별 그림자 깊이. 층 하나가 시점 하나다. 화면 크기와 무관해 한 번만 만든다.
     Image shadowAtlas;
+    // 층마다의 2D 뷰. 그 층만 렌더 패스 대상으로 잡을 때 쓴다.
+    std::vector<VkImageView> shadowLayerViews;
     uint32_t shadowAtlasSlot = 0;
     // 반해상도 SSAO. 잡음이 많아 흐린 결과를 따로 둔다.
     Image ssaoRaw;
@@ -188,6 +198,14 @@ public:
     // 시점별 절두체 컬링과, 그림자가 화면에 닿을 수 없는 캐스터를 버리는 스윕 컬링.
     bool shadowViewCulling = true;
     bool shadowCasterCulling = true;
+    // 방향광 캐스케이드. 층이 모자라면 자동으로 줄어든다.
+    uint32_t shadowCascades = 4;
+    float shadowSplitLambda = 0.85F;
+    // 0 이면 장면 크기에서 자동으로 정한다.
+    float shadowDistance = 0.0F;
+    // 광원과 캐스터가 그대로인 시점은 다시 그리지 않는다.
+    bool shadowCaching = true;
+    uint32_t shadowLayersDrawn() const { return shadowLayersRedrawn; }
     uint32_t shadowDrawCount() const { return shadowDrawsIssued; }
     uint32_t shadowDrawCandidates() const { return shadowDrawsTotal; }
 
@@ -275,10 +293,7 @@ private:
     void reserveLights(Frame& frame, uint32_t lightCount);
     void reserveShadowDraws(Frame& frame, uint32_t drawCount);
     // 그림자 시점마다 절두체와 캐스터 스윕으로 걸러 압축한 그리기 명령을 만든다.
-    void buildShadowDraws(Frame& frame,
-                          const scene::Scene& scene,
-                          const FrameBatches& batches,
-                          const glm::mat4& cameraViewProjection);
+    void buildShadowDraws(Frame& frame, const FrameBatches& batches, const glm::mat4& cameraViewProjection);
     // 장면의 조명을 GPU 배치로 옮기고 그림자 시점을 정한다.
     void buildLights(Frame& frame, const scene::Scene& scene);
     void createCullPipeline();
@@ -327,6 +342,10 @@ private:
     // 컬링 전후 그리기 수. 편집기에 보여준다.
     uint32_t shadowDrawsIssued = 0;
     uint32_t shadowDrawsTotal = 0;
+    std::array<ShadowLayerState, MAX_SHADOW_VIEWS> shadowLayers{};
+    std::vector<uint8_t> shadowLayerDirty;
+    uint32_t shadowLayersRedrawn = 0;
+    uint64_t lastShadowSettings = 0;
 
     GpuProfiler frameProfiler;
 
@@ -353,6 +372,8 @@ private:
     // buildLights 가 재는 장면 반지름. SSAO 반지름을 장면 크기에 맞추는 데 쓴다.
     float sceneRadius = 1.0F;
     bool ssaoNeedsClear = true;
+    // 그림자 층을 한 번 읽기 좋은 레이아웃으로 옮겨 둔다. 그 뒤로는 층마다 따로 전이한다.
+    bool shadowNeedsInit = true;
     VkPipelineLayout cullPipelineLayout = VK_NULL_HANDLE;
     VkPipeline cullPipeline = VK_NULL_HANDLE;
     VkPipelineLayout hzbPipelineLayout = VK_NULL_HANDLE;

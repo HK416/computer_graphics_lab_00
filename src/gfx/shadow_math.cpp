@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cmath>
 
+#include <glm/common.hpp>
 #include <glm/geometric.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace gfx {
 
@@ -61,6 +63,56 @@ bool sweptSphereInFrustum(const std::array<glm::vec4, MAX_FRUSTUM_PLANES>& plane
         }
     }
     return true;
+}
+
+void cascadeSplits(
+    float nearPlane, float farPlane, uint32_t count, float lambda, std::array<float, MAX_SHADOW_CASCADES>& splits) {
+    count = std::clamp(count, 1U, MAX_SHADOW_CASCADES);
+    float ratio = farPlane / std::max(nearPlane, 1e-4F);
+    for (uint32_t i = 0; i < MAX_SHADOW_CASCADES; ++i) {
+        if (i >= count) {
+            splits[i] = farPlane;
+            continue;
+        }
+        float fraction = static_cast<float>(i + 1) / static_cast<float>(count);
+        float uniform = nearPlane + (farPlane - nearPlane) * fraction;
+        float logarithmic = nearPlane * std::pow(ratio, fraction);
+        splits[i] = glm::mix(uniform, logarithmic, lambda);
+    }
+}
+
+CascadeSphere fitCascadeSphere(float nearPlane, float farPlane, float fovYRadians, float aspect) {
+    // 코너가 (±h·z, ±v·z, z) 이므로 축 위의 중심 t 에서 코너까지 거리의 제곱은 a²z² + (z-t)² 다.
+    // 이를 z = near 와 z = far 에서 같게 만드는 t 가 최소 포함 구의 중심이다.
+    float v = std::tan(fovYRadians * 0.5F);
+    float h = v * aspect;
+    float a2 = h * h + v * v;
+
+    CascadeSphere sphere;
+    sphere.distance = std::min((nearPlane + farPlane) * (1.0F + a2) * 0.5F, farPlane);
+    float axial = farPlane - sphere.distance;
+    sphere.radius = std::sqrt(axial * axial + a2 * farPlane * farPlane);
+    return sphere;
+}
+
+glm::mat4 snapCascadeMatrix(const glm::mat4& lightRotation,
+                            glm::vec3 center,
+                            float radius,
+                            float depthNear,
+                            float depthFar,
+                            uint32_t resolution) {
+    glm::vec3 lightCenter = glm::vec3(lightRotation * glm::vec4{center, 1.0F});
+    float texel = 2.0F * radius / static_cast<float>(std::max(resolution, 1U));
+    lightCenter.x = std::floor(lightCenter.x / texel) * texel;
+    lightCenter.y = std::floor(lightCenter.y / texel) * texel;
+
+    glm::mat4 projection = glm::orthoRH_ZO(lightCenter.x - radius,
+                                           lightCenter.x + radius,
+                                           lightCenter.y - radius,
+                                           lightCenter.y + radius,
+                                           depthNear,
+                                           depthFar);
+    return projection * lightRotation;
 }
 
 glm::vec4 transformBoundingSphere(const glm::mat4& model, const glm::vec4& sphere) {

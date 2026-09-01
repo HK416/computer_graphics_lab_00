@@ -66,6 +66,8 @@ void imageBarrier(VkCommandBuffer commandBuffer,
                   uint32_t sourceQueueFamily = VK_QUEUE_FAMILY_IGNORED,
                   uint32_t destinationQueueFamily = VK_QUEUE_FAMILY_IGNORED,
                   uint32_t baseMipLevel = 0,
-                  uint32_t mipLevelCount = VK_REMAINING_MIP_LEVELS);
+                  uint32_t mipLevelCount = VK_REMAINING_MIP_LEVELS,
+                  uint32_t baseArrayLayer = 0,
+                  uint32_t arrayLayerCount = VK_REMAINING_ARRAY_LAYERS);
 
 } // namespace gfx

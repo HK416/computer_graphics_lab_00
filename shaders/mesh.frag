@@ -12,6 +12,32 @@ vec4 debugColor() {
         return vec4(normalize(inNormal) * 0.5 + 0.5, 1.0);
     case DEBUG_MODE_LOD:
         return vec4(debugPalette(pushConstants.meshlets.items[inMeshletIndex].level * 977u + 13u), 1.0);
+    case DEBUG_MODE_CASCADE: {
+        // 첫 방향광 기준으로 이 픽셀이 어느 캐스케이드를 쓰는지 보여준다.
+        uint lightCount = pushConstants.camera.item.shading.x;
+        for (uint i = 0; i < lightCount; ++i) {
+            Light light = pushConstants.lights.items[i];
+            if (uint(light.colorType.w) == LIGHT_TYPE_DIRECTIONAL) {
+                return vec4(debugPalette(shadowCascadeIndex(light, inWorldPosition) * 613u + 7u), 1.0);
+            }
+        }
+        return vec4(0.0);
+    }
+    case DEBUG_MODE_SHADOW: {
+        // 첫 그림자 조명의 가시성만 회색조로 보여준다.
+        uint lightCount = pushConstants.camera.item.shading.x;
+        for (uint i = 0; i < lightCount; ++i) {
+            Light light = pushConstants.lights.items[i];
+            if (light.rightShadow.w >= 0.0) {
+                vec3 normal = normalize(inNormal);
+                vec3 toLight = uint(light.colorType.w) == LIGHT_TYPE_DIRECTIONAL
+                                   ? -light.directionIntensity.xyz
+                                   : normalize(light.positionRange.xyz - inWorldPosition);
+                return vec4(vec3(shadowFactor(light, inWorldPosition, normal, toLight)), 1.0);
+            }
+        }
+        return vec4(1.0, 0.0, 1.0, 1.0);
+    }
     case DEBUG_MODE_UV:
         return vec4(fract(inUv), 0.0, 1.0);
     case DEBUG_MODE_DEPTH: {
