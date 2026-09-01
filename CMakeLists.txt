@@ -89,6 +89,7 @@ set(shader_sources
     shaders/hzb_reduce.comp
     shaders/pathtrace.rgen
     shaders/pathtrace.rmiss
+    shaders/pathtrace_shadow.rmiss
     shaders/pathtrace.rchit)
 
 set(shader_binaries)

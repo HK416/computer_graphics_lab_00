@@ -65,6 +65,44 @@ vec3 rectangleRepresentativePoint(Surface surface, Light light, vec3 center, vec
     return closestPointOnRectangle(surface.position, center, right, up, halfSize);
 }
 
+// 광원 하나에서 표면으로 오는 방향과 거리, 도달 복사휘도를 구한다. 확산만 쓰는 경로 추적의
+// 다음 사건 추정이 쓴다. 영역광은 가장 가까운 점으로 근사한다.
+vec3 sampleLightRadiance(Light light, vec3 position, out vec3 lightDirection, out float distanceToLight) {
+    uint type = uint(light.colorType.w);
+    vec3 radiance = light.colorType.rgb * light.directionIntensity.w;
+
+    if (type == LIGHT_TYPE_DIRECTIONAL) {
+        lightDirection = -light.directionIntensity.xyz;
+        distanceToLight = 1.0e30;
+        return radiance;
+    }
+
+    vec3 lightPosition = light.positionRange.xyz;
+    if (type == LIGHT_TYPE_AREA) {
+        float facing = dot(normalize(position - lightPosition), light.directionIntensity.xyz);
+        if (facing <= 0.0) {
+            lightDirection = vec3(0.0, 1.0, 0.0);
+            distanceToLight = 0.0;
+            return vec3(0.0);
+        }
+        lightPosition = closestPointOnRectangle(
+            position, lightPosition, light.rightShadow.xyz, light.up.xyz, light.coneSize.zw);
+        radiance *= facing;
+    }
+
+    vec3 offset = lightPosition - position;
+    distanceToLight = length(offset);
+    lightDirection = offset / max(distanceToLight, 1e-4);
+    radiance *= distanceAttenuation(distanceToLight, light.positionRange.w);
+
+    if (type == LIGHT_TYPE_SPOT) {
+        float aligned = dot(-lightDirection, light.directionIntensity.xyz);
+        float falloff = clamp((aligned - light.coneSize.y) / max(light.coneSize.x - light.coneSize.y, 1e-4), 0.0, 1.0);
+        radiance *= falloff * falloff;
+    }
+    return radiance;
+}
+
 // 그림자를 뺀 조명 하나의 기여. attenuation 은 그림자 계산에도 쓰라고 따로 돌려준다.
 vec3 lightContribution(Light light, Surface surface, out vec3 lightDirection) {
     uint type = uint(light.colorType.w);

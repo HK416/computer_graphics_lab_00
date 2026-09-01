@@ -15,6 +15,9 @@ struct PathPayload {
     bool missed;
 };
 
+#define PATH_FLAG_NEXT_EVENT 1u
+#define PATH_FLAG_RUSSIAN_ROULETTE 2u
+
 layout(push_constant) uniform PathTracePushConstants {
     VertexBuffer vertices;
     IndexBuffer indices;
@@ -23,12 +26,16 @@ layout(push_constant) uniform PathTracePushConstants {
     MaterialBuffer materials;
     MeshLodBuffer lods;
     CameraBuffer camera;
+    LightBuffer lights;
     uint accumulationImage;
     uint outputImage;
     uint frameIndex;
     uint sampleCount;
     uint maxBounces;
-    uint padding;
+    uint samplesPerFrame;
+    uint flags;
+    float radianceClamp;
+    float skyIntensity;
 } pathTrace;
 
 // PCG 해시 기반 난수. 픽셀과 프레임마다 서로 다른 수열을 쓴다.

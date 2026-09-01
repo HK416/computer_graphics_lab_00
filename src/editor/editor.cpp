@@ -732,11 +732,29 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::SameLine();
         ImGui::TextDisabled("(미지원)");
     } else if (renderer.usePathTracing) {
-        int bounces = static_cast<int>(renderer.pathTraceBounces);
-        if (ImGui::SliderInt("반사 횟수", &bounces, 1, 8)) {
-            renderer.pathTraceBounces = static_cast<uint32_t>(bounces);
+        gfx::PathTraceOptions& options = renderer.pathTrace;
+        int bounces = static_cast<int>(options.maxBounces);
+        if (ImGui::SliderInt("반사 횟수", &bounces, 1, 16)) {
+            options.maxBounces = static_cast<uint32_t>(bounces);
         }
+        int perFrame = static_cast<int>(options.samplesPerFrame);
+        if (ImGui::SliderInt("프레임당 표본", &perFrame, 1, 16)) {
+            options.samplesPerFrame = static_cast<uint32_t>(perFrame);
+        }
+        int maxSamples = static_cast<int>(options.maxSamples);
+        if (ImGui::SliderInt("표본 상한", &maxSamples, 0, 4096, maxSamples == 0 ? "무제한" : "%d")) {
+            options.maxSamples = static_cast<uint32_t>(maxSamples);
+        }
+        ImGui::Checkbox("다음 사건 추정", &options.nextEventEstimation);
+        ImGui::SameLine();
+        ImGui::Checkbox("러시안 룰렛", &options.russianRoulette);
+        ImGui::SliderFloat("복사휘도 상한", &options.radianceClamp, 1.0F, 64.0F, "%.1f");
+        ImGui::SliderFloat("하늘 밝기", &options.skyIntensity, 0.0F, 4.0F, "%.2f");
         ImGui::Text("누적 표본 %u", renderer.pathTraceSamples());
+        ImGui::SameLine();
+        if (ImGui::Button("누적 초기화")) {
+            renderer.resetPathAccumulation();
+        }
     }
 
     ImGui::SeparatorText("파이프라인");

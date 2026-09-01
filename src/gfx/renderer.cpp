@@ -1817,16 +1817,20 @@ void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, 
                  VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
                  VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
-    rayTracer->trace(commandBuffer,
-                     currentRenderExtent,
-                     frame.cameraBuffer.address,
-                     frame.instanceBuffer.address,
-                     targets.pathAccumulationStorageSlot,
-                     0,
-                     static_cast<uint32_t>(frameIndex),
-                     pathSampleCount,
-                     pathTraceBounces);
-    ++pathSampleCount;
+    // 표본 상한에 닿으면 더 쏘지 않고 쌓아 둔 결과를 그대로 보여준다.
+    if (pathTrace.maxSamples == 0 || pathSampleCount < pathTrace.maxSamples) {
+        rayTracer->trace(commandBuffer,
+                         currentRenderExtent,
+                         frame.cameraBuffer.address,
+                         frame.instanceBuffer.address,
+                         frame.lightBuffer.address,
+                         targets.pathAccumulationStorageSlot,
+                         0,
+                         static_cast<uint32_t>(frameIndex),
+                         pathSampleCount,
+                         pathTrace);
+        ++pathSampleCount;
+    }
 
     imageBarrier(commandBuffer,
                  targets.pathAccumulation.handle,

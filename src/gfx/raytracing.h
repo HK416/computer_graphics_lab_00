@@ -19,6 +19,21 @@ class GeometryStore;
 
 // 레이트레이싱 가속 구조와 경로 추적 파이프라인.
 // 하드웨어가 VK_KHR_ray_tracing_pipeline 을 지원할 때만 만들어지며, 폴백 경로는 두지 않는다.
+// 편집기에서 조절하는 경로 추적 설정.
+struct PathTraceOptions {
+    uint32_t maxBounces = 3;
+    // 한 프레임에 픽셀마다 쏘는 경로 수. 늘리면 빨리 수렴하지만 프레임이 길어진다.
+    uint32_t samplesPerFrame = 1;
+    // 0 이면 계속 누적한다. 그 외에는 이 수만큼 쌓고 멈춘다.
+    uint32_t maxSamples = 0;
+    // 다음 사건 추정. 끄면 조명을 우연히 맞출 때만 밝아져 훨씬 느리게 수렴한다.
+    bool nextEventEstimation = true;
+    bool russianRoulette = true;
+    // 반딧불이 표본을 자르는 상한.
+    float radianceClamp = 8.0F;
+    float skyIntensity = 1.0F;
+};
+
 class RayTracer {
     struct AccelerationStructure {
         VkAccelerationStructureKHR handle = VK_NULL_HANDLE;
@@ -40,11 +55,12 @@ public:
                VkExtent2D extent,
                VkDeviceAddress cameraAddress,
                VkDeviceAddress instanceAddress,
+               VkDeviceAddress lightAddress,
                uint32_t accumulationImage,
                uint32_t outputImage,
                uint32_t frameIndex,
                uint32_t sampleCount,
-               uint32_t maxBounces);
+               const PathTraceOptions& options);
 
     bool ready() const { return topLevel.handle != VK_NULL_HANDLE; }
 

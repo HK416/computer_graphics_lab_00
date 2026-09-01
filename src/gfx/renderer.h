@@ -196,9 +196,11 @@ public:
 
     // 경로 추적. 하드웨어가 지원할 때만 켤 수 있다.
     bool usePathTracing = false;
-    uint32_t pathTraceBounces = 3;
+    PathTraceOptions pathTrace;
     bool pathTracingAvailable() const { return rayTracer != nullptr; }
     uint32_t pathTraceSamples() const { return pathSampleCount; }
+    // 설정을 바꾸면 쌓인 표본이 섞이므로 편집기가 이걸 눌러 처음부터 다시 쌓게 한다.
+    void resetPathAccumulation() { pathSampleCount = 0; }
     // mesh shader 미지원 장치에서는 켤 수 없다.
     bool useMeshShader = false;
     bool meshShaderAvailable() const { return meshShaderPipelines[0] != VK_NULL_HANDLE; }

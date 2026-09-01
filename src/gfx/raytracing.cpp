@@ -29,13 +29,20 @@ struct PathTracePushConstants {
     VkDeviceAddress materials;
     VkDeviceAddress lods;
     VkDeviceAddress camera;
+    VkDeviceAddress lights;
     uint32_t accumulationImage;
     uint32_t outputImage;
     uint32_t frameIndex;
     uint32_t sampleCount;
     uint32_t maxBounces;
-    uint32_t padding;
+    uint32_t samplesPerFrame;
+    uint32_t flags;
+    float radianceClamp;
+    float skyIntensity;
 };
+
+constexpr uint32_t PATH_FLAG_NEXT_EVENT = 1;
+constexpr uint32_t PATH_FLAG_RUSSIAN_ROULETTE = 2;
 
 std::vector<uint32_t> readSpirv(const std::string& name) {
     std::filesystem::path path = std::filesystem::path(CG_LAB_SHADER_ROOT) / name;
@@ -387,9 +394,10 @@ void RayTracer::createPipeline() {
 
     VkShaderModule raygenModule = createShaderModule(context.device, "pathtrace.rgen.spv");
     VkShaderModule missModule = createShaderModule(context.device, "pathtrace.rmiss.spv");
+    VkShaderModule shadowMissModule = createShaderModule(context.device, "pathtrace_shadow.rmiss.spv");
     VkShaderModule hitModule = createShaderModule(context.device, "pathtrace.rchit.spv");
 
-    std::array<VkPipelineShaderStageCreateInfo, 3> stages{};
+    std::array<VkPipelineShaderStageCreateInfo, 4> stages{};
     stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stages[0].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
     stages[0].module = raygenModule;
@@ -398,12 +406,17 @@ void RayTracer::createPipeline() {
     stages[1].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
     stages[1].module = missModule;
     stages[1].pName = "main";
+    // 그림자 광선은 페이로드가 달라 미스 셰이더도 따로 둔다.
     stages[2] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    stages[2].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    stages[2].module = hitModule;
+    stages[2].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
+    stages[2].module = shadowMissModule;
     stages[2].pName = "main";
+    stages[3] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    stages[3].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    stages[3].module = hitModule;
+    stages[3].pName = "main";
 
-    std::array<VkRayTracingShaderGroupCreateInfoKHR, 3> groups{};
+    std::array<VkRayTracingShaderGroupCreateInfoKHR, 4> groups{};
     for (size_t i = 0; i < groups.size(); ++i) {
         groups[i] = {VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR};
         groups[i].generalShader = VK_SHADER_UNUSED_KHR;
@@ -415,8 +428,10 @@ void RayTracer::createPipeline() {
     groups[0].generalShader = 0;
     groups[1].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
     groups[1].generalShader = 1;
-    groups[2].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
-    groups[2].closestHitShader = 2;
+    groups[2].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+    groups[2].generalShader = 2;
+    groups[3].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+    groups[3].closestHitShader = 3;
 
     VkRayTracingPipelineCreateInfoKHR pipelineInfo{VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR};
     pipelineInfo.stageCount = static_cast<uint32_t>(stages.size());
@@ -429,6 +444,7 @@ void RayTracer::createPipeline() {
         context.device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
 
     vkDestroyShaderModule(context.device, hitModule, nullptr);
+    vkDestroyShaderModule(context.device, shadowMissModule, nullptr);
     vkDestroyShaderModule(context.device, missModule, nullptr);
     vkDestroyShaderModule(context.device, raygenModule, nullptr);
 
@@ -456,8 +472,9 @@ void RayTracer::createPipeline() {
     }
 
     raygenRegion = {shaderBindingTable.address, regionStride, regionStride};
-    missRegion = {shaderBindingTable.address + regionStride, regionStride, regionStride};
-    hitRegion = {shaderBindingTable.address + 2ULL * regionStride, regionStride, regionStride};
+    // 미스 그룹이 둘이라 이 구간만 두 배다.
+    missRegion = {shaderBindingTable.address + regionStride, regionStride, 2ULL * regionStride};
+    hitRegion = {shaderBindingTable.address + 3ULL * regionStride, regionStride, regionStride};
     callableRegion = {};
 
     spdlog::info("경로 추적 파이프라인 준비 완료");
@@ -467,11 +484,12 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
                       VkExtent2D extent,
                       VkDeviceAddress cameraAddress,
                       VkDeviceAddress instanceAddress,
+                      VkDeviceAddress lightAddress,
                       uint32_t accumulationImage,
                       uint32_t outputImage,
                       uint32_t frameIndex,
                       uint32_t sampleCount,
-                      uint32_t maxBounces) {
+                      const PathTraceOptions& options) {
     PathTracePushConstants pushConstants{};
     pushConstants.vertices = geometry.vertexBuffer.address;
     pushConstants.indices = geometry.indexBuffer.address;
@@ -480,11 +498,17 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
     pushConstants.materials = geometry.materialBuffer.address;
     pushConstants.lods = geometry.lodBuffer.address;
     pushConstants.camera = cameraAddress;
+    pushConstants.lights = lightAddress;
     pushConstants.accumulationImage = accumulationImage;
     pushConstants.outputImage = outputImage;
     pushConstants.frameIndex = frameIndex;
     pushConstants.sampleCount = sampleCount;
-    pushConstants.maxBounces = maxBounces;
+    pushConstants.maxBounces = options.maxBounces;
+    pushConstants.samplesPerFrame = options.samplesPerFrame;
+    pushConstants.flags = (options.nextEventEstimation ? PATH_FLAG_NEXT_EVENT : 0U) |
+                          (options.russianRoulette ? PATH_FLAG_RUSSIAN_ROULETTE : 0U);
+    pushConstants.radianceClamp = options.radianceClamp;
+    pushConstants.skyIntensity = options.skyIntensity;
 
     std::array<VkDescriptorSet, 2> sets{bindless.set(), descriptorSet};
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline);
