@@ -37,6 +37,14 @@ struct PathTraceOptions {
     bool operator==(const PathTraceOptions&) const = default;
 };
 
+// 스킨 인스턴스 하나가 쓸 하위 가속 구조의 재료. 변형 정점 버퍼 안의 구간과 그 메쉬 번호다.
+struct SkinnedInstance {
+    uint32_t meshIndex;
+    uint32_t vertexOffset;
+
+    bool operator==(const SkinnedInstance&) const = default;
+};
+
 class RayTracer {
     struct AccelerationStructure {
         VkAccelerationStructureKHR handle = VK_NULL_HANDLE;
@@ -52,22 +60,36 @@ public:
 
     // 메쉬마다 0단계 LOD 로 하위 가속 구조를 만든다. 적재가 끝난 뒤 한 번 호출한다.
     void buildBottomLevel();
+    // 스킨 인스턴스마다 변형 정점으로 하위 가속 구조를 다시 세운다. 포즈가 바뀌면 매 프레임
+    // 불러야 한다. 스킨 컴퓨트가 끝난 뒤, updateTopLevel 앞에 온다.
+    void updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
+                                  const Buffer& skinnedVertices,
+                                  const std::vector<SkinnedInstance>& skinned);
     // 장면 인스턴스로 상위 가속 구조를 다시 만든다. 매 프레임 호출해도 된다.
     // instanceSlots 는 오브젝트 인덱스 -> 그리기 인스턴스 슬롯. 적중 셰이더가 인스턴스 배열을
     // 이 번호로 찾으므로 buildDrawCommands 가 만든 것과 반드시 같아야 한다.
+    // skinnedBlasSlots 는 오브젝트 인덱스 -> updateSkinnedBottomLevel 에 넘긴 배열의 번호이며,
+    // 스킨이 아닌 오브젝트는 NO_SKINNED_BLAS 다.
+    // frameSlot 은 진행 중인 프레임 번호. 인스턴스 버퍼를 프레임마다 나눠 쓰는 데 쓴다.
     void updateTopLevel(VkCommandBuffer commandBuffer,
                         const scene::Scene& sceneToTrace,
-                        const std::vector<uint32_t>& instanceSlots);
+                        const std::vector<uint32_t>& instanceSlots,
+                        const std::vector<uint32_t>& skinnedBlasSlots,
+                        uint32_t frameSlot);
     void trace(VkCommandBuffer commandBuffer,
                VkExtent2D extent,
                VkDeviceAddress cameraAddress,
                VkDeviceAddress instanceAddress,
                VkDeviceAddress lightAddress,
+               VkDeviceAddress skinnedVertexAddress,
                uint32_t accumulationImage,
                uint32_t outputImage,
                uint32_t frameIndex,
                uint32_t sampleCount,
                const PathTraceOptions& options);
+
+    // 스킨이 아닌 오브젝트의 하위 가속 구조 번호.
+    static constexpr uint32_t NO_SKINNED_BLAS = 0xFFFFFFFFU;
 
     bool ready() const { return topLevel.handle != VK_NULL_HANDLE; }
 
@@ -78,19 +100,29 @@ public:
 private:
     void loadFunctions();
     void createPipeline();
+    // 이번 프레임의 구축이 지난 프레임의 추적/질의와 겹치지 않게 막는다. 구조와 스크래치 버퍼를
+    // 하나씩만 두고 프레임마다 다시 쓰기 때문에 필요하다.
+    void barrierBeforeBuild(VkCommandBuffer commandBuffer);
     AccelerationStructure createStructure(VkAccelerationStructureTypeKHR type, VkDeviceSize size);
     void destroyStructure(AccelerationStructure& structure);
-    void reserveScratch(VkDeviceSize size);
+    void reserveScratch(Buffer& buffer, VkDeviceSize size, const char* debugName);
 
     Context& context;
     GeometryStore& geometry;
     BindlessTextures& bindless;
 
     std::vector<AccelerationStructure> bottomLevels;
+    // 스킨 인스턴스마다 하나. 포즈가 바뀔 때마다 같은 자리에 다시 세운다.
+    std::vector<AccelerationStructure> skinnedBottomLevels;
     AccelerationStructure topLevel;
-    Buffer instanceBuffer;
+    // 구축 입력은 CPU 가 기록 시점에 채우므로 진행 중인 프레임 수만큼 나눠 둬야 한다. 하나만
+    // 두면 지난 프레임의 구축이 아직 읽는 중에 덮어쓰게 된다.
+    std::vector<Buffer> instanceBuffers;
+    std::vector<uint32_t> instanceCapacities;
     Buffer scratchBuffer;
-    uint32_t instanceCapacity = 0;
+    // 스킨 하위 구조는 상위 구조와 같은 명령 버퍼 안에서 세워진다. 스크래치를 하나로 묶으면
+    // 상위 구조 차례에 버퍼가 커지면서 이미 기록해 둔 주소가 날아간다.
+    Buffer skinnedScratchBuffer;
 
     VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;

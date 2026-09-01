@@ -72,6 +72,7 @@ uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<ui
         maxLods = std::max(maxLods, mesh.lodCount);
         meshes.push_back(mesh);
         meshNames.push_back(source.name);
+        meshVertexCounts.push_back(static_cast<uint32_t>(source.vertices.size()));
 
         for (const asset::Meshlet& sourceMeshlet : source.meshlets) {
             GpuMeshlet meshlet{};
@@ -126,14 +127,23 @@ void GeometryStore::build() {
     destroyBuffer(context, indexBuffer);
     destroyBuffer(context, vertexBuffer);
 
+    // 하위 가속 구조는 이 두 버퍼를 그대로 입력으로 읽는다. 용도 비트가 없으면 규격 위반이라
+    // 드라이버가 어떤 구조를 세울지 정해져 있지 않다. 광선 확장이 없는 장치에는 붙일 수 없다.
+    VkBufferUsageFlags accelerationInput = 0;
+    if (context.caps.rayTracingPipeline || context.caps.rayQuery) {
+        accelerationInput = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+    }
+
     vertexBuffer = createBuffer(context,
                                 vertices.size() * sizeof(asset::Vertex),
-                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                    accelerationInput,
                                 MemoryLocation::DEVICE,
                                 "정점");
     indexBuffer = createBuffer(context,
                                indices.size() * sizeof(uint32_t),
-                               VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                               VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                   accelerationInput,
                                MemoryLocation::DEVICE,
                                "인덱스");
     meshBuffer = createBuffer(context,

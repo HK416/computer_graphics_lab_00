@@ -55,6 +55,14 @@ struct ShadowView {
     bool directional = false;
 };
 
+// 스킨 컴퓨트 디스패치 하나. 오브젝트 하나가 자기 구간을 통째로 변형한다.
+struct SkinDispatch {
+    uint32_t sourceOffset;
+    uint32_t destinationOffset;
+    uint32_t jointOffset;
+    uint32_t vertexCount;
+};
+
 // 층마다의 캐싱 상태. 실제로 그려 둔 시점 행렬과 비교해 다시 그릴지 정한다.
 struct ShadowLayerState {
     glm::mat4 drawnViewProjection{0.0F};
@@ -310,11 +318,18 @@ private:
     // 장면의 조명을 GPU 배치로 옮기고 그림자 시점을 정한다.
     void buildLights(Frame& frame, const scene::Scene& scene);
     void createCullPipeline();
+    // 스킨 정점을 포즈 공간으로 옮겨 따로 뽑아 두는 컴퓨트. 광선 경로가 이 결과로 하위 가속
+    // 구조를 세운다.
+    void createSkinPipeline();
     void createShadowPipeline();
     void createSsaoPipelines();
     void recordShadowPass(VkCommandBuffer commandBuffer);
     void recordSsaoPass(VkCommandBuffer commandBuffer, const Frame& frame);
     void recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches& batches);
+    // 스킨 인스턴스의 변형 정점을 만들고, 그것으로 하위 가속 구조를 다시 세운다.
+    void recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame);
+    // 광선 경로가 이번 프레임에 쓸 가속 구조를 최신으로 맞춘다.
+    void updateAccelerationStructures(VkCommandBuffer commandBuffer, const Frame& frame, const scene::Scene& scene);
     void recordHzbPass(VkCommandBuffer commandBuffer);
     void updateLodNetwork(const scene::Scene& scene, Frame& frame, float projectionScale);
     // 장면을 순회하며 인스턴스와 간접 그리기 명령을 재질 경로별 구간으로 채운다.
@@ -395,6 +410,19 @@ private:
     bool shadowNeedsInit = true;
     VkPipelineLayout cullPipelineLayout = VK_NULL_HANDLE;
     VkPipeline cullPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout skinPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline skinPipeline = VK_NULL_HANDLE;
+    // 스킨 인스턴스의 변형 정점. 인스턴스마다 메쉬 정점 수만큼 이어 붙인다.
+    Buffer skinnedVertexBuffer;
+    uint32_t skinnedVertexCapacity = 0;
+    // buildDrawCommands 가 채운다. 스킨 컴퓨트 디스패치와 하위 가속 구조 구축이 함께 읽는다.
+    std::vector<SkinDispatch> skinDispatches;
+    std::vector<SkinnedInstance> skinnedInstances;
+    // 지난 프레임에 실제로 세운 목록. 경로 추적을 켜는 순간처럼 장면은 그대로인데 스킨 구조가
+    // 새로 필요해지는 경우를 잡는다.
+    std::vector<SkinnedInstance> builtSkinnedInstances;
+    // 오브젝트 인덱스 -> skinnedInstances 번호. 스킨이 아니면 RayTracer::NO_SKINNED_BLAS.
+    std::vector<uint32_t> objectSkinnedBlas;
     VkPipelineLayout hzbPipelineLayout = VK_NULL_HANDLE;
     VkPipeline hzbPipeline = VK_NULL_HANDLE;
     PFN_vkCmdDrawIndexedIndirectCount drawIndexedIndirectCount = nullptr;

@@ -92,6 +92,7 @@ set(shader_sources
     shaders/ssao.comp
     shaders/ssao_blur.comp
     shaders/cull_meshlets.comp
+    shaders/skin.comp
     shaders/hzb_reduce.comp
     shaders/pathtrace.rgen
     shaders/pathtrace.rmiss

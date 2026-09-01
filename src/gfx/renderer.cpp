@@ -97,6 +97,19 @@ struct CullPushConstants {
     VkDeviceAddress network;
 };
 
+struct SkinPushConstants {
+    VkDeviceAddress source;
+    VkDeviceAddress destination;
+    VkDeviceAddress joints;
+    uint32_t sourceOffset;
+    uint32_t destinationOffset;
+    uint32_t jointOffset;
+    uint32_t vertexCount;
+};
+
+// skin.comp 의 local_size_x 와 같아야 한다.
+constexpr uint32_t SKIN_GROUP_SIZE = 64;
+
 constexpr uint32_t CULL_FLAG_FRUSTUM = 1;
 constexpr uint32_t CULL_FLAG_CONE = 2;
 constexpr uint32_t CULL_FLAG_OCCLUSION = 4;
@@ -229,6 +242,7 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& 
     createMeshPipelines();
     createPostPipelines();
     createCullPipeline();
+    createSkinPipeline();
     createShadowPipeline();
     createSsaoPipelines();
     environment = std::make_unique<EnvironmentMap>(context, bindless);
@@ -265,6 +279,9 @@ Renderer::~Renderer() {
     vkDestroyPipeline(context.device, hzbPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, hzbPipelineLayout, nullptr);
     vkDestroyPipeline(context.device, cullPipeline, nullptr);
+    vkDestroyPipeline(context.device, skinPipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, skinPipelineLayout, nullptr);
+    destroyBuffer(context, skinnedVertexBuffer);
     vkDestroyPipeline(context.device, ssaoBlurPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, ssaoBlurPipelineLayout, nullptr);
     vkDestroyPipeline(context.device, ssaoPipeline, nullptr);
@@ -907,6 +924,27 @@ void Renderer::createSsaoPipelines() {
     blurInfo.layout = ssaoBlurPipelineLayout;
     VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &blurInfo, nullptr, &ssaoBlurPipeline));
     vkDestroyShaderModule(context.device, blurModule, nullptr);
+}
+
+void Renderer::createSkinPipeline() {
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushConstantRange.size = sizeof(SkinPushConstants);
+
+    VkDescriptorSetLayout skinBindlessLayout = bindless.layout();
+    VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &skinBindlessLayout;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushConstantRange;
+    VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &skinPipelineLayout));
+
+    VkShaderModule module = createShaderModule(context.device, "skin.comp.spv");
+    VkComputePipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    pipelineInfo.stage = shaderStage(VK_SHADER_STAGE_COMPUTE_BIT, module);
+    pipelineInfo.layout = skinPipelineLayout;
+    VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &skinPipeline));
+    vkDestroyShaderModule(context.device, module, nullptr);
 }
 
 void Renderer::createCullPipeline() {
@@ -1694,7 +1732,15 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     lastScene = &scene;
     lastSceneRevision = scene.revision();
     objectInstanceSlots.assign(scene.objects.size(), INVALID_INSTANCE_SLOT);
+    objectSkinnedBlas.assign(scene.objects.size(), RayTracer::NO_SKINNED_BLAS);
     instanceBounds.assign(scene.objects.size(), glm::vec4{0.0F});
+    skinDispatches.clear();
+    skinnedInstances.clear();
+
+    // 변형 정점은 가속 구조를 세울 때만 쓴다. 래스터만 그리는 프레임에는 만들지 않는다.
+    bool rayTracedFrame =
+        rayTracer != nullptr && (usePathTracing || (useRayQueryShadows && rayQueryShadowsAvailable()));
+    uint32_t skinnedVertexCursor = 0;
 
     // 재질 경로와 면 방향 조합마다 명령이 연속 구간을 이루도록 두 번 순회한다.
     auto bucketOf = [this](const scene::Object& object) {
@@ -1813,7 +1859,24 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         instances[slot].meshIndex = object.meshIndex;
         instances[slot].bucket = static_cast<uint32_t>(mode * 2 + sided);
         instances[slot].bucketBase = batches.meshletDraws[mode][sided].first;
-        instances[slot].jointOffset = jointOffsetFor(object);
+        uint32_t jointOffset = jointOffsetFor(object);
+        instances[slot].jointOffset = jointOffset;
+
+        // 스킨 인스턴스는 변형 정점을 따로 뽑아 두고, 그 구간으로 자기 하위 가속 구조를 세운다.
+        // 같은 메쉬를 여러 오브젝트가 서로 다른 포즈로 쓸 수 있어 오브젝트마다 하나씩 잡는다.
+        uint32_t skinnedVertexOffset = NO_SKINNED_VERTICES;
+        if (rayTracedFrame && jointOffset != NO_JOINTS) {
+            uint32_t vertexCount = geometry.meshVertexCount(object.meshIndex);
+            skinnedVertexOffset = skinnedVertexCursor;
+            skinnedVertexCursor += vertexCount;
+            objectSkinnedBlas[index] = static_cast<uint32_t>(skinnedInstances.size());
+            skinnedInstances.push_back(SkinnedInstance{object.meshIndex, skinnedVertexOffset});
+            skinDispatches.push_back(SkinDispatch{static_cast<uint32_t>(mesh.vertexOffset),
+                                                  skinnedVertexOffset,
+                                                  jointOffset,
+                                                  vertexCount});
+        }
+        instances[slot].skinnedVertexOffset = skinnedVertexOffset;
 
         draws[slot].indexCount = lod.indexCount;
         draws[slot].instanceCount = 1;
@@ -1830,6 +1893,21 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
             groups[groupSlot].meshletCount = std::min(MESHLET_GROUP_SIZE, lod.meshletCount - first);
             groups[groupSlot].padding = 0;
         }
+    }
+
+    // 커질 때만 다시 잡는다. 지난 프레임이 아직 읽고 있을 수 있어 그때는 장치를 세운다. 스킨
+    // 오브젝트가 늘어나는 순간에만 일어나므로 프레임마다 드는 비용은 아니다.
+    if (skinnedVertexCursor > skinnedVertexCapacity) {
+        waitIdle();
+        destroyBuffer(context, skinnedVertexBuffer);
+        skinnedVertexCapacity = skinnedVertexCursor * 2;
+        skinnedVertexBuffer =
+            createBuffer(context,
+                         static_cast<VkDeviceSize>(skinnedVertexCapacity) * sizeof(asset::Vertex),
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+                         MemoryLocation::DEVICE,
+                         "스킨 정점");
     }
 
     auto* meshTasks = static_cast<VkDrawMeshTasksIndirectCommandEXT*>(frame.meshTaskIndirectBuffer.mapped);
@@ -2101,14 +2179,61 @@ void Renderer::recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches&
     vkCmdPipelineBarrier2(commandBuffer, &cullDependency);
 }
 
-// ponytail: 스킨 메쉬는 하위 가속 구조를 정점 원본으로 만들어 두므로 경로 추적에서는 바인드 포즈로
-// 굳어 있다. 게다가 재생 중인 애니메이터는 매 프레임 장면 리비전을 올려 누적을 계속 버리게 하므로
-// 화면이 1표본짜리 잡음으로 남는다. 제대로 하려면 스킨 결과를 버퍼로 뽑아 BLAS 를 다시 지어야 한다.
-void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, const scene::Scene& scene) {
-    // 장면이 그대로면 가속 구조도 그대로다.
-    if (sceneChangedThisFrame || !rayTracer->ready()) {
-        rayTracer->updateTopLevel(commandBuffer, scene, objectInstanceSlots);
+void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame) {
+    if (skinDispatches.empty()) {
+        return;
     }
+
+    VkDescriptorSet bindlessSet = bindless.set();
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, skinPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, skinPipeline);
+    for (const SkinDispatch& dispatch : skinDispatches) {
+        SkinPushConstants pushConstants{geometry.vertexBuffer.address,
+                                        skinnedVertexBuffer.address,
+                                        frame.jointBuffer.address,
+                                        dispatch.sourceOffset,
+                                        dispatch.destinationOffset,
+                                        dispatch.jointOffset,
+                                        dispatch.vertexCount};
+        vkCmdPushConstants(
+            commandBuffer, skinPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(commandBuffer, (dispatch.vertexCount + SKIN_GROUP_SIZE - 1) / SKIN_GROUP_SIZE, 1, 1);
+    }
+
+    // 하위 가속 구조 구축이 이 정점을 그대로 읽는다.
+    VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+}
+
+void Renderer::updateAccelerationStructures(VkCommandBuffer commandBuffer,
+                                            const Frame& frame,
+                                            const scene::Scene& scene) {
+    // 장면이 그대로면 가속 구조도 그대로다. 포즈가 바뀌면 애니메이터가 장면 리비전을 올리므로
+    // 같은 조건으로 걸러진다. 스킨 목록 자체가 달라졌으면(경로 추적을 막 켰거나 오브젝트가
+    // 늘었으면) 리비전과 무관하게 다시 세워야 한다.
+    if (!sceneChangedThisFrame && skinnedInstances == builtSkinnedInstances && rayTracer->ready()) {
+        return;
+    }
+    builtSkinnedInstances = skinnedInstances;
+    recordSkinPass(commandBuffer, frame);
+    rayTracer->updateSkinnedBottomLevel(commandBuffer, skinnedVertexBuffer, skinnedInstances);
+    rayTracer->updateTopLevel(commandBuffer,
+                              scene,
+                              objectInstanceSlots,
+                              objectSkinnedBlas,
+                              static_cast<uint32_t>(frameIndex % FRAMES_IN_FLIGHT));
+}
+
+void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, const scene::Scene& scene) {
+    updateAccelerationStructures(commandBuffer, frame, scene);
     if (!rayTracer->ready()) {
         return;
     }
@@ -2130,6 +2255,7 @@ void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, 
                          frame.cameraBuffer.address,
                          frame.instanceBuffer.address,
                          frame.lightBuffer.address,
+                         skinnedVertexBuffer.address,
                          targets.pathAccumulationStorageSlot,
                          0,
                          static_cast<uint32_t>(frameIndex),
@@ -2339,9 +2465,7 @@ void Renderer::recordCommands(Frame& frame,
         // 광선 질의 그림자를 쓰면 TLAS 를 집합 1 로 함께 묶고, 장면이 바뀌었으면 먼저 다시 만든다.
         rayQueryPass = useRayQueryShadows && rayQueryShadowsAvailable();
         if (rayQueryPass) {
-            if (sceneChangedThisFrame || !rayTracer->ready()) {
-                rayTracer->updateTopLevel(commandBuffer, scene, objectInstanceSlots);
-            }
+            updateAccelerationStructures(commandBuffer, frame, scene);
             rayQueryPass = rayTracer->ready();
         }
         VkPipelineLayout sceneLayout = rayQueryPass ? meshRayQueryPipelineLayout : meshPipelineLayout;

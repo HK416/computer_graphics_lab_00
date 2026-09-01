@@ -20,6 +20,8 @@ struct PathPayload {
 
 layout(push_constant) uniform PathTracePushConstants {
     VertexBuffer vertices;
+    // 스킨 컴퓨트가 뽑아 둔 변형 정점. 스킨 인스턴스는 여기서 정점을 읽는다.
+    VertexBuffer skinnedVertices;
     IndexBuffer indices;
     MeshBuffer meshes;
     InstanceBuffer instances;

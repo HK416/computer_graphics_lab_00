@@ -74,6 +74,9 @@ inline constexpr uint32_t NO_JOINTS = 0xFFFFFFFFU;
 // 그리지 않는 오브젝트의 인스턴스 슬롯.
 inline constexpr uint32_t INVALID_INSTANCE_SLOT = 0xFFFFFFFFU;
 
+// 스킨 결과를 따로 뽑아 두지 않은 인스턴스의 정점 오프셋.
+inline constexpr uint32_t NO_SKINNED_VERTICES = 0xFFFFFFFFU;
+
 struct GpuInstance {
     glm::mat4 model;
     glm::mat4 normalMatrix;
@@ -83,6 +86,9 @@ struct GpuInstance {
     uint32_t bucketBase;
     // 프레임 조인트 버퍼에서 이 인스턴스의 조인트 행렬이 시작하는 위치. 스킨이 없으면 NO_JOINTS.
     uint32_t jointOffset;
+    // 스킨 컴퓨트가 이 인스턴스의 변형 정점을 써 둔 위치. 래스터 경로는 정점 셰이더에서 직접
+    // 스키닝하므로 쓰지 않고, 가속 구조를 세우는 광선 경로만 본다. 없으면 NO_SKINNED_VERTICES.
+    uint32_t skinnedVertexOffset;
 };
 
 // 모든 모델의 정점과 인덱스를 하나의 버퍼로 합쳐 간접 그리기 한 번으로 장면 전체를 그릴 수 있게 한다.
@@ -101,6 +107,8 @@ public:
     const GpuMesh& mesh(uint32_t index) const { return meshes[index]; }
     const asset::Material& material(uint32_t index) const { return sourceMaterials[index]; }
     const std::string& meshName(uint32_t index) const { return meshNames[index]; }
+    // 스킨 결과 버퍼를 잡고 가속 구조 범위를 정하는 데 쓴다. GpuMesh 는 정점 수를 담지 않는다.
+    uint32_t meshVertexCount(uint32_t index) const { return meshVertexCounts[index]; }
     uint32_t meshCount() const { return static_cast<uint32_t>(meshes.size()); }
     uint32_t meshletCount() const { return static_cast<uint32_t>(meshlets.size()); }
     const GpuMeshLod& lod(uint32_t index) const { return lods[index]; }
@@ -131,6 +139,7 @@ private:
     std::vector<GpuMaterial> materials;
     std::vector<asset::Material> sourceMaterials;
     std::vector<std::string> meshNames;
+    std::vector<uint32_t> meshVertexCounts;
 };
 
 } // namespace gfx

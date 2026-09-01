@@ -23,6 +23,7 @@ namespace {
 
 struct PathTracePushConstants {
     VkDeviceAddress vertices;
+    VkDeviceAddress skinnedVertices;
     VkDeviceAddress indices;
     VkDeviceAddress meshes;
     VkDeviceAddress instances;
@@ -61,9 +62,15 @@ RayTracer::~RayTracer() {
     for (AccelerationStructure& structure : bottomLevels) {
         destroyStructure(structure);
     }
+    for (AccelerationStructure& structure : skinnedBottomLevels) {
+        destroyStructure(structure);
+    }
     destroyBuffer(context, shaderBindingTable);
     destroyBuffer(context, scratchBuffer);
-    destroyBuffer(context, instanceBuffer);
+    destroyBuffer(context, skinnedScratchBuffer);
+    for (Buffer& buffer : instanceBuffers) {
+        destroyBuffer(context, buffer);
+    }
     vkDestroyPipeline(context.device, pipeline, nullptr);
     vkDestroyPipelineLayout(context.device, pipelineLayout, nullptr);
     vkDestroyDescriptorPool(context.device, descriptorPool, nullptr);
@@ -124,13 +131,12 @@ void RayTracer::destroyStructure(AccelerationStructure& structure) {
     structure.address = 0;
 }
 
-void RayTracer::reserveScratch(VkDeviceSize size) {
-    if (scratchBuffer.size >= size) {
+void RayTracer::reserveScratch(Buffer& buffer, VkDeviceSize size, const char* debugName) {
+    if (buffer.size >= size) {
         return;
     }
-    destroyBuffer(context, scratchBuffer);
-    scratchBuffer =
-        createBuffer(context, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, MemoryLocation::DEVICE, "가속 구조 스크래치");
+    destroyBuffer(context, buffer);
+    buffer = createBuffer(context, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, MemoryLocation::DEVICE, debugName);
 }
 
 void RayTracer::buildBottomLevel() {
@@ -174,7 +180,8 @@ void RayTracer::buildBottomLevel() {
         triangles.vertexData.deviceAddress =
             geometry.vertexBuffer.address + static_cast<VkDeviceSize>(mesh.vertexOffset) * sizeof(asset::Vertex);
         triangles.vertexStride = sizeof(asset::Vertex);
-        triangles.maxVertex = lod.indexCount;
+        // 이 메쉬가 가진 정점 중 가장 큰 번호다. 인덱스 개수와는 무관하다.
+        triangles.maxVertex = geometry.meshVertexCount(index) - 1;
         triangles.indexType = VK_INDEX_TYPE_UINT32;
         triangles.indexData.deviceAddress =
             geometry.indexBuffer.address + static_cast<VkDeviceSize>(lod.indexOffset) * sizeof(uint32_t);
@@ -211,7 +218,7 @@ void RayTracer::buildBottomLevel() {
         ranges[index].primitiveCount = primitiveCount;
     }
 
-    reserveScratch(std::max<VkDeviceSize>(scratchNeeded, 256));
+    reserveScratch(scratchBuffer, std::max<VkDeviceSize>(scratchNeeded, 256), "가속 구조 스크래치");
 
     std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> rangePointers(geometry.meshCount());
     for (uint32_t index = 0; index < geometry.meshCount(); ++index) {
@@ -235,9 +242,125 @@ void RayTracer::buildBottomLevel() {
     spdlog::info("하위 가속 구조 {}개 생성", bottomLevels.size());
 }
 
+void RayTracer::barrierBeforeBuild(VkCommandBuffer commandBuffer) {
+    // 구조와 스크래치 버퍼는 하나씩만 두고 프레임마다 다시 쓴다. 진행 중인 프레임이 아직 이전
+    // 구조를 추적하거나 광선 질의로 읽고 있을 수 있으므로, 덮어쓰기 전에 그것들이 끝나야 한다.
+    VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                           VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    // 스크래치 버퍼 접근도 구축 단계에서는 가속 구조 읽기/쓰기로 친다.
+    barrier.srcAccessMask =
+        VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    barrier.dstAccessMask =
+        VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+}
+
+void RayTracer::updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
+                                         const Buffer& skinnedVertices,
+                                         const std::vector<SkinnedInstance>& skinned) {
+    if (skinned.empty()) {
+        return;
+    }
+
+    std::vector<VkAccelerationStructureGeometryKHR> geometries(skinned.size());
+    std::vector<VkAccelerationStructureBuildGeometryInfoKHR> buildInfos(skinned.size());
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges(skinned.size());
+    std::vector<VkDeviceSize> scratchOffsets(skinned.size());
+    VkDeviceSize scratchNeeded = 0;
+
+    if (skinnedBottomLevels.size() < skinned.size()) {
+        skinnedBottomLevels.resize(skinned.size());
+    }
+
+    for (size_t index = 0; index < skinned.size(); ++index) {
+        const GpuMesh& mesh = geometry.mesh(skinned[index].meshIndex);
+        const GpuMeshLod& lod = geometry.lod(mesh.lodOffset);
+        uint32_t vertexCount = geometry.meshVertexCount(skinned[index].meshIndex);
+
+        VkAccelerationStructureGeometryTrianglesDataKHR triangles{
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};
+        triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+        // 인덱스는 메쉬 지역 번호이므로, 변형 정점 구간의 시작을 정점 기준점으로 삼으면 그대로 맞는다.
+        triangles.vertexData.deviceAddress =
+            skinnedVertices.address + static_cast<VkDeviceSize>(skinned[index].vertexOffset) * sizeof(asset::Vertex);
+        triangles.vertexStride = sizeof(asset::Vertex);
+        triangles.maxVertex = vertexCount - 1;
+        triangles.indexType = VK_INDEX_TYPE_UINT32;
+        triangles.indexData.deviceAddress =
+            geometry.indexBuffer.address + static_cast<VkDeviceSize>(lod.indexOffset) * sizeof(uint32_t);
+
+        geometries[index] = VkAccelerationStructureGeometryKHR{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+        geometries[index].geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        geometries[index].geometry.triangles = triangles;
+        geometries[index].flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+
+        buildInfos[index] = VkAccelerationStructureBuildGeometryInfoKHR{
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+        buildInfos[index].type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        // 매 프레임 다시 세우므로 추적 속도보다 구축 속도를 고른다.
+        buildInfos[index].flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+        buildInfos[index].mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        buildInfos[index].geometryCount = 1;
+        buildInfos[index].pGeometries = &geometries[index];
+
+        uint32_t primitiveCount = lod.indexCount / 3;
+        VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+        getBuildSizes(context.device,
+                      VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                      &buildInfos[index],
+                      &primitiveCount,
+                      &sizes);
+
+        // 같은 메쉬가 계속 오면 자리를 그대로 다시 쓴다. 크기가 모자랄 때만 새로 잡는다.
+        if (skinnedBottomLevels[index].storage.size < sizes.accelerationStructureSize) {
+            destroyStructure(skinnedBottomLevels[index]);
+            skinnedBottomLevels[index] =
+                createStructure(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, sizes.accelerationStructureSize);
+        }
+        buildInfos[index].dstAccelerationStructure = skinnedBottomLevels[index].handle;
+
+        scratchOffsets[index] = scratchNeeded;
+        scratchNeeded += alignUp(sizes.buildScratchSize, 256);
+
+        ranges[index] = {};
+        ranges[index].primitiveCount = primitiveCount;
+    }
+
+    reserveScratch(skinnedScratchBuffer, std::max<VkDeviceSize>(scratchNeeded, 256), "스킨 가속 구조 스크래치");
+
+    std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> rangePointers(skinned.size());
+    for (size_t index = 0; index < skinned.size(); ++index) {
+        buildInfos[index].scratchData.deviceAddress = skinnedScratchBuffer.address + scratchOffsets[index];
+        rangePointers[index] = &ranges[index];
+    }
+
+    barrierBeforeBuild(commandBuffer);
+    cmdBuildAccelerationStructures(
+        commandBuffer, static_cast<uint32_t>(buildInfos.size()), buildInfos.data(), rangePointers.data());
+
+    // 상위 구조가 이 결과를 읽고, 스크래치도 다시 쓴다.
+    VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    barrier.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    barrier.dstAccessMask =
+        VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+}
+
 void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
                                const scene::Scene& sceneToTrace,
-                               const std::vector<uint32_t>& instanceSlots) {
+                               const std::vector<uint32_t>& instanceSlots,
+                               const std::vector<uint32_t>& skinnedBlasSlots,
+                               uint32_t frameSlot) {
     std::vector<VkAccelerationStructureInstanceKHR> instances;
     instances.reserve(sceneToTrace.objects.size());
 
@@ -247,6 +370,15 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
             object.meshIndex >= bottomLevels.size()) {
             continue;
         }
+        // 스킨 오브젝트는 이번 프레임의 포즈로 다시 세운 구조를 가리킨다. 바인드 포즈 구조를
+        // 그대로 두면 화면에서만 움직이고 광선은 서 있는 몸을 맞힌다.
+        uint32_t skinnedSlot = index < skinnedBlasSlots.size() ? skinnedBlasSlots[index] : NO_SKINNED_BLAS;
+        VkDeviceAddress blasAddress = bottomLevels[object.meshIndex].address;
+        if (skinnedSlot != NO_SKINNED_BLAS && skinnedSlot < skinnedBottomLevels.size() &&
+            skinnedBottomLevels[skinnedSlot].handle != VK_NULL_HANDLE) {
+            blasAddress = skinnedBottomLevels[skinnedSlot].address;
+        }
+
         glm::mat4 model = glm::transpose(sceneToTrace.world(index));
 
         VkAccelerationStructureInstanceKHR instance{};
@@ -256,19 +388,25 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
         instance.instanceCustomIndex = instanceSlots[index];
         instance.mask = 0xFF;
         instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-        instance.accelerationStructureReference = bottomLevels[object.meshIndex].address;
+        instance.accelerationStructureReference = blasAddress;
         instances.push_back(instance);
     }
     if (instances.empty()) {
         return;
     }
 
-    if (instances.size() > instanceCapacity) {
+    if (instanceBuffers.size() <= frameSlot) {
+        instanceBuffers.resize(frameSlot + 1);
+        instanceCapacities.resize(frameSlot + 1, 0);
+    }
+    Buffer& instanceBuffer = instanceBuffers[frameSlot];
+    if (instances.size() > instanceCapacities[frameSlot]) {
         destroyBuffer(context, instanceBuffer);
-        instanceCapacity = static_cast<uint32_t>(instances.size()) * 2;
+        instanceCapacities[frameSlot] = static_cast<uint32_t>(instances.size()) * 2;
         instanceBuffer =
             createBuffer(context,
-                         static_cast<VkDeviceSize>(instanceCapacity) * sizeof(VkAccelerationStructureInstanceKHR),
+                         static_cast<VkDeviceSize>(instanceCapacities[frameSlot]) *
+                             sizeof(VkAccelerationStructureInstanceKHR),
                          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                          MemoryLocation::HOST_WRITE,
                          "가속 구조 인스턴스");
@@ -310,7 +448,7 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
         write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
         vkUpdateDescriptorSets(context.device, 1, &write, 0, nullptr);
     }
-    reserveScratch(std::max<VkDeviceSize>(sizes.buildScratchSize, 256));
+    reserveScratch(scratchBuffer, std::max<VkDeviceSize>(sizes.buildScratchSize, 256), "가속 구조 스크래치");
 
     buildInfo.dstAccelerationStructure = topLevel.handle;
     buildInfo.scratchData.deviceAddress = scratchBuffer.address;
@@ -318,6 +456,7 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
     VkAccelerationStructureBuildRangeInfoKHR range{};
     range.primitiveCount = instanceCount;
     const VkAccelerationStructureBuildRangeInfoKHR* rangePointer = &range;
+    barrierBeforeBuild(commandBuffer);
     cmdBuildAccelerationStructures(commandBuffer, 1, &buildInfo, &rangePointer);
 
     VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
@@ -465,6 +604,7 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
                       VkDeviceAddress cameraAddress,
                       VkDeviceAddress instanceAddress,
                       VkDeviceAddress lightAddress,
+                      VkDeviceAddress skinnedVertexAddress,
                       uint32_t accumulationImage,
                       uint32_t outputImage,
                       uint32_t frameIndex,
@@ -472,6 +612,7 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
                       const PathTraceOptions& options) {
     PathTracePushConstants pushConstants{};
     pushConstants.vertices = geometry.vertexBuffer.address;
+    pushConstants.skinnedVertices = skinnedVertexAddress;
     pushConstants.indices = geometry.indexBuffer.address;
     pushConstants.meshes = geometry.meshBuffer.address;
     pushConstants.instances = instanceAddress;

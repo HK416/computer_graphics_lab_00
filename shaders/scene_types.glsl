@@ -77,6 +77,8 @@ struct Material {
 
 // 스킨이 없는 인스턴스의 조인트 오프셋.
 #define NO_JOINTS 0xFFFFFFFFu
+// 스킨 결과를 따로 뽑아 두지 않은 인스턴스의 정점 오프셋.
+#define NO_SKINNED_VERTICES 0xFFFFFFFFu
 
 struct Instance {
     mat4 model;
@@ -85,6 +87,9 @@ struct Instance {
     uint bucket;
     uint bucketBase;
     uint jointOffset;
+    // 스킨 컴퓨트가 이 인스턴스의 변형된 정점을 써 둔 위치. 래스터 경로는 정점 셰이더에서 직접
+    // 스키닝하므로 쓰지 않고, 가속 구조를 세우는 광선 경로만 본다. 없으면 NO_SKINNED_VERTICES.
+    uint skinnedVertexOffset;
 };
 
 // 태스크 셰이더 워크그룹 하나가 처리할 meshlet 구간.
@@ -149,6 +154,10 @@ struct DrawCommand {
 #define DEBUG_MODE_SHADOW 7u
 
 layout(buffer_reference, scalar) readonly buffer VertexBuffer {
+    Vertex items[];
+};
+// 스킨 컴퓨트가 변형 결과를 쓰는 곳. 읽기는 VertexBuffer 로 같은 주소를 가리킨다.
+layout(buffer_reference, scalar) writeonly buffer SkinnedVertexBuffer {
     Vertex items[];
 };
 layout(buffer_reference, scalar) readonly buffer IndexBuffer {

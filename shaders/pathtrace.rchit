@@ -14,10 +14,14 @@ void main() {
     MeshLod lod = pathTrace.lods.items[mesh.lodOffset];
 
     uint base = lod.indexOffset + uint(gl_PrimitiveID) * 3;
-    uint vertexBase = uint(mesh.vertexOffset);
-    Vertex v0 = pathTrace.vertices.items[vertexBase + pathTrace.indices.items[base]];
-    Vertex v1 = pathTrace.vertices.items[vertexBase + pathTrace.indices.items[base + 1]];
-    Vertex v2 = pathTrace.vertices.items[vertexBase + pathTrace.indices.items[base + 2]];
+    // 스킨 인스턴스는 가속 구조도 변형 정점으로 세웠으므로 셰이딩도 같은 정점을 읽어야 한다.
+    // 인덱스는 메쉬 지역 번호라 두 경우 모두 그대로 쓴다.
+    bool skinned = instance.skinnedVertexOffset != NO_SKINNED_VERTICES;
+    VertexBuffer source = skinned ? pathTrace.skinnedVertices : pathTrace.vertices;
+    uint vertexBase = skinned ? instance.skinnedVertexOffset : uint(mesh.vertexOffset);
+    Vertex v0 = source.items[vertexBase + pathTrace.indices.items[base]];
+    Vertex v1 = source.items[vertexBase + pathTrace.indices.items[base + 1]];
+    Vertex v2 = source.items[vertexBase + pathTrace.indices.items[base + 2]];
 
     vec3 weights = vec3(1.0 - barycentrics.x - barycentrics.y, barycentrics.x, barycentrics.y);
     vec3 localPosition = v0.position * weights.x + v1.position * weights.y + v2.position * weights.z;
