@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <format>
 #include <string>
 #include <vector>
 
@@ -170,6 +171,9 @@ std::vector<const char*> missingRequiredFeatures(const FeatureChain& f) {
 
 struct DeviceCandidate {
     VkPhysicalDevice device = VK_NULL_HANDLE;
+    // 적격 여부는 점수와 분리한다. 요구 조건을 만족해도 장치 종류에 따라 점수는 0 일 수 있다.
+    bool suitable = false;
+    std::string rejectionReason;
     VkPhysicalDeviceProperties properties{};
     QueueFamilies queueFamilies;
     Capabilities caps;
@@ -278,6 +282,7 @@ DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
 
     std::vector<VkExtensionProperties> extensions = enumerateDeviceExtensions(device);
     if (!contains(extensions, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+        candidate.rejectionReason = "VK_KHR_swapchain 미지원";
         return candidate;
     }
 
@@ -287,6 +292,7 @@ DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
     vkGetPhysicalDeviceProperties2(device, &properties2);
     candidate.properties = properties2.properties;
     if (candidate.properties.apiVersion < VK_API_VERSION_1_3) {
+        candidate.rejectionReason = "Vulkan 1.3 미만";
         return candidate;
     }
 
@@ -299,10 +305,16 @@ DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
     candidate.features.link(meshExt, accelExt, rayTracingExt, rayQueryExt);
     vkGetPhysicalDeviceFeatures2(device, &candidate.features.features2);
 
-    if (!missingRequiredFeatures(candidate.features).empty()) {
+    std::vector<const char*> missing = missingRequiredFeatures(candidate.features);
+    if (!missing.empty()) {
+        candidate.rejectionReason = "필수 기능 누락:";
+        for (const char* name : missing) {
+            candidate.rejectionReason += std::string(" ") + name;
+        }
         return candidate;
     }
     if (!selectQueueFamilies(device, surface, candidate.queueFamilies)) {
+        candidate.rejectionReason = "표시 가능한 그래픽스 큐 패밀리 없음";
         return candidate;
     }
 
@@ -332,6 +344,7 @@ DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
         candidate.enabledExtensions.push_back(VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME);
     }
 
+    candidate.suitable = true;
     candidate.score = scoreDevice(candidate.properties, candidate.caps);
     return candidate;
 }
@@ -443,17 +456,17 @@ Context::Context(SDL_Window* window) {
     std::string rejectionDetail;
     for (VkPhysicalDevice device : devices) {
         DeviceCandidate candidate = evaluateDevice(device, surface);
-        if (candidate.score == 0) {
-            VkPhysicalDeviceProperties props{};
-            vkGetPhysicalDeviceProperties(device, &props);
-            rejectionDetail += std::string("\n  - ") + props.deviceName;
+        if (!candidate.suitable) {
+            VkPhysicalDeviceProperties rejected{};
+            vkGetPhysicalDeviceProperties(device, &rejected);
+            rejectionDetail += std::format("\n  - {}: {}", rejected.deviceName, candidate.rejectionReason);
             continue;
         }
-        if (candidate.score > best.score) {
+        if (!best.suitable || candidate.score > best.score) {
             best = candidate;
         }
     }
-    if (best.score == 0) {
+    if (!best.suitable) {
         core::fatal("요구 조건(Vulkan 1.3, bindless, GPU-Driven 간접 그리기)을 만족하는 장치가 없습니다:{}",
                     rejectionDetail);
     }
