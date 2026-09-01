@@ -11,6 +11,8 @@ namespace scene {
 namespace {
 constexpr float MAX_PITCH_DEGREES = 89.0F;
 constexpr glm::vec3 WORLD_UP{0.0F, 1.0F, 0.0F};
+// 기즈모 전용 투영의 원평면. 광선 계산의 수치 조건만 결정하므로 장면 크기에 맞는 값이면 된다.
+constexpr float GIZMO_FAR_PLANE = 1000.0F;
 } // namespace
 
 glm::vec3 Camera::forward() const {
@@ -67,10 +69,12 @@ glm::mat4 Camera::projectionMatrix(float aspect) const {
     return projection;
 }
 
+// ImGuizmo 는 마우스 광선을 만들 때 NDC 의 근평면 점과 원평면 점을 역변환해 잇는다. 무한 원거리
+// 투영에서는 원평면 점의 w 가 0 이라 좌표가 무한대가 되고, 광선 방향이 NaN 이 되어 끌기 시작하는
+// 순간 변환 행렬이 통째로 NaN 이 된다. 그래서 기즈모에는 유한한 원평면을 가진 투영을 따로 준다.
+// Y 를 뒤집지 않는 것은 ImGuizmo 가 Y 축이 위로 향하는 클립 공간을 가정하기 때문이다.
 glm::mat4 Camera::gizmoProjectionMatrix(float aspect) const {
-    glm::mat4 projection = projectionMatrix(aspect);
-    projection[1][1] = -projection[1][1];
-    return projection;
+    return glm::perspectiveRH_ZO(glm::radians(fovYDegrees), aspect, nearPlane, GIZMO_FAR_PLANE);
 }
 
 } // namespace scene

@@ -1,0 +1,67 @@
+#include <cassert>
+#include <cmath>
+#include <cstdio>
+
+#include <glm/geometric.hpp>
+#include <glm/mat4x4.hpp>
+#include <glm/matrix.hpp>
+
+#include "scene/camera.h"
+
+namespace {
+
+// ImGuizmo 의 reversed 판정. 시야 공간 z 가 양수인 두 점을 투영해 깊이가 줄어드는지 본다.
+bool reversedProjection(const glm::mat4& projection) {
+    glm::vec4 nearPoint = projection * glm::vec4{0.0F, 0.0F, 1.0F, 1.0F};
+    glm::vec4 farPoint = projection * glm::vec4{0.0F, 0.0F, 2.0F, 1.0F};
+    return nearPoint.z / nearPoint.w > farPoint.z / farPoint.w;
+}
+
+// ImGuizmo 의 ComputeCameraRay 와 같은 계산. NDC 의 양 끝 점을 역변환해 광선을 만든다.
+// 원거리 평면이 무한대인 투영을 주면 그 점의 w 가 0 이 되어 NaN 이 나온다.
+glm::vec3 computeRayDirection(const glm::mat4& view, const glm::mat4& projection, glm::vec2 ndc) {
+    glm::mat4 inverse = glm::inverse(projection * view);
+    bool reversed = reversedProjection(projection);
+    float nearZ = reversed ? 1.0F - 1e-7F : 0.0F;
+    float farZ = reversed ? 0.0F : 1.0F - 1e-7F;
+
+    glm::vec4 origin = inverse * glm::vec4{ndc.x, ndc.y, nearZ, 1.0F};
+    glm::vec4 end = inverse * glm::vec4{ndc.x, ndc.y, farZ, 1.0F};
+    return glm::normalize(glm::vec3{end / end.w} - glm::vec3{origin / origin.w});
+}
+
+bool finite(glm::vec3 value) {
+    return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+} // namespace
+
+int main() {
+    scene::Camera camera;
+    camera.position = glm::vec3{0.0F, 1.0F, 3.0F};
+    float aspect = 16.0F / 9.0F;
+
+    // 장면 투영은 원거리 평면이 무한대라 광선이 NaN 이 된다. 기즈모에 이 행렬을 주면 안 된다.
+    glm::vec3 sceneRay = computeRayDirection(camera.viewMatrix(), camera.projectionMatrix(aspect), {0.3F, -0.2F});
+    assert(!finite(sceneRay) && "장면 투영은 무한 원거리라 기즈모 광선을 만들 수 없어야 한다");
+
+    // 기즈모 투영은 화면 어디에서나 유한한 광선을 준다.
+    glm::mat4 gizmo = camera.gizmoProjectionMatrix(aspect);
+    for (float y = -1.0F; y <= 1.0F; y += 0.5F) {
+        for (float x = -1.0F; x <= 1.0F; x += 0.5F) {
+            glm::vec3 ray = computeRayDirection(camera.viewMatrix(), gizmo, {x, y});
+            if (!finite(ray) || std::abs(glm::length(ray) - 1.0F) > 1e-3F) {
+                std::printf(
+                    "NDC (%.1f, %.1f) 광선이 유효하지 않습니다\n", static_cast<double>(x), static_cast<double>(y));
+                assert(false && "기즈모 투영으로 만든 광선은 항상 유한해야 한다");
+            }
+        }
+    }
+
+    // 화면 중앙의 광선은 카메라 전방 축과 나란해야 한다. 광선 방향은 reversed 판정에 따라 뒤집힌다.
+    glm::vec3 center = computeRayDirection(camera.viewMatrix(), gizmo, {0.0F, 0.0F});
+    assert(std::abs(glm::dot(center, camera.forward())) > 0.999F && "화면 중앙 광선은 카메라 전방과 나란해야 한다");
+
+    std::printf("카메라 자체 점검 통과\n");
+    return 0;
+}
