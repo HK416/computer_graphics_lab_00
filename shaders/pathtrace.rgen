@@ -24,8 +24,13 @@ vec3 skyRadiance(vec3 direction) {
     return sampleBindlessCube(pathTrace.camera.item.shading.w, direction).rgb * pathTrace.skyIntensity;
 }
 
+// 단면 재질은 후면을 컬링해 래스터와 같은 면만 보이게 한다. 아웃라인을 부풀린 껍데기로 넣은
+// 모델은 이게 없으면 껍데기가 본체를 통째로 덮는다. 반투명과 컷오프 재질은 가속 구조에 OPAQUE 로
+// 올리지 않았으므로 적중 셰이더가 알파를 보고 통과 여부를 정한다.
+const uint PATH_RAY_FLAGS = gl_RayFlagsCullBackFacingTrianglesEXT;
+
 // 다음 사건 추정. 장면 조명 하나를 균등하게 골라 그림자 광선을 쏜다.
-vec3 nextEventEstimation(vec3 position, vec3 normal, vec3 albedo, inout uint seed) {
+vec3 nextEventEstimation(Surface surface, inout uint seed) {
     uint lightCount = pathTrace.camera.item.shading.x;
     if (lightCount == 0u) {
         return vec3(0.0);
@@ -36,20 +41,19 @@ vec3 nextEventEstimation(vec3 position, vec3 normal, vec3 albedo, inout uint see
 
     vec3 lightDirection;
     float distanceToLight;
-    vec3 radiance = sampleLightRadiance(light, position, lightDirection, distanceToLight);
-    float nDotL = dot(normal, lightDirection);
-    if (nDotL <= 0.0 || radiance == vec3(0.0)) {
+    vec3 radiance = sampleLightRadiance(light, surface.position, lightDirection, distanceToLight);
+    if (radiance == vec3(0.0) || dot(surface.normal, lightDirection) <= 0.0) {
         return vec3(0.0);
     }
 
     shadowVisibility = 0.0;
     traceRayEXT(topLevel,
-                gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                PATH_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
                 0xFF,
                 0,
                 0,
                 1,
-                position,
+                surface.position,
                 1e-3,
                 lightDirection,
                 min(distanceToLight - 1e-3, 1e4),
@@ -57,8 +61,38 @@ vec3 nextEventEstimation(vec3 position, vec3 normal, vec3 albedo, inout uint see
     if (shadowVisibility <= 0.0) {
         return vec3(0.0);
     }
-    // 균등하게 하나만 골랐으므로 개수를 곱해 되돌린다.
-    return albedo / PI * radiance * nDotL * float(lightCount);
+    // 균등하게 하나만 골랐으므로 개수를 곱해 되돌린다. BRDF 는 래스터 경로와 같은 것을 쓴다.
+    return evaluateBrdf(surface, lightDirection, radiance) * float(lightCount);
+}
+
+// 다음 방향을 뽑고 그 방향의 BSDF 가중치(brdf * cos / pdf)를 돌려준다. 확산과 거울 반사 로브를
+// 프레넬 비중으로 골라 둘 다 표본이 남게 한다.
+vec3 sampleBsdf(Surface surface, inout uint seed, out vec3 direction) {
+    vec3 f0 = mix(vec3(0.04), surface.albedo, surface.metallic);
+    float specularWeight = max(max(f0.r, f0.g), f0.b);
+    float diffuseWeight = (1.0 - surface.metallic) * max(max(surface.albedo.r, surface.albedo.g), surface.albedo.b);
+    float specularProbability = clamp(specularWeight / max(specularWeight + diffuseWeight, 1e-4), 0.1, 0.9);
+
+    if (randomFloat(seed) < specularProbability) {
+        vec3 halfway = sampleGgxHalfVector(surface.normal, surface.roughness, seed);
+        direction = reflect(-surface.view, halfway);
+        float nDotL = dot(surface.normal, direction);
+        if (nDotL <= 0.0) {
+            return vec3(0.0);
+        }
+        float nDotV = max(dot(surface.normal, surface.view), 1e-4);
+        float nDotH = max(dot(surface.normal, halfway), 1e-4);
+        float vDotH = max(dot(surface.view, halfway), 1e-4);
+        // D 로 반값 벡터를 뽑았으므로 D 와 4*vDotH 가 약분되어 F * G * vDotH / (nDotV * nDotH) 만 남는다.
+        vec3 fresnel = fresnelSchlick(vDotH, f0);
+        float geometry = geometrySmith(nDotV, nDotL, surface.roughness);
+        return fresnel * geometry * vDotH / (nDotV * nDotH * specularProbability);
+    }
+
+    direction = sampleCosineHemisphere(surface.normal, seed);
+    // 코사인 표본이라 pdf 의 cos/PI 가 확산 BRDF 와 약분된다.
+    vec3 fresnel = fresnelSchlick(max(dot(surface.normal, direction), 0.0), f0);
+    return (vec3(1.0) - fresnel) * (1.0 - surface.metallic) * surface.albedo / (1.0 - specularProbability);
 }
 
 vec3 tracePath(vec3 origin, vec3 direction, inout uint seed) {
@@ -68,7 +102,7 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed) {
     bool useRoulette = (pathTrace.flags & PATH_FLAG_RUSSIAN_ROULETTE) != 0u;
 
     for (uint bounce = 0; bounce < pathTrace.maxBounces; ++bounce) {
-        traceRayEXT(topLevel, gl_RayFlagsOpaqueEXT, 0xFF, 0, 0, 0, origin, 1e-3, direction, 1e4, 0);
+        traceRayEXT(topLevel, PATH_RAY_FLAGS, 0xFF, 0, 0, 0, origin, 1e-3, direction, 1e4, 0);
 
         if (payload.missed) {
             radiance += throughput * skyRadiance(direction);
@@ -76,16 +110,26 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed) {
         }
 
         // 그림자 광선이 페이로드를 건드리기 전에 표면 정보를 복사해 둔다.
-        vec3 position = payload.position;
-        vec3 normal = payload.normal;
-        vec3 albedo = payload.albedo;
+        Surface surface;
+        surface.position = payload.position;
+        surface.normal = payload.normal;
+        surface.view = -direction;
+        surface.albedo = payload.albedo;
+        surface.metallic = payload.metallic;
+        surface.roughness = payload.roughness;
         radiance += throughput * payload.emissive;
 
         if (useNextEvent) {
-            radiance += throughput * nextEventEstimation(position, normal, albedo, seed);
+            radiance += throughput * nextEventEstimation(surface, seed);
         }
 
-        throughput *= albedo;
+        vec3 nextDirection;
+        vec3 weight = sampleBsdf(surface, seed, nextDirection);
+        if (weight == vec3(0.0)) {
+            break;
+        }
+        throughput *= weight;
+
         // 러시안 룰렛으로 어두운 경로를 일찍 끊되 편향이 없도록 살아남은 경로를 키운다.
         if (useRoulette && bounce > 0) {
             float survival = clamp(max(max(throughput.r, throughput.g), throughput.b), 0.05, 1.0);
@@ -95,8 +139,8 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed) {
             throughput /= survival;
         }
 
-        origin = position;
-        direction = sampleCosineHemisphere(normal, seed);
+        origin = surface.position;
+        direction = nextDirection;
     }
     return radiance;
 }

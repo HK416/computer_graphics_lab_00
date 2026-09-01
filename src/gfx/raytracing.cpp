@@ -49,6 +49,12 @@ uint64_t alignUp(uint64_t value, uint64_t alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
+// 알파를 보는 재질은 OPAQUE 로 올리면 안 된다. 그래야 적중 셰이더가 불려 컷오프와 반투명을
+// 가려낼 수 있다. 불투명 재질은 표시해 두어야 교차 판정이 빨라진다.
+VkGeometryFlagsKHR geometryFlagsFor(const asset::Material& material) {
+    return material.alphaMode == asset::AlphaMode::SOLID ? VK_GEOMETRY_OPAQUE_BIT_KHR : 0;
+}
+
 } // namespace
 
 RayTracer::RayTracer(Context& context, GeometryStore& geometry, BindlessTextures& bindless)
@@ -189,7 +195,7 @@ void RayTracer::buildBottomLevel() {
         geometries[index] = VkAccelerationStructureGeometryKHR{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
         geometries[index].geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
         geometries[index].geometry.triangles = triangles;
-        geometries[index].flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        geometries[index].flags = geometryFlagsFor(geometry.material(mesh.materialIndex));
 
         buildInfos[index] = VkAccelerationStructureBuildGeometryInfoKHR{
             VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
@@ -297,7 +303,7 @@ void RayTracer::updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
         geometries[index] = VkAccelerationStructureGeometryKHR{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
         geometries[index].geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
         geometries[index].geometry.triangles = triangles;
-        geometries[index].flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        geometries[index].flags = geometryFlagsFor(geometry.material(mesh.materialIndex));
 
         buildInfos[index] = VkAccelerationStructureBuildGeometryInfoKHR{
             VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
@@ -387,7 +393,11 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
         // 장면 순서로 매기면 어긋난다. buildDrawCommands 가 만든 슬롯을 그대로 쓴다.
         instance.instanceCustomIndex = instanceSlots[index];
         instance.mask = 0xFF;
-        instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        // 래스터가 vkCmdSetCullMode 로 하는 것과 같은 판단이다. 양면 재질만 컬링을 끈다.
+        instance.flags = 0;
+        if (geometry.material(geometry.mesh(object.meshIndex).materialIndex).doubleSided) {
+            instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        }
         instance.accelerationStructureReference = blasAddress;
         instances.push_back(instance);
     }
@@ -500,8 +510,8 @@ void RayTracer::createPipeline() {
 
     std::array<VkDescriptorSetLayout, 2> setLayouts{bindless.layout(), descriptorSetLayout};
     VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags =
-        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+                                   VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
     pushConstantRange.size = sizeof(PathTracePushConstants);
 
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -515,8 +525,9 @@ void RayTracer::createPipeline() {
     VkShaderModule missModule = createShaderModule(context.device, "pathtrace.rmiss.spv");
     VkShaderModule shadowMissModule = createShaderModule(context.device, "pathtrace_shadow.rmiss.spv");
     VkShaderModule hitModule = createShaderModule(context.device, "pathtrace.rchit.spv");
+    VkShaderModule anyHitModule = createShaderModule(context.device, "pathtrace.rahit.spv");
 
-    std::array<VkPipelineShaderStageCreateInfo, 4> stages{};
+    std::array<VkPipelineShaderStageCreateInfo, 5> stages{};
     stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stages[0].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
     stages[0].module = raygenModule;
@@ -534,6 +545,11 @@ void RayTracer::createPipeline() {
     stages[3].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     stages[3].module = hitModule;
     stages[3].pName = "main";
+    // 알파 컷오프와 반투명을 가려낸다. 불투명 재질은 가속 구조가 OPAQUE 라 불리지 않는다.
+    stages[4] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    stages[4].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+    stages[4].module = anyHitModule;
+    stages[4].pName = "main";
 
     std::array<VkRayTracingShaderGroupCreateInfoKHR, 4> groups{};
     for (size_t i = 0; i < groups.size(); ++i) {
@@ -551,6 +567,7 @@ void RayTracer::createPipeline() {
     groups[2].generalShader = 2;
     groups[3].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
     groups[3].closestHitShader = 3;
+    groups[3].anyHitShader = 4;
 
     VkRayTracingPipelineCreateInfoKHR pipelineInfo{VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR};
     pipelineInfo.stageCount = static_cast<uint32_t>(stages.size());
@@ -562,6 +579,7 @@ void RayTracer::createPipeline() {
     VK_CHECK(createRayTracingPipelines(
         context.device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
 
+    vkDestroyShaderModule(context.device, anyHitModule, nullptr);
     vkDestroyShaderModule(context.device, hitModule, nullptr);
     vkDestroyShaderModule(context.device, shadowMissModule, nullptr);
     vkDestroyShaderModule(context.device, missModule, nullptr);
@@ -644,7 +662,7 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
     vkCmdPushConstants(commandBuffer,
                        pipelineLayout,
                        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-                           VK_SHADER_STAGE_MISS_BIT_KHR,
+                           VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
                        0,
                        sizeof(pushConstants),
                        &pushConstants);

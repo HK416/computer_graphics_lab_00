@@ -26,19 +26,43 @@ void main() {
     vec3 weights = vec3(1.0 - barycentrics.x - barycentrics.y, barycentrics.x, barycentrics.y);
     vec3 localPosition = v0.position * weights.x + v1.position * weights.y + v2.position * weights.z;
     vec3 localNormal = v0.normal * weights.x + v1.normal * weights.y + v2.normal * weights.z;
+    vec4 localTangent = v0.tangent * weights.x + v1.tangent * weights.y + v2.tangent * weights.z;
     vec2 uv = v0.uv * weights.x + v1.uv * weights.y + v2.uv * weights.z;
 
     vec3 worldPosition = (instance.model * vec4(localPosition, 1.0)).xyz;
-    vec3 worldNormal = normalize(mat3(instance.normalMatrix) * localNormal);
+    mat3 normalMatrix = mat3(instance.normalMatrix);
+    vec3 worldNormal = normalize(normalMatrix * localNormal);
+
+    Material material = pathTrace.materials.items[mesh.materialIndex];
+
+    // 접선 공간 노멀 맵. mesh_shading.glsl 의 shadingNormal 과 같은 식이어야 두 경로가 같은
+    // 굴곡을 낸다.
+    if (material.normalTexture != INVALID_TEXTURE) {
+        vec3 worldTangent = normalize(normalMatrix * localTangent.xyz);
+        worldTangent = normalize(worldTangent - worldNormal * dot(worldNormal, worldTangent));
+        vec3 bitangent = cross(worldNormal, worldTangent) * localTangent.w;
+        vec3 sampled = sampleBindless(material.normalTexture, uv).xyz * 2.0 - 1.0;
+        sampled.xy *= material.normalScale;
+        worldNormal = normalize(mat3(worldTangent, bitangent, worldNormal) * sampled);
+    }
+    // 양면 재질의 뒷면을 맞으면 노멀을 뒤집는다. 단면 재질은 후면을 아예 컬링하므로 걸리지 않는다.
     if (dot(worldNormal, gl_WorldRayDirectionEXT) > 0.0) {
         worldNormal = -worldNormal;
     }
 
-    Material material = pathTrace.materials.items[mesh.materialIndex];
     vec3 albedo = material.baseColorFactor.rgb;
     if (material.baseColorTexture != INVALID_TEXTURE) {
         albedo *= sampleBindless(material.baseColorTexture, uv).rgb;
     }
+
+    float metallic = material.metallicFactor;
+    float roughness = material.roughnessFactor;
+    if (material.metallicRoughnessTexture != INVALID_TEXTURE) {
+        vec4 sampled = sampleBindless(material.metallicRoughnessTexture, uv);
+        roughness *= sampled.g;
+        metallic *= sampled.b;
+    }
+
     vec3 emissive = material.emissiveAndCutoff.rgb;
     if (material.emissiveTexture != INVALID_TEXTURE) {
         emissive *= sampleBindless(material.emissiveTexture, uv).rgb;
@@ -48,6 +72,9 @@ void main() {
     payload.emissive = emissive;
     payload.normal = worldNormal;
     payload.position = worldPosition;
+    payload.metallic = clamp(metallic, 0.0, 1.0);
+    // 완전한 거울은 GGX 표본의 분모를 0 으로 만든다. 래스터 경로와 같은 하한을 쓴다.
+    payload.roughness = clamp(roughness, 0.03, 1.0);
     payload.hitDistance = gl_HitTEXT;
     payload.missed = false;
 }

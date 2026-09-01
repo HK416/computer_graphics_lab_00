@@ -97,7 +97,8 @@ set(shader_sources
     shaders/pathtrace.rgen
     shaders/pathtrace.rmiss
     shaders/pathtrace_shadow.rmiss
-    shaders/pathtrace.rchit)
+    shaders/pathtrace.rchit
+    shaders/pathtrace.rahit)
 
 set(shader_binaries)
 foreach(shader IN LISTS shader_sources)

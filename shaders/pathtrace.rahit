@@ -1,0 +1,48 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+
+#include "bindless.glsl"
+#include "pathtrace_common.glsl"
+
+hitAttributeEXT vec2 barycentrics;
+
+// 알파가 있는 재질의 교차 판정. 불투명 재질은 가속 구조에 OPAQUE 로 올라가 여기까지 오지 않는다.
+//
+// 페이로드를 읽지 않는다: 이 적중 그룹은 경로 광선(PathPayload)과 그림자 광선(float)이 함께 쓰는데
+// 둘의 페이로드 형이 달라 어느 한쪽으로 선언할 수 없다. 난수는 실행 좌표와 프레임에서 직접 만든다.
+void main() {
+    Instance instance = pathTrace.instances.items[gl_InstanceCustomIndexEXT];
+    Mesh mesh = pathTrace.meshes.items[instance.meshIndex];
+    Material material = pathTrace.materials.items[mesh.materialIndex];
+    if (material.alphaMode == ALPHA_MODE_SOLID) {
+        return;
+    }
+
+    float alpha = material.baseColorFactor.a;
+    if (material.baseColorTexture != INVALID_TEXTURE) {
+        MeshLod lod = pathTrace.lods.items[mesh.lodOffset];
+        uint base = lod.indexOffset + uint(gl_PrimitiveID) * 3;
+        bool skinned = instance.skinnedVertexOffset != NO_SKINNED_VERTICES;
+        VertexBuffer source = skinned ? pathTrace.skinnedVertices : pathTrace.vertices;
+        uint vertexBase = skinned ? instance.skinnedVertexOffset : uint(mesh.vertexOffset);
+        vec2 uv0 = source.items[vertexBase + pathTrace.indices.items[base]].uv;
+        vec2 uv1 = source.items[vertexBase + pathTrace.indices.items[base + 1]].uv;
+        vec2 uv2 = source.items[vertexBase + pathTrace.indices.items[base + 2]].uv;
+        vec2 uv = uv0 * (1.0 - barycentrics.x - barycentrics.y) + uv1 * barycentrics.x + uv2 * barycentrics.y;
+        alpha *= sampleBindless(material.baseColorTexture, uv).a;
+    }
+
+    if (material.alphaMode == ALPHA_MODE_CUTOFF) {
+        if (alpha < material.emissiveAndCutoff.w) {
+            ignoreIntersectionEXT;
+        }
+        return;
+    }
+
+    // 반투명은 확률적으로 통과시킨다. 표본을 쌓으면 평균이 알파 블렌딩과 같아진다.
+    uint seed = pcgHash(gl_LaunchIDEXT.x + gl_LaunchIDEXT.y * gl_LaunchSizeEXT.x +
+                        (pathTrace.frameIndex * 9781u + uint(gl_PrimitiveID) * 6151u));
+    if (randomFloat(seed) > alpha) {
+        ignoreIntersectionEXT;
+    }
+}
