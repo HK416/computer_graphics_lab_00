@@ -11,11 +11,17 @@ layout(location = 0) rayPayloadEXT PathPayload payload;
 // 그림자 광선은 페이로드를 따로 써야 표면 정보를 잃지 않고 경로를 이어 갈 수 있다.
 layout(location = 1) rayPayloadEXT float shadowVisibility;
 
+// 래스터 경로와 같은 환경 큐브맵을 읽는다. 두 경로가 같은 배경을 봐야 결과를 견줄 수 있다.
+// 환경이 없으면(굽기 전) 예전 그라디언트로 되돌아간다.
 const vec3 SKY_ZENITH = vec3(0.35, 0.45, 0.7);
 const vec3 SKY_HORIZON = vec3(0.7, 0.75, 0.85);
 
 vec3 skyRadiance(vec3 direction) {
-    return mix(SKY_HORIZON, SKY_ZENITH, clamp(direction.y * 0.5 + 0.5, 0.0, 1.0)) * pathTrace.skyIntensity;
+    uvec4 environment = pathTrace.camera.item.environment;
+    if (environment.w == 0u) {
+        return mix(SKY_HORIZON, SKY_ZENITH, clamp(direction.y * 0.5 + 0.5, 0.0, 1.0)) * pathTrace.skyIntensity;
+    }
+    return sampleBindlessCube(pathTrace.camera.item.shading.w, direction).rgb * pathTrace.skyIntensity;
 }
 
 // 다음 사건 추정. 장면 조명 하나를 균등하게 골라 그림자 광선을 쏜다.

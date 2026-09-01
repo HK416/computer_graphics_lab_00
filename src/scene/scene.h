@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -88,6 +89,22 @@ struct Object {
     int32_t light = -1;
 };
 
+// 환경 맵(IBL)을 만들 재료. 태양 방향은 첫 방향광에서 받으므로 여기 두지 않는다.
+struct Environment {
+    // 참이고 경로가 비어 있지 않으면 HDR 파일을, 아니면 절차적 하늘을 쓴다.
+    bool useHdr = false;
+    std::filesystem::path hdrPath;
+    glm::vec3 sunColor{1.0F, 0.95F, 0.85F};
+    float sunIntensity = 1.0F;
+    glm::vec3 zenithColor{0.18F, 0.32F, 0.62F};
+    glm::vec3 horizonColor{0.62F, 0.72F, 0.86F};
+    glm::vec3 groundColor{0.16F, 0.14F, 0.12F};
+    float intensity = 1.0F;
+    float yawDegrees = 0.0F;
+
+    bool operator==(const Environment&) const = default;
+};
+
 struct Scene {
     std::string name;
     std::vector<Object> objects;
@@ -97,6 +114,7 @@ struct Scene {
     // 조명이 닿지 않는 곳을 채우는 균일 환경광.
     glm::vec3 ambientColor{0.25F};
     float ambientIntensity = 1.0F;
+    Environment environment;
 
     // 애니메이션 시간을 진행시키고 조인트 행렬을 다시 만든다. 재생 중이 아니고 클립도 그대로면
     // 포즈 계산 자체를 건너뛴다.

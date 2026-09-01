@@ -48,7 +48,7 @@ float sampleShadowLayer(uint layer, vec3 position, uint atlasSlot) {
 float shadowFactor(Light light, vec3 position, vec3 normal, vec3 lightDirection) {
     int firstLayer = int(light.rightShadow.w);
     uint layerCount = uint(light.up.w);
-    if (firstLayer < 0 || pushConstants.camera.item.shading.w == 0u || layerCount == 0u) {
+    if (firstLayer < 0 || pushConstants.camera.item.shading.y == INVALID_TEXTURE || layerCount == 0u) {
         return 1.0;
     }
 

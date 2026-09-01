@@ -33,6 +33,9 @@ public:
     // rgba32f 로 쓰는 스토리지 이미지는 포맷 한정자가 달라 배열을 따로 둔다.
     uint32_t addStorageImageRgba(VkImageView view);
     void updateStorageImageRgba(uint32_t slot, VkImageView view);
+    // 큐브맵을 굽는 컴퓨트가 쓰는 rgba16f 2D 배열 스토리지. 면을 층으로 다룬다.
+    uint32_t addStorageArray(VkImageView view);
+    void updateStorageArray(uint32_t slot, VkImageView view);
     // 2D 배열과 큐브맵은 GLSL 타입이 달라 배열을 각각 따로 둔다. 슬롯 인코딩은 2D 와 같지만
     // 번호 공간이 별개이므로 재질 슬롯과 섞어 쓰면 안 된다.
     uint32_t addArray(VkImageView view, VkSampler sampler);
@@ -56,6 +59,7 @@ private:
     uint32_t storageCapacity = 0;
     uint32_t storageCount = 0;
     uint32_t storageRgbaCount = 0;
+    uint32_t storageArrayCount = 0;
     uint32_t arrayCapacity = 0;
     uint32_t arrayCount = 0;
     uint32_t cubeCount = 0;

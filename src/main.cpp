@@ -21,6 +21,8 @@ int main(int argc, char* argv[]) {
             options.initialScene = static_cast<size_t>(std::atoi(argv[++i]));
         } else if (argument == "--open" && i + 1 < argc) {
             options.scenePath = argv[++i];
+        } else if (argument == "--model" && i + 1 < argc) {
+            options.modelPaths.emplace_back(argv[++i]);
         } else if (argument == "--debug" && i + 1 < argc) {
             options.debugMode = static_cast<uint32_t>(std::atoi(argv[++i]));
         } else if (argument == "--lod" && i + 1 < argc) {

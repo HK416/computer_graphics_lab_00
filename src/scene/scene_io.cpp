@@ -90,6 +90,24 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
                           {"near", scene.camera.nearPlane},
                           {"moveSpeed", scene.camera.moveSpeed}};
     document["ambient"] = {{"color", toJson(scene.ambientColor)}, {"intensity", scene.ambientIntensity}};
+    // HDR 경로도 모델처럼 뿌리 기준 상대 경로로 적는다. 뿌리 밖이면 절대 경로 그대로 둔다.
+    std::string hdrPath = scene.environment.hdrPath.generic_string();
+    if (!scene.environment.hdrPath.empty() && !root.empty()) {
+        std::error_code error;
+        std::filesystem::path relative = std::filesystem::relative(scene.environment.hdrPath, root, error);
+        if (!relative.empty() && !error && relative.native().rfind("..", 0) != 0) {
+            hdrPath = relative.generic_string();
+        }
+    }
+    document["environment"] = {{"useHdr", scene.environment.useHdr},
+                               {"hdr", hdrPath},
+                               {"sunColor", toJson(scene.environment.sunColor)},
+                               {"sunIntensity", scene.environment.sunIntensity},
+                               {"zenith", toJson(scene.environment.zenithColor)},
+                               {"horizon", toJson(scene.environment.horizonColor)},
+                               {"ground", toJson(scene.environment.groundColor)},
+                               {"intensity", scene.environment.intensity},
+                               {"yaw", scene.environment.yawDegrees}};
 
     json lights = json::array();
     for (const Light& light : scene.lights) {
@@ -170,6 +188,18 @@ SceneFile readScene(const std::string& text) {
     const json& ambient = document.value("ambient", json::object());
     file.scene.ambientColor = toVec3(ambient.value("color", json{}), glm::vec3{0.25F});
     file.scene.ambientIntensity = ambient.value("intensity", 1.0F);
+
+    const json& environment = document.value("environment", json::object());
+    Environment& target = file.scene.environment;
+    target.useHdr = environment.value("useHdr", false);
+    target.hdrPath = environment.value("hdr", std::string{});
+    target.sunColor = toVec3(environment.value("sunColor", json{}), target.sunColor);
+    target.sunIntensity = environment.value("sunIntensity", target.sunIntensity);
+    target.zenithColor = toVec3(environment.value("zenith", json{}), target.zenithColor);
+    target.horizonColor = toVec3(environment.value("horizon", json{}), target.horizonColor);
+    target.groundColor = toVec3(environment.value("ground", json{}), target.groundColor);
+    target.intensity = environment.value("intensity", target.intensity);
+    target.yawDegrees = environment.value("yaw", target.yawDegrees);
 
     for (const json& entry : document.value("lights", json::array())) {
         Light light;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include <vma/vk_mem_alloc.h>
 #include <vulkan/vulkan.h>
@@ -51,6 +52,9 @@ struct ImageDesc {
 };
 
 Image createImage(Context& context, const ImageDesc& desc, const char* debugName);
+
+// 빌드가 내놓은 SPIR-V 를 이름으로 읽어 셰이더 모듈을 만든다. 실패하면 즉시 중단한다.
+VkShaderModule createShaderModule(VkDevice device, const std::string& name);
 void destroyImage(Context& context, Image& image);
 
 // 이미지 배리어 한 장을 기록한다. 레이아웃 전이와 큐 패밀리 소유권 이전에 모두 쓴다.

@@ -82,6 +82,8 @@ private:
     std::vector<std::filesystem::path> modelFiles;
     std::filesystem::path pendingModel;
     std::array<char, 512> modelPathInput{};
+    std::vector<std::filesystem::path> hdrFiles;
+    std::array<char, 512> hdrPathInput{};
     std::function<void(const std::filesystem::path&)> sceneSaver;
     std::function<void(const std::filesystem::path&)> sceneOpener;
     std::filesystem::path sceneRoot;

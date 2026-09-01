@@ -1,0 +1,59 @@
+#version 460
+#extension GL_EXT_scalar_block_layout : require
+
+#include "ibl.glsl"
+#include "scene_types.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(push_constant) uniform SkyPushConstants {
+    // xyz 태양 진행 방향의 반대(태양 쪽), w 태양 세기
+    vec4 sunDirection;
+    vec4 sunColor;
+    // xyz 천정색, w 세기
+    vec4 zenith;
+    // xyz 지평색, w 회전(라디안)
+    vec4 horizon;
+    vec4 ground;
+    uint targetStorage;
+    // INVALID_TEXTURE 면 절차적 하늘을 굽는다.
+    uint equirectTexture;
+    int size;
+}
+sky;
+
+// 천정에서 지평, 지평에서 지면으로 이어지는 그라디언트에 태양 원반을 얹는다. 경로 추적기가
+// 쓰던 하늘과 같은 모양이라 두 경로가 같은 배경을 본다.
+vec3 proceduralSky(vec3 direction) {
+    float height = direction.y;
+    vec3 color = height >= 0.0 ? mix(sky.horizon.rgb, sky.zenith.rgb, pow(height, 0.45))
+                               : mix(sky.horizon.rgb, sky.ground.rgb, pow(-height, 0.35));
+
+    // 태양 원반. 가장자리를 부드럽게 해 IBL 표본이 튀지 않게 한다.
+    float aligned = dot(direction, sky.sunDirection.xyz);
+    float disk = smoothstep(0.9994, 0.9999, aligned);
+    float glow = pow(max(aligned, 0.0), 256.0);
+    color += sky.sunColor.rgb * sky.sunDirection.w * (disk * 40.0 + glow * 0.6);
+    return color;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= sky.size || pixel.y >= sky.size) {
+        return;
+    }
+    uint face = gl_GlobalInvocationID.z;
+    vec3 direction = cubeDirection(face, (vec2(pixel) + 0.5) / float(sky.size));
+
+    // 환경 회전은 표본 방향을 반대로 돌려 적용한다. 구워 두면 셰이딩 쪽은 아무것도 몰라도 된다.
+    float angle = sky.horizon.w;
+    float s = sin(angle);
+    float c = cos(angle);
+    vec3 rotated = vec3(c * direction.x + s * direction.z, direction.y, -s * direction.x + c * direction.z);
+
+    vec3 color = sky.equirectTexture == INVALID_TEXTURE ? proceduralSky(rotated)
+                                                        : sampleBindless(sky.equirectTexture, equirectUv(rotated)).rgb;
+    imageStore(bindlessStorageArrays[nonuniformEXT(sky.targetStorage)],
+               ivec3(pixel, int(face)),
+               vec4(color * sky.zenith.w, 1.0));
+}

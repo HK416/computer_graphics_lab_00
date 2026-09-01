@@ -20,6 +20,11 @@ scene::Scene makeScene() {
     scene.name = "시험 장면";
     scene.ambientColor = glm::vec3{0.1F, 0.2F, 0.3F};
     scene.ambientIntensity = 0.75F;
+    scene.environment.useHdr = true;
+    scene.environment.hdrPath = "sky/studio.hdr";
+    scene.environment.yawDegrees = 37.5F;
+    scene.environment.intensity = 2.25F;
+    scene.environment.zenithColor = glm::vec3{0.05F, 0.06F, 0.07F};
     scene.camera.position = glm::vec3{1.0F, 2.0F, 3.0F};
     scene.camera.yawDegrees = 45.0F;
 
@@ -108,6 +113,15 @@ int main() {
     assert(std::abs(loaded.scene.animators[0].speed - 1.5F) < 1e-5F);
 
     assert(std::abs(loaded.scene.ambientIntensity - 0.75F) < 1e-5F);
+
+    // 환경 설정도 장면과 함께 저장되어야 한다. 안 그러면 장면을 다시 열 때 조명이 달라진다.
+    const scene::Environment& environment = loaded.scene.environment;
+    assert(environment.useHdr);
+    assert(environment.hdrPath == std::filesystem::path{"sky/studio.hdr"});
+    assert(std::abs(environment.yawDegrees - 37.5F) < 1e-5F);
+    assert(std::abs(environment.intensity - 2.25F) < 1e-5F);
+    assert(std::abs(environment.zenithColor.b - 0.07F) < 1e-5F);
+    assert(environment.horizonColor == scene::Environment{}.horizonColor && "적지 않은 값은 기본값이어야 한다");
     assert(std::abs(loaded.scene.camera.yawDegrees - 45.0F) < 1e-5F);
 
     // 한 번 더 돌려도 같은 문자열이어야 한다.

@@ -60,6 +60,8 @@ struct GpuCamera {
     // x: 조명 수, y: 그림자 아틀라스 슬롯, z: SSAO 슬롯, w: 아틀라스 한 변의 타일 수.
     // bindless 슬롯은 상위 8비트가 샘플러 번호라 float 로는 정확히 담기지 않는다.
     glm::uvec4 shading;
+    // x: 조도 큐브 슬롯, y: 프리필터 큐브 슬롯, z: BRDF 표 슬롯, w: 프리필터 밉 수(0 이면 IBL 꺼짐).
+    glm::uvec4 environment;
 };
 
 // shaders/scene_data.glsl 의 MeshletGroup 과 배치가 같아야 한다.
@@ -153,9 +155,12 @@ struct CompositePushConstants {
 };
 
 struct TonemapPushConstants {
+    VkDeviceAddress camera;
     uint32_t colorTexture;
     float exposure;
     uint32_t sampleCount;
+    uint32_t depthTexture;
+    uint32_t environmentCube;
 };
 
 struct UpscalePushConstants {
@@ -164,33 +169,6 @@ struct UpscalePushConstants {
     float sourceSize[2];
     float destinationSize[2];
 };
-
-std::vector<uint32_t> readSpirv(const std::string& name) {
-    std::filesystem::path path = std::filesystem::path(CG_LAB_SHADER_ROOT) / name;
-    std::error_code error;
-    auto size = std::filesystem::file_size(path, error);
-    if (error || size == 0 || size % sizeof(uint32_t) != 0) {
-        core::fatal("셰이더를 읽을 수 없습니다: {}", path.string());
-    }
-
-    std::vector<uint32_t> code(size / sizeof(uint32_t));
-    std::FILE* file = std::fopen(path.string().c_str(), "rb");
-    if (file == nullptr || std::fread(code.data(), 1, size, file) != size) {
-        core::fatal("셰이더 읽기에 실패했습니다: {}", path.string());
-    }
-    std::fclose(file);
-    return code;
-}
-
-VkShaderModule createShaderModule(VkDevice device, const std::string& name) {
-    std::vector<uint32_t> code = readSpirv(name);
-    VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    info.codeSize = code.size() * sizeof(uint32_t);
-    info.pCode = code.data();
-    VkShaderModule module = VK_NULL_HANDLE;
-    VK_CHECK(vkCreateShaderModule(device, &info, nullptr, &module));
-    return module;
-}
 
 VkPipelineShaderStageCreateInfo shaderStage(VkShaderStageFlagBits stage, VkShaderModule module) {
     VkPipelineShaderStageCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
@@ -248,6 +226,7 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& 
     createCullPipeline();
     createShadowPipeline();
     createSsaoPipelines();
+    environment = std::make_unique<EnvironmentMap>(context, bindless);
 
     if (context.caps.rayTracingPipeline) {
         rayTracer = std::make_unique<RayTracer>(context, geometry, bindless);
@@ -1534,6 +1513,7 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
     // 멤버에 담아 SSAO 반지름을 장면 크기에 맞추는 데도 쓴다.
     sceneRadius = hasBounds ? std::max(glm::length(maximum - minimum) * 0.5F, 1.0F) : 1.0F;
 
+    bool sunAssigned = false;
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
         const scene::Object& object = scene.objects[index];
         if (object.light < 0 || static_cast<size_t>(object.light) >= scene.lights.size() ||
@@ -1556,6 +1536,12 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
                                    source.size.y * 0.5F};
         light.rightShadow = glm::vec4{glm::normalize(glm::vec3(world[0])), -1.0F};
         light.up = glm::vec4{glm::normalize(glm::vec3(world[1])), 0.0F};
+
+        // 하늘의 태양과 그림자 방향이 어긋나면 곧바로 눈에 띈다. 첫 방향광을 따라간다.
+        if (source.type == scene::LightType::DIRECTIONAL && !sunAssigned) {
+            sunDirection = direction;
+            sunAssigned = true;
+        }
 
         // 영역광은 반구 전체로 빛을 내보내 시점 하나로 담을 수 없어 그림자를 만들지 않는다.
         uint32_t viewsNeeded = 0;
@@ -1814,9 +1800,14 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                                    lodErrorThreshold,
                                    automaticLod ? -1.0F : static_cast<float>(lodLevel)};
     camera->shading = glm::uvec4{static_cast<uint32_t>(frameLights.size()),
-                                 targets.shadowAtlasSlot,
+                                 shadowViews.empty() ? asset::INVALID_TEXTURE : targets.shadowAtlasSlot,
                                  useSsao ? targets.ssaoSlot : asset::INVALID_TEXTURE,
-                                 shadowViews.empty() ? 0U : 1U};
+                                 environment->environmentSlot()};
+    bool iblReady = useIbl && environment->ready();
+    camera->environment = glm::uvec4{environment->irradianceSlot(),
+                                     environment->prefilterSlot(),
+                                     environment->brdfSlot(),
+                                     iblReady ? environment->prefilterMipCount() : 0U};
     camera->ambient = glm::vec4{scene.ambientColor * scene.ambientIntensity, 0.0F};
     camera->viewport = glm::vec4{static_cast<float>(currentRenderExtent.width),
                                  static_cast<float>(currentRenderExtent.height),
@@ -2201,6 +2192,13 @@ void Renderer::recordCommands(Frame& frame,
 
     bool pathTracing = usePathTracing && rayTracer != nullptr;
 
+    // 환경 맵은 설정이 바뀔 때만 다시 굽는다. 래스터와 경로 추적이 같은 환경을 본다.
+    {
+        uint32_t environmentZone = frameProfiler.begin("환경", commandBuffer);
+        environment->update(commandBuffer, scene.environment, sunDirection);
+        frameProfiler.end(environmentZone, commandBuffer);
+    }
+
     // 그림자 아틀라스는 장면 패스보다 먼저 채워야 한다. 경로 추적은 아틀라스를 읽지 않으므로 건너뛴다.
     if (!pathTracing && !shadowViews.empty()) {
         uint32_t shadowZone = frameProfiler.begin("그림자", commandBuffer);
@@ -2450,6 +2448,10 @@ void Renderer::recordCommands(Frame& frame,
     tonemapPushConstants.colorTexture = pathTracing ? targets.pathAccumulationSampledSlot : targets.colorSlot;
     tonemapPushConstants.exposure = exposure;
     tonemapPushConstants.sampleCount = pathTracing ? pathSampleCount : 0U;
+    tonemapPushConstants.camera = frame.cameraBuffer.address;
+    tonemapPushConstants.depthTexture = targets.depthSlot;
+    tonemapPushConstants.environmentCube =
+        useIbl && environment->ready() ? environment->environmentSlot() : asset::INVALID_TEXTURE;
     vkCmdBeginRendering(commandBuffer, &tonemapPass);
     setFullViewport(commandBuffer, currentRenderExtent);
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, tonemapPipeline);

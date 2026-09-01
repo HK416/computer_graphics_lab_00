@@ -1,0 +1,51 @@
+#version 460
+#extension GL_EXT_scalar_block_layout : require
+
+#include "ibl.glsl"
+#include "scene_types.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(push_constant) uniform BrdfLutPushConstants {
+    uint targetStorage;
+    int size;
+    uint sampleCount;
+}
+lut;
+
+// split-sum 의 둘째 항을 미리 적분한다. x 축이 cos(시선각), y 축이 거칠기이고 결과는
+// 프레넬에 곱할 배율(a)과 더할 편차(b)다. 환경과 무관하므로 한 번만 구우면 된다.
+vec2 integrateBrdf(float nDotV, float roughness) {
+    vec3 view = vec3(sqrt(max(1.0 - nDotV * nDotV, 0.0)), 0.0, nDotV);
+    vec3 normal = vec3(0.0, 0.0, 1.0);
+
+    float scale = 0.0;
+    float bias = 0.0;
+    for (uint i = 0u; i < lut.sampleCount; ++i) {
+        vec3 halfway = importanceSampleGgx(hammersley(i, lut.sampleCount), normal, roughness);
+        vec3 light = reflect(-view, halfway);
+        if (light.z <= 0.0) {
+            continue;
+        }
+
+        float nDotL = light.z;
+        float nDotH = max(halfway.z, 0.0);
+        float vDotH = max(dot(view, halfway), 0.0);
+
+        float geometry = geometrySmithIbl(max(nDotV, 1e-4), nDotL, roughness);
+        float visibility = geometry * vDotH / max(nDotH * nDotV, 1e-4);
+        float fresnel = pow(1.0 - vDotH, 5.0);
+        scale += (1.0 - fresnel) * visibility;
+        bias += fresnel * visibility;
+    }
+    return vec2(scale, bias) / float(lut.sampleCount);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= lut.size || pixel.y >= lut.size) {
+        return;
+    }
+    vec2 uv = (vec2(pixel) + 0.5) / float(lut.size);
+    imageStore(bindlessStorageArrays[nonuniformEXT(lut.targetStorage)], ivec3(pixel, 0), vec4(integrateBrdf(uv.x, uv.y), 0.0, 1.0));
+}

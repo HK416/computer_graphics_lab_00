@@ -106,9 +106,11 @@ struct Camera {
     vec4 viewport;
     // 깊이에서 월드 위치를 되돌릴 때 쓴다.
     mat4 inverseViewProjection;
-    // x: 조명 수, y: 그림자 배열 슬롯, z: SSAO 슬롯, w: 그림자 사용 여부.
+    // x: 조명 수, y: 그림자 배열 슬롯(없으면 INVALID_TEXTURE), z: SSAO 슬롯, w: 환경 큐브 슬롯.
     // bindless 슬롯은 상위 8비트에 샘플러 번호가 들어가 float 로는 정확히 담기지 않으므로 정수로 둔다.
     uvec4 shading;
+    // x: 조도 큐브 슬롯, y: 프리필터 큐브 슬롯, z: BRDF 표 슬롯, w: 프리필터 밉 수(0 이면 IBL 꺼짐).
+    uvec4 environment;
 };
 
 #define LIGHT_TYPE_DIRECTIONAL 0u

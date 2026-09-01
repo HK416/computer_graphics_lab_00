@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <vector>
 
 #include "asset/model.h"
 #include "core/job_system.h"
@@ -26,6 +27,8 @@ struct Options {
     size_t initialScene = 0;
     // 지정하면 시작할 때 이 장면 파일을 연다.
     std::filesystem::path scenePath;
+    // 시작할 때 불러올 glTF 모델들. 편집기의 "모델" 단추와 같은 경로를 탄다.
+    std::vector<std::filesystem::path> modelPaths;
     // shaders/scene_data.glsl 의 DEBUG_MODE_* 값.
     uint32_t debugMode = 0;
     // 0 이면 하드웨어 동시성에 맞춰 정한다.

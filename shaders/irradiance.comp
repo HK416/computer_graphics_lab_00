@@ -1,0 +1,43 @@
+#version 460
+#extension GL_EXT_scalar_block_layout : require
+
+#include "ibl.glsl"
+#include "scene_types.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(push_constant) uniform IrradiancePushConstants {
+    uint environmentCube;
+    uint targetStorage;
+    int size;
+    float sampleDelta;
+}
+irradiance;
+
+// 법선 반구를 위도-경도로 훑어 코사인 가중 적분을 한다. 32x32 면이라 표본이 많아도 싸다.
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= irradiance.size || pixel.y >= irradiance.size) {
+        return;
+    }
+    uint face = gl_GlobalInvocationID.z;
+    vec3 normal = cubeDirection(face, (vec2(pixel) + 0.5) / float(irradiance.size));
+
+    vec3 up = abs(normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0);
+    vec3 right = normalize(cross(up, normal));
+    up = cross(normal, right);
+
+    vec3 total = vec3(0.0);
+    float count = 0.0;
+    for (float phi = 0.0; phi < 2.0 * PI; phi += irradiance.sampleDelta) {
+        for (float theta = 0.0; theta < 0.5 * PI; theta += irradiance.sampleDelta) {
+            vec3 tangentSample = vec3(sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta));
+            vec3 direction = tangentSample.x * right + tangentSample.y * up + tangentSample.z * normal;
+            total += sampleBindlessCube(irradiance.environmentCube, direction).rgb * cos(theta) * sin(theta);
+            count += 1.0;
+        }
+    }
+
+    vec3 result = count > 0.0 ? PI * total / count : vec3(0.0);
+    imageStore(bindlessStorageArrays[nonuniformEXT(irradiance.targetStorage)], ivec3(pixel, int(face)), vec4(result, 1.0));
+}

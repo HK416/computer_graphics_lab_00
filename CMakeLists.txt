@@ -85,6 +85,10 @@ set(shader_sources
     shaders/mesh.mesh
     shaders/depth_only.vert
     shaders/shadow_cutoff.frag
+    shaders/sky.comp
+    shaders/irradiance.comp
+    shaders/prefilter.comp
+    shaders/brdf_lut.comp
     shaders/ssao.comp
     shaders/ssao_blur.comp
     shaders/cull_meshlets.comp
@@ -127,6 +131,7 @@ add_executable(cg_lab
     src/core/job_system.cpp
     src/editor/editor.cpp
     src/gfx/context.cpp
+    src/gfx/environment.cpp
     src/gfx/bindless.cpp
     src/gfx/geometry.cpp
     src/gfx/lod_network.cpp

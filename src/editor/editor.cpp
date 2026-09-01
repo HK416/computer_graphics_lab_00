@@ -752,6 +752,59 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     ImGui::EndDisabled();
     ImGui::TextDisabled("그림자 시점 %u개까지 (방향광/스폿광 1, 점광 6)", gfx::MAX_SHADOW_VIEWS);
 
+    ImGui::SeparatorText("환경 (IBL)");
+    scene::Environment& env = active.environment;
+    ImGui::Checkbox("IBL 사용", &renderer.useIbl);
+    int skySource = env.useHdr ? 1 : 0;
+    if (ImGui::Combo("하늘", &skySource, "절차적\0HDR 파일\0")) {
+        env.useHdr = skySource == 1;
+    }
+    if (env.useHdr) {
+        ImGui::TextDisabled("%s", env.hdrPath.empty() ? "파일 없음" : env.hdrPath.filename().string().c_str());
+        if (ImGui::Button("HDR 파일 고르기")) {
+            hdrFiles.clear();
+            std::error_code error;
+            for (const auto& entry : std::filesystem::directory_iterator(modelRoot, error)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".hdr") {
+                    hdrFiles.push_back(entry.path());
+                }
+            }
+            std::ranges::sort(hdrFiles);
+            ImGui::OpenPopup("HDR 선택");
+        }
+        if (ImGui::BeginPopup("HDR 선택")) {
+            if (hdrFiles.empty()) {
+                ImGui::TextDisabled("%s 에 .hdr 파일이 없습니다", modelRoot.string().c_str());
+            }
+            for (const std::filesystem::path& file : hdrFiles) {
+                if (ImGui::Selectable(file.filename().string().c_str())) {
+                    env.hdrPath = file;
+                }
+            }
+            ImGui::Separator();
+            ImGui::SetNextItemWidth(320.0F);
+            ImGui::InputText("경로", hdrPathInput.data(), hdrPathInput.size());
+            ImGui::SameLine();
+            if (ImGui::Button("열기") && hdrPathInput[0] != '\0') {
+                env.hdrPath = std::filesystem::path(hdrPathInput.data());
+            }
+            ImGui::EndPopup();
+        }
+    } else {
+        ImGui::ColorEdit3("천정", glm::value_ptr(env.zenithColor));
+        ImGui::ColorEdit3("지평", glm::value_ptr(env.horizonColor));
+        ImGui::ColorEdit3("지면", glm::value_ptr(env.groundColor));
+        ImGui::ColorEdit3("태양색", glm::value_ptr(env.sunColor));
+        ImGui::SliderFloat("태양 세기", &env.sunIntensity, 0.0F, 8.0F, "%.2f");
+    }
+    ImGui::SliderFloat("환경 세기", &env.intensity, 0.0F, 4.0F, "%.2f");
+    ImGui::SliderFloat("환경 회전", &env.yawDegrees, -180.0F, 180.0F, "%.0f°");
+    if (ImGui::Button("다시 굽기")) {
+        renderer.invalidateEnvironment();
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("태양 방향은 첫 방향광을 따라간다");
+
     ImGui::SeparatorText("SSAO");
     ImGui::Checkbox("사용", &renderer.useSsao);
     ImGui::BeginDisabled(!renderer.useSsao);

@@ -1,11 +1,32 @@
 #include "gfx/resources.h"
 
+#include <cstdio>
+#include <filesystem>
+#include <vector>
+
 #include "core/error.h"
 #include "gfx/context.h"
 #include "gfx/vk_check.h"
 
 namespace gfx {
 namespace {
+
+std::vector<uint32_t> readSpirv(const std::string& name) {
+    std::filesystem::path path = std::filesystem::path(CG_LAB_SHADER_ROOT) / name;
+    std::error_code error;
+    auto size = std::filesystem::file_size(path, error);
+    if (error || size == 0 || size % sizeof(uint32_t) != 0) {
+        core::fatal("셰이더를 읽을 수 없습니다: {}", path.string());
+    }
+
+    std::vector<uint32_t> code(size / sizeof(uint32_t));
+    std::FILE* file = std::fopen(path.string().c_str(), "rb");
+    if (file == nullptr || std::fread(code.data(), 1, size, file) != size) {
+        core::fatal("셰이더 읽기에 실패했습니다: {}", path.string());
+    }
+    std::fclose(file);
+    return code;
+}
 
 void setDebugName(Context& context, uint64_t handle, VkObjectType type, const char* name) {
     if (name == nullptr) {
@@ -159,6 +180,16 @@ void imageBarrier(VkCommandBuffer commandBuffer,
     dependency.imageMemoryBarrierCount = 1;
     dependency.pImageMemoryBarriers = &barrier;
     vkCmdPipelineBarrier2(commandBuffer, &dependency);
+}
+
+VkShaderModule createShaderModule(VkDevice device, const std::string& name) {
+    std::vector<uint32_t> code = readSpirv(name);
+    VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    info.codeSize = code.size() * sizeof(uint32_t);
+    info.pCode = code.data();
+    VkShaderModule module = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateShaderModule(device, &info, nullptr, &module));
+    return module;
 }
 
 } // namespace gfx

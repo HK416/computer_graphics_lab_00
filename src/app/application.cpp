@@ -116,6 +116,9 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
         [this](const std::filesystem::path& path) { saveScene(path); },
         [this](const std::filesystem::path& path) { openScene(path); });
     // 렌더러가 있어야 지오메트리 재구축을 알릴 수 있으므로 여기서 연다.
+    for (const std::filesystem::path& path : options.modelPaths) {
+        loadModel(path);
+    }
     if (!options.scenePath.empty()) {
         openScene(options.scenePath);
     }
@@ -383,6 +386,10 @@ void Application::openScene(const std::filesystem::path& path) {
 
     scene::Scene& created = scenes.create(loaded.scene.name);
     created = std::move(loaded.scene);
+    // 모델과 같은 규칙: 상대 경로는 에셋 뿌리 기준으로 푼다.
+    if (!created.environment.hdrPath.empty() && !created.environment.hdrPath.is_absolute()) {
+        created.environment.hdrPath = assetRoot / created.environment.hdrPath;
+    }
     for (size_t i = 0; i < created.objects.size(); ++i) {
         int32_t model = loaded.objectModels[i];
         if (model >= 0 && static_cast<size_t>(model) < modelIndices.size()) {

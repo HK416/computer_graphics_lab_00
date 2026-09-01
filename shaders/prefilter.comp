@@ -1,0 +1,56 @@
+#version 460
+#extension GL_EXT_scalar_block_layout : require
+
+#include "ibl.glsl"
+#include "scene_types.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(push_constant) uniform PrefilterPushConstants {
+    uint environmentCube;
+    uint targetStorage;
+    int size;
+    float roughness;
+    // 환경 큐브의 한 변과 밉 수. 표본 확률로 밉을 골라 반딧불이를 줄인다.
+    float environmentSize;
+    float environmentMips;
+    uint sampleCount;
+}
+prefilter;
+
+// Karis 의 split-sum 근사. 시선이 법선과 같다고 두면 반사 벡터도 법선이 된다.
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= prefilter.size || pixel.y >= prefilter.size) {
+        return;
+    }
+    uint face = gl_GlobalInvocationID.z;
+    vec3 normal = cubeDirection(face, (vec2(pixel) + 0.5) / float(prefilter.size));
+
+    // 텍셀 하나가 덮는 입체각. 표본 하나가 덮는 입체각과 견주어 읽을 밉을 정한다.
+    float texelSolidAngle = 4.0 * PI / (6.0 * prefilter.environmentSize * prefilter.environmentSize);
+
+    vec3 total = vec3(0.0);
+    float weight = 0.0;
+    for (uint i = 0u; i < prefilter.sampleCount; ++i) {
+        vec3 halfway = importanceSampleGgx(hammersley(i, prefilter.sampleCount), normal, prefilter.roughness);
+        vec3 light = reflect(-normal, halfway);
+        float nDotL = dot(normal, light);
+        if (nDotL <= 0.0) {
+            continue;
+        }
+
+        float nDotH = max(dot(normal, halfway), 0.0);
+        float pdf = distributionGgx(nDotH, prefilter.roughness) * nDotH / (4.0 * nDotH) + 1e-4;
+        float sampleSolidAngle = 1.0 / (float(prefilter.sampleCount) * pdf);
+        float level = prefilter.roughness == 0.0
+                          ? 0.0
+                          : clamp(0.5 * log2(sampleSolidAngle / texelSolidAngle), 0.0, prefilter.environmentMips - 1.0);
+
+        total += sampleBindlessCubeLod(prefilter.environmentCube, light, level).rgb * nDotL;
+        weight += nDotL;
+    }
+
+    vec3 result = weight > 0.0 ? total / weight : sampleBindlessCube(prefilter.environmentCube, normal).rgb;
+    imageStore(bindlessStorageArrays[nonuniformEXT(prefilter.targetStorage)], ivec3(pixel, int(face)), vec4(result, 1.0));
+}

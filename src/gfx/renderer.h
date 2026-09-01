@@ -11,6 +11,7 @@
 #include <glm/vec4.hpp>
 #include <vulkan/vulkan.h>
 
+#include "gfx/environment.h"
 #include "gfx/lod_network.h"
 #include "gfx/profiler.h"
 #include "gfx/raytracing.h"
@@ -211,6 +212,8 @@ public:
 
     // 화면 공간 주변광 차폐.
     bool useSsao = true;
+    // 환경광을 IBL 로 계산한다. 끄면 균일 환경광만 남는다.
+    bool useIbl = true;
     // 장면 반지름에 대한 비율. 장면 크기가 제각각이라 절대 길이로 두지 않는다.
     float ssaoRadius = 0.04F;
     float ssaoIntensity = 1.0F;
@@ -234,6 +237,11 @@ public:
     bool usePathTracing = false;
     PathTraceOptions pathTrace;
     bool pathTracingAvailable() const { return rayTracer != nullptr; }
+    void invalidateEnvironment() {
+        if (environment) {
+            environment->invalidate();
+        }
+    }
     uint32_t pathTraceSamples() const { return pathSampleCount; }
     // 설정을 바꾸면 쌓인 표본이 섞이므로 편집기가 이걸 눌러 처음부터 다시 쌓게 한다.
     void resetPathAccumulation() { pathSampleCount = 0; }
@@ -388,6 +396,9 @@ private:
     Buffer captureBuffer;
 
     std::unique_ptr<RayTracer> rayTracer;
+    std::unique_ptr<EnvironmentMap> environment;
+    // 첫 방향광의 진행 방향. 하늘의 태양을 그림자와 맞추는 데 쓴다.
+    glm::vec3 sunDirection{0.0F, -1.0F, 0.0F};
     glm::mat4 lastViewProjection{0.0F};
     uint32_t pathSampleCount = 0;
 

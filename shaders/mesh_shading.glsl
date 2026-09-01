@@ -1,6 +1,7 @@
 #ifndef MESH_SHADING_GLSL
 #define MESH_SHADING_GLSL
 
+#include "ibl.glsl"
 #include "lighting.glsl"
 #include "scene_data.glsl"
 #include "shadow.glsl"
@@ -22,6 +23,31 @@ float screenSpaceOcclusion() {
         return 1.0;
     }
     return sampleBindless(slot, gl_FragCoord.xy * pushConstants.camera.item.viewport.zw).r;
+}
+
+// 환경광. 프리필터 밉 수가 0 이면 IBL 이 꺼진 것이라 균일 환경광만 남긴다. ambient 는 IBL 에
+// 곱하는 색조 겸 세기로 계속 쓰인다.
+vec3 environmentLight(Surface surface, float occlusion) {
+    vec3 tint = pushConstants.camera.item.ambient.rgb;
+    uvec4 environment = pushConstants.camera.item.environment;
+    if (environment.w == 0u) {
+        return tint * surface.albedo * occlusion;
+    }
+
+    float nDotV = max(dot(surface.normal, surface.view), 1e-4);
+    vec3 f0 = mix(vec3(0.04), surface.albedo, surface.metallic);
+    vec3 fresnel = fresnelSchlickRoughness(nDotV, f0, surface.roughness);
+    vec3 diffuseWeight = (vec3(1.0) - fresnel) * (1.0 - surface.metallic);
+
+    vec3 irradiance = sampleBindlessCube(environment.x, surface.normal).rgb;
+    vec3 reflection = reflect(-surface.view, surface.normal);
+    vec3 prefiltered =
+        sampleBindlessCubeLod(environment.y, reflection, surface.roughness * float(environment.w - 1u)).rgb;
+    vec2 integrated = sampleBindlessArray(environment.z, vec2(nDotV, surface.roughness), 0.0).rg;
+
+    vec3 diffuse = diffuseWeight * irradiance * surface.albedo;
+    vec3 specular = prefiltered * (fresnel * integrated.x + integrated.y);
+    return (diffuse + specular) * occlusion * tint;
 }
 
 vec3 shadingNormal(Material material) {
@@ -94,7 +120,7 @@ vec4 shadeSurface() {
     }
 
     float ambientOcclusion = occlusion * screenSpaceOcclusion();
-    color += pushConstants.camera.item.ambient.rgb * baseColor.rgb * ambientOcclusion;
+    color += environmentLight(surface, ambientOcclusion);
     color += emissive;
 
     float alpha = ALPHA_MODE_VARIANT == ALPHA_MODE_TRANSLUCENT ? baseColor.a : 1.0;
