@@ -13,6 +13,7 @@
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/mat4x4.hpp>
 #include <glm/trigonometric.hpp>
+#include <glm/vec4.hpp>
 #include <SDL3/SDL.h>
 #include <spdlog/spdlog.h>
 #include <stb_image_write.h>
@@ -36,6 +37,10 @@ constexpr VkFormat OIT_ACCUMULATION_FORMAT = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkFormat OIT_REVEALAGE_FORMAT = VK_FORMAT_R16_SFLOAT;
 constexpr VkFormat PRESENT_FORMAT = VK_FORMAT_R8G8B8A8_UNORM;
 constexpr uint32_t MINIMUM_INSTANCE_CAPACITY = 1024;
+// 그림자 시점의 근평면. 광원에 아주 가까운 물체는 그림자를 만들지 못한다.
+constexpr float SHADOW_NEAR_PLANE = 0.05F;
+constexpr VkFormat SHADOW_FORMAT = VK_FORMAT_D32_SFLOAT;
+constexpr VkFormat SSAO_FORMAT = VK_FORMAT_R32_SFLOAT;
 constexpr size_t TRANSLUCENT_MODE = 2;
 // shaders/meshlet_task.glsl 의 MESHLET_GROUP_SIZE 와 같아야 한다.
 constexpr uint32_t MESHLET_GROUP_SIZE = 32;
@@ -45,6 +50,15 @@ struct GpuCamera {
     glm::mat4 viewProjection;
     glm::vec4 position;
     glm::vec4 parameters; // x: 근평면
+    // 균일 환경광. w 는 쓰지 않는다.
+    glm::vec4 ambient;
+    // xy 렌더 해상도, zw 그 역수.
+    glm::vec4 viewport;
+    // 깊이에서 월드 위치를 되돌릴 때 쓴다.
+    glm::mat4 inverseViewProjection;
+    // x: 조명 수, y: 그림자 아틀라스 슬롯, z: SSAO 슬롯, w: 아틀라스 한 변의 타일 수.
+    // bindless 슬롯은 상위 8비트가 샘플러 번호라 float 로는 정확히 담기지 않는다.
+    glm::uvec4 shading;
 };
 
 // shaders/scene_data.glsl 의 MeshletGroup 과 배치가 같아야 한다.
@@ -99,8 +113,35 @@ struct ScenePushConstants {
     VkDeviceAddress vertexMeshlets;
     VkDeviceAddress meshletGroups;
     VkDeviceAddress joints;
+    VkDeviceAddress lights;
+    VkDeviceAddress shadowMatrices;
     uint32_t meshletGroupBase;
     uint32_t debugMode;
+};
+
+// shaders/depth_only.vert 의 DepthPushConstants 와 배치가 같아야 한다.
+struct DepthPushConstants {
+    glm::mat4 viewProjection;
+    VkDeviceAddress vertices;
+    VkDeviceAddress instances;
+    VkDeviceAddress joints;
+};
+
+struct SsaoPushConstants {
+    VkDeviceAddress camera;
+    uint32_t depthTexture;
+    uint32_t occlusionStorage;
+    int32_t size[2];
+    float radius;
+    float intensity;
+    float bias;
+    uint32_t sampleCount;
+};
+
+struct SsaoBlurPushConstants {
+    uint32_t sourceTexture;
+    uint32_t destinationStorage;
+    int32_t size[2];
 };
 
 struct CompositePushConstants {
@@ -202,6 +243,8 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& 
     createMeshPipelines();
     createPostPipelines();
     createCullPipeline();
+    createShadowPipeline();
+    createSsaoPipelines();
 
     if (context.caps.rayTracingPipeline) {
         rayTracer = std::make_unique<RayTracer>(context, geometry, bindless);
@@ -233,11 +276,19 @@ Renderer::~Renderer() {
     vkDestroyPipeline(context.device, hzbPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, hzbPipelineLayout, nullptr);
     vkDestroyPipeline(context.device, cullPipeline, nullptr);
+    vkDestroyPipeline(context.device, ssaoBlurPipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, ssaoBlurPipelineLayout, nullptr);
+    vkDestroyPipeline(context.device, ssaoPipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, ssaoPipelineLayout, nullptr);
+    vkDestroyPipeline(context.device, shadowPipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, depthPipelineLayout, nullptr);
     vkDestroyPipelineLayout(context.device, cullPipelineLayout, nullptr);
     vkDestroyPipelineLayout(context.device, meshPipelineLayout, nullptr);
     vkDestroySemaphore(context.device, frameTimeline, nullptr);
     destroyPresentSemaphores();
     for (Frame& frame : frames) {
+        destroyBuffer(context, frame.shadowMatrixBuffer);
+        destroyBuffer(context, frame.lightBuffer);
         destroyBuffer(context, frame.jointBuffer);
         destroyBuffer(context, frame.lodNetworkBuffer);
         destroyBuffer(context, frame.drawCountBuffer);
@@ -255,6 +306,9 @@ Renderer::~Renderer() {
         vkDestroyImageView(context.device, view, nullptr);
     }
     destroyImage(context, targets.hzb);
+    destroyImage(context, targets.shadowAtlas);
+    destroyImage(context, targets.ssao);
+    destroyImage(context, targets.ssaoRaw);
     destroyImage(context, targets.pathAccumulation);
     destroyImage(context, targets.tonemapped);
     destroyImage(context, targets.present);
@@ -314,6 +368,8 @@ std::vector<UpscalerInfo> Renderer::upscalers() const {
 std::vector<Renderer::TargetView> Renderer::targetViews() const {
     constexpr VkImageLayout READ_ONLY = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     std::vector<TargetView> views{{"색상 (HDR)", targets.color.view, READ_ONLY},
+                                  {"그림자 아틀라스", targets.shadowAtlas.view, READ_ONLY},
+                                  {"SSAO", targets.ssao.view, VK_IMAGE_LAYOUT_GENERAL},
                                   {"톤 매핑", targets.tonemapped.view, READ_ONLY},
                                   {"표시 (업스케일)", targets.present.view, READ_ONLY},
                                   {"깊이", targets.depth.view, READ_ONLY},
@@ -399,6 +455,26 @@ void Renderer::createRenderTargets() {
     hzbDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     targets.hzb = createImage(context, hzbDesc, "HZB");
 
+    // 그림자 아틀라스는 화면 크기와 무관하므로 한 번만 만든다.
+    if (targets.shadowAtlas.handle == VK_NULL_HANDLE) {
+        ImageDesc shadowDesc;
+        shadowDesc.extent = {SHADOW_ATLAS_SIZE, SHADOW_ATLAS_SIZE, 1};
+        shadowDesc.format = SHADOW_FORMAT;
+        shadowDesc.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        shadowDesc.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+        targets.shadowAtlas = createImage(context, shadowDesc, "그림자 아틀라스");
+    }
+
+    destroyImage(context, targets.ssao);
+    destroyImage(context, targets.ssaoRaw);
+    targets.ssaoExtent = {std::max(currentRenderExtent.width / 2, 1U), std::max(currentRenderExtent.height / 2, 1U)};
+    ImageDesc ssaoDesc;
+    ssaoDesc.extent = {targets.ssaoExtent.width, targets.ssaoExtent.height, 1};
+    ssaoDesc.format = SSAO_FORMAT;
+    ssaoDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    targets.ssaoRaw = createImage(context, ssaoDesc, "SSAO 원본");
+    targets.ssao = createImage(context, ssaoDesc, "SSAO");
+
     targets.hzbMipViews.resize(hzbLevels);
     for (uint32_t level = 0; level < hzbLevels; ++level) {
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -425,6 +501,12 @@ void Renderer::createRenderTargets() {
         targets.pathAccumulationStorageSlot = bindless.addStorageImageRgba(targets.pathAccumulation.view);
         targets.pathAccumulationSampledSlot =
             bindless.add(targets.pathAccumulation.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        targets.shadowAtlasSlot = bindless.add(targets.shadowAtlas.view, postSampler);
+        // SSAO 도 컴퓨트가 쓰고 프래그먼트가 읽으므로 계속 GENERAL 에 둔다.
+        targets.ssaoRawSlot = bindless.add(targets.ssaoRaw.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        targets.ssaoSlot = bindless.add(targets.ssao.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        targets.ssaoRawStorageSlot = bindless.addStorageImage(targets.ssaoRaw.view);
+        targets.ssaoStorageSlot = bindless.addStorageImage(targets.ssao.view);
         targets.hzbStorageSlots.resize(targets.hzbMipViews.size());
         for (size_t level = 0; level < targets.hzbMipViews.size(); ++level) {
             targets.hzbStorageSlots[level] = bindless.addStorageImage(targets.hzbMipViews[level]);
@@ -440,6 +522,10 @@ void Renderer::createRenderTargets() {
         bindless.updateStorageImageRgba(targets.pathAccumulationStorageSlot, targets.pathAccumulation.view);
         bindless.update(
             targets.pathAccumulationSampledSlot, targets.pathAccumulation.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        bindless.update(targets.ssaoRawSlot, targets.ssaoRaw.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        bindless.update(targets.ssaoSlot, targets.ssao.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        bindless.updateStorageImage(targets.ssaoRawStorageSlot, targets.ssaoRaw.view);
+        bindless.updateStorageImage(targets.ssaoStorageSlot, targets.ssao.view);
         // 밉 수가 줄어들면 남는 슬롯은 마지막 뷰로 채워 유효한 상태를 유지한다.
         for (size_t level = 0; level < targets.hzbStorageSlots.size(); ++level) {
             size_t source = std::min(level, targets.hzbMipViews.size() - 1);
@@ -447,6 +533,7 @@ void Renderer::createRenderTargets() {
         }
     }
     hzbNeedsClear = true;
+    ssaoNeedsClear = true;
     pathSampleCount = 0;
 }
 
@@ -532,6 +619,29 @@ void Renderer::reserveJoints(Frame& frame, uint32_t jointCount) {
     frame.jointCapacity = capacity;
 }
 
+void Renderer::reserveLights(Frame& frame, uint32_t lightCount) {
+    if (frame.shadowMatrixBuffer.handle == VK_NULL_HANDLE) {
+        frame.shadowMatrixBuffer = createBuffer(context,
+                                                sizeof(glm::mat4) * MAX_SHADOW_VIEWS,
+                                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                MemoryLocation::HOST_WRITE,
+                                                "그림자 시점 행렬");
+    }
+    // 조명이 없는 장면에서도 셰이더가 주소를 읽으므로 최소 하나는 잡아 둔다.
+    uint32_t needed = std::max(lightCount, 1U);
+    if (needed <= frame.lightCapacity) {
+        return;
+    }
+    uint32_t capacity = std::max(needed, frame.lightCapacity * 2);
+    destroyBuffer(context, frame.lightBuffer);
+    frame.lightBuffer = createBuffer(context,
+                                     static_cast<VkDeviceSize>(capacity) * sizeof(GpuLight),
+                                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                     MemoryLocation::HOST_WRITE,
+                                     "조명");
+    frame.lightCapacity = capacity;
+}
+
 void Renderer::reserveMeshletDraws(Frame& frame, uint32_t drawCount) {
     if (frame.lodNetworkBuffer.handle == VK_NULL_HANDLE) {
         frame.lodNetworkBuffer = createBuffer(context,
@@ -560,6 +670,111 @@ void Renderer::reserveMeshletDraws(Frame& frame, uint32_t drawCount) {
                                            MemoryLocation::DEVICE,
                                            "meshlet 그리기 명령");
     frame.meshletDrawCapacity = capacity;
+}
+
+void Renderer::createShadowPipeline() {
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushConstantRange.size = sizeof(DepthPushConstants);
+
+    VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushConstantRange;
+    VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &depthPipelineLayout));
+
+    VkShaderModule vertexModule = createShaderModule(context.device, "depth_only.vert.spv");
+    VkPipelineShaderStageCreateInfo stage = shaderStage(VK_SHADER_STAGE_VERTEX_BIT, vertexModule);
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewportState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    // 그림자는 양면을 모두 그려야 얇은 물체가 사라지지 않는다. 경사 편향으로 자기 그림자를 줄인다.
+    VkPipelineRasterizationStateCreateInfo rasterization{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterization.cullMode = VK_CULL_MODE_NONE;
+    rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterization.lineWidth = 1.0F;
+    rasterization.depthBiasEnable = VK_TRUE;
+    rasterization.depthBiasConstantFactor = 1.25F;
+    rasterization.depthBiasSlopeFactor = 2.5F;
+
+    VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    // 그림자 아틀라스는 일반 깊이라 0 에서 1 로 커진다.
+    VkPipelineDepthStencilStateCreateInfo depthStencil{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+
+    VkPipelineColorBlendStateCreateInfo colorBlend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+
+    VkDynamicState dynamicStates[]{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamicState{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamicState.dynamicStateCount = 2;
+    dynamicState.pDynamicStates = dynamicStates;
+
+    VkPipelineRenderingCreateInfo renderingInfo{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    renderingInfo.depthAttachmentFormat = SHADOW_FORMAT;
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    pipelineInfo.pNext = &renderingInfo;
+    pipelineInfo.stageCount = 1;
+    pipelineInfo.pStages = &stage;
+    pipelineInfo.pVertexInputState = &vertexInput;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterization;
+    pipelineInfo.pMultisampleState = &multisample;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlend;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = depthPipelineLayout;
+    VK_CHECK(vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &shadowPipeline));
+    vkDestroyShaderModule(context.device, vertexModule, nullptr);
+}
+
+void Renderer::createSsaoPipelines() {
+    VkDescriptorSetLayout bindlessLayout = bindless.layout();
+
+    VkPushConstantRange ssaoRange{};
+    ssaoRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    ssaoRange.size = sizeof(SsaoPushConstants);
+    VkPipelineLayoutCreateInfo ssaoLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    ssaoLayoutInfo.setLayoutCount = 1;
+    ssaoLayoutInfo.pSetLayouts = &bindlessLayout;
+    ssaoLayoutInfo.pushConstantRangeCount = 1;
+    ssaoLayoutInfo.pPushConstantRanges = &ssaoRange;
+    VK_CHECK(vkCreatePipelineLayout(context.device, &ssaoLayoutInfo, nullptr, &ssaoPipelineLayout));
+
+    VkShaderModule ssaoModule = createShaderModule(context.device, "ssao.comp.spv");
+    VkComputePipelineCreateInfo ssaoInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    ssaoInfo.stage = shaderStage(VK_SHADER_STAGE_COMPUTE_BIT, ssaoModule);
+    ssaoInfo.layout = ssaoPipelineLayout;
+    VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &ssaoInfo, nullptr, &ssaoPipeline));
+    vkDestroyShaderModule(context.device, ssaoModule, nullptr);
+
+    VkPushConstantRange blurRange{};
+    blurRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    blurRange.size = sizeof(SsaoBlurPushConstants);
+    VkPipelineLayoutCreateInfo blurLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    blurLayoutInfo.setLayoutCount = 1;
+    blurLayoutInfo.pSetLayouts = &bindlessLayout;
+    blurLayoutInfo.pushConstantRangeCount = 1;
+    blurLayoutInfo.pPushConstantRanges = &blurRange;
+    VK_CHECK(vkCreatePipelineLayout(context.device, &blurLayoutInfo, nullptr, &ssaoBlurPipelineLayout));
+
+    VkShaderModule blurModule = createShaderModule(context.device, "ssao_blur.comp.spv");
+    VkComputePipelineCreateInfo blurInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    blurInfo.stage = shaderStage(VK_SHADER_STAGE_COMPUTE_BIT, blurModule);
+    blurInfo.layout = ssaoBlurPipelineLayout;
+    VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &blurInfo, nullptr, &ssaoBlurPipeline));
+    vkDestroyShaderModule(context.device, blurModule, nullptr);
 }
 
 void Renderer::createCullPipeline() {
@@ -606,6 +821,134 @@ void Renderer::createCullPipeline() {
     vkDestroyShaderModule(context.device, hzbModule, nullptr);
 
     spdlog::info("컴퓨트 컬링 준비 완료 (압축 간접 그리기: {})", drawIndexedIndirectCount != nullptr);
+}
+
+void Renderer::recordShadowPass(VkCommandBuffer commandBuffer, const FrameBatches& batches) {
+    constexpr VkDeviceSize DRAW_STRIDE = sizeof(VkDrawIndexedIndirectCommand);
+    Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];
+
+    // 불투명과 컷오프 경로만 그림자를 만든다. 이 구간은 그리기 버퍼에서 연속이다.
+    uint32_t drawCount = 0;
+    for (size_t mode = 0; mode < TRANSLUCENT_MODE; ++mode) {
+        for (size_t sided = 0; sided < 2; ++sided) {
+            drawCount += batches.draws[mode][sided].count;
+        }
+    }
+
+    imageBarrier(commandBuffer,
+                 targets.shadowAtlas.handle,
+                 VK_IMAGE_ASPECT_DEPTH_BIT,
+                 VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                 0,
+                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+
+    VkRenderingAttachmentInfo depthAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    depthAttachment.imageView = targets.shadowAtlas.view;
+    depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depthAttachment.clearValue.depthStencil.depth = 1.0F;
+
+    VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    rendering.renderArea = {{0, 0}, {SHADOW_ATLAS_SIZE, SHADOW_ATLAS_SIZE}};
+    rendering.layerCount = 1;
+    rendering.pDepthAttachment = &depthAttachment;
+    vkCmdBeginRendering(commandBuffer, &rendering);
+
+    if (drawCount > 0) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
+        vkCmdBindIndexBuffer(commandBuffer, geometry.indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
+
+        DepthPushConstants pushConstants{};
+        pushConstants.vertices = geometry.vertexBuffer.address;
+        pushConstants.instances = frame.instanceBuffer.address;
+        pushConstants.joints = frame.jointBuffer.address;
+
+        // 시점마다 아틀라스의 타일 하나만 뷰포트로 잡는다.
+        for (size_t view = 0; view < shadowViews.size(); ++view) {
+            auto column = static_cast<float>(view % SHADOW_TILES_PER_SIDE);
+            auto row = static_cast<float>(view / SHADOW_TILES_PER_SIDE);
+            VkViewport viewport{column * SHADOW_TILE_SIZE,
+                                row * SHADOW_TILE_SIZE,
+                                static_cast<float>(SHADOW_TILE_SIZE),
+                                static_cast<float>(SHADOW_TILE_SIZE),
+                                0.0F,
+                                1.0F};
+            VkRect2D scissor{{static_cast<int32_t>(column) * static_cast<int32_t>(SHADOW_TILE_SIZE),
+                              static_cast<int32_t>(row) * static_cast<int32_t>(SHADOW_TILE_SIZE)},
+                             {SHADOW_TILE_SIZE, SHADOW_TILE_SIZE}};
+            vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+            vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+            pushConstants.viewProjection = shadowViews[view];
+            vkCmdPushConstants(commandBuffer,
+                               depthPipelineLayout,
+                               VK_SHADER_STAGE_VERTEX_BIT,
+                               0,
+                               sizeof(pushConstants),
+                               &pushConstants);
+            vkCmdDrawIndexedIndirect(
+                commandBuffer, frame.drawBuffer.handle, 0, drawCount, static_cast<uint32_t>(DRAW_STRIDE));
+        }
+    }
+    vkCmdEndRendering(commandBuffer);
+
+    imageBarrier(commandBuffer,
+                 targets.shadowAtlas.handle,
+                 VK_IMAGE_ASPECT_DEPTH_BIT,
+                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+}
+
+void Renderer::recordSsaoPass(VkCommandBuffer commandBuffer, const Frame& frame) {
+    VkDescriptorSet bindlessSet = bindless.set();
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ssaoPipeline);
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ssaoPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+
+    SsaoPushConstants pushConstants{};
+    pushConstants.camera = frame.cameraBuffer.address;
+    pushConstants.depthTexture = targets.depthSlot;
+    pushConstants.occlusionStorage = targets.ssaoRawStorageSlot;
+    pushConstants.size[0] = static_cast<int32_t>(targets.ssaoExtent.width);
+    pushConstants.size[1] = static_cast<int32_t>(targets.ssaoExtent.height);
+    // 반지름은 장면 크기에 대한 비율이라 여우든 헬멧이든 비슷하게 보인다.
+    pushConstants.radius = ssaoRadius * sceneRadius;
+    pushConstants.intensity = ssaoIntensity;
+    pushConstants.bias = ssaoBias;
+    pushConstants.sampleCount = ssaoSamples;
+    vkCmdPushConstants(
+        commandBuffer, ssaoPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+    vkCmdDispatch(commandBuffer, (targets.ssaoExtent.width + 7) / 8, (targets.ssaoExtent.height + 7) / 8, 1);
+
+    VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ssaoBlurPipeline);
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ssaoBlurPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+    SsaoBlurPushConstants blurConstants{};
+    blurConstants.sourceTexture = targets.ssaoRawSlot;
+    blurConstants.destinationStorage = targets.ssaoStorageSlot;
+    blurConstants.size[0] = pushConstants.size[0];
+    blurConstants.size[1] = pushConstants.size[1];
+    vkCmdPushConstants(
+        commandBuffer, ssaoBlurPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(blurConstants), &blurConstants);
+    vkCmdDispatch(commandBuffer, (targets.ssaoExtent.width + 7) / 8, (targets.ssaoExtent.height + 7) / 8, 1);
 }
 
 void Renderer::recordHzbPass(VkCommandBuffer commandBuffer) {
@@ -964,6 +1307,118 @@ void Renderer::recreateSwapchain() {
     resizeRequested = false;
 }
 
+namespace {
+// 광원에서 direction 을 바라보는 시점 행렬. 방향이 위쪽과 나란하면 기준 축을 바꾼다.
+glm::mat4 lookAlong(glm::vec3 eye, glm::vec3 direction) {
+    glm::vec3 up = std::abs(direction.y) > 0.99F ? glm::vec3{0.0F, 0.0F, 1.0F} : glm::vec3{0.0F, 1.0F, 0.0F};
+    return glm::lookAt(eye, eye + direction, up);
+}
+
+// shaders/shadow.glsl 의 cubeFaceIndex 와 같은 순서여야 한다.
+constexpr std::array<glm::vec3, 6> CUBE_FACE_DIRECTIONS{glm::vec3{1.0F, 0.0F, 0.0F},
+                                                        glm::vec3{-1.0F, 0.0F, 0.0F},
+                                                        glm::vec3{0.0F, 1.0F, 0.0F},
+                                                        glm::vec3{0.0F, -1.0F, 0.0F},
+                                                        glm::vec3{0.0F, 0.0F, 1.0F},
+                                                        glm::vec3{0.0F, 0.0F, -1.0F}};
+} // namespace
+
+void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
+    frameLights.clear();
+    shadowViews.clear();
+
+    // 방향광의 그림자 절두체를 맞추려면 보이는 메쉬 전체의 세계 경계가 필요하다.
+    glm::vec3 minimum{std::numeric_limits<float>::max()};
+    glm::vec3 maximum{std::numeric_limits<float>::lowest()};
+    bool hasBounds = false;
+    for (uint32_t index = 0; index < scene.objects.size(); ++index) {
+        const scene::Object& object = scene.objects[index];
+        if (object.meshIndex >= geometry.meshCount() || !scene.visibleInTree(index)) {
+            continue;
+        }
+        glm::mat4 world = scene.worldMatrix(index);
+        glm::vec4 sphere = geometry.mesh(object.meshIndex).boundingSphere;
+        glm::vec3 center = glm::vec3(world * glm::vec4{glm::vec3(sphere), 1.0F});
+        float scale = std::sqrt(std::max({glm::dot(glm::vec3(world[0]), glm::vec3(world[0])),
+                                          glm::dot(glm::vec3(world[1]), glm::vec3(world[1])),
+                                          glm::dot(glm::vec3(world[2]), glm::vec3(world[2]))}));
+        minimum = glm::min(minimum, center - sphere.w * scale);
+        maximum = glm::max(maximum, center + sphere.w * scale);
+        hasBounds = true;
+    }
+    glm::vec3 sceneCenter = hasBounds ? (minimum + maximum) * 0.5F : glm::vec3{0.0F};
+    // 멤버에 담아 SSAO 반지름을 장면 크기에 맞추는 데도 쓴다.
+    sceneRadius = hasBounds ? std::max(glm::length(maximum - minimum) * 0.5F, 1.0F) : 1.0F;
+
+    for (uint32_t index = 0; index < scene.objects.size(); ++index) {
+        const scene::Object& object = scene.objects[index];
+        if (object.light < 0 || static_cast<size_t>(object.light) >= scene.lights.size() ||
+            !scene.visibleInTree(index)) {
+            continue;
+        }
+        const scene::Light& source = scene.lights[static_cast<size_t>(object.light)];
+        glm::mat4 world = scene.worldMatrix(index);
+        glm::vec3 position = glm::vec3(world[3]);
+        // glTF 와 Unity 처럼 -Z 를 앞으로 본다.
+        glm::vec3 direction = glm::normalize(-glm::vec3(world[2]));
+
+        GpuLight light{};
+        light.positionRange = glm::vec4{position, source.range};
+        light.directionIntensity = glm::vec4{direction, source.intensity};
+        light.colorType = glm::vec4{source.color, static_cast<float>(source.type)};
+        light.coneSize = glm::vec4{std::cos(glm::radians(source.innerConeDegrees)),
+                                   std::cos(glm::radians(source.outerConeDegrees)),
+                                   source.size.x * 0.5F,
+                                   source.size.y * 0.5F};
+        light.rightShadow = glm::vec4{glm::normalize(glm::vec3(world[0])), -1.0F};
+        light.up = glm::vec4{glm::normalize(glm::vec3(world[1])), 0.0F};
+
+        // 영역광은 반구 전체로 빛을 내보내 시점 하나로 담을 수 없어 그림자를 만들지 않는다.
+        uint32_t viewsNeeded = 0;
+        if (shadowsEnabled && source.castsShadow) {
+            switch (source.type) {
+            case scene::LightType::DIRECTIONAL:
+            case scene::LightType::SPOT:
+                viewsNeeded = 1;
+                break;
+            case scene::LightType::POINT:
+                viewsNeeded = 6;
+                break;
+            default:
+                break;
+            }
+        }
+        if (viewsNeeded > 0 && shadowViews.size() + viewsNeeded <= MAX_SHADOW_VIEWS) {
+            light.rightShadow.w = static_cast<float>(shadowViews.size());
+            if (source.type == scene::LightType::DIRECTIONAL) {
+                glm::mat4 view = lookAlong(sceneCenter - direction * sceneRadius, direction);
+                shadowViews.push_back(
+                    glm::orthoRH_ZO(-sceneRadius, sceneRadius, -sceneRadius, sceneRadius, 0.0F, 2.0F * sceneRadius) *
+                    view);
+            } else if (source.type == scene::LightType::SPOT) {
+                float fov = std::min(glm::radians(source.outerConeDegrees) * 2.0F, glm::radians(170.0F));
+                shadowViews.push_back(glm::perspectiveRH_ZO(fov, 1.0F, SHADOW_NEAR_PLANE, source.range) *
+                                      lookAlong(position, direction));
+            } else {
+                glm::mat4 projection =
+                    glm::perspectiveRH_ZO(glm::radians(90.0F), 1.0F, SHADOW_NEAR_PLANE, source.range);
+                for (const glm::vec3& face : CUBE_FACE_DIRECTIONS) {
+                    shadowViews.push_back(projection * lookAlong(position, face));
+                }
+            }
+        }
+        frameLights.push_back(light);
+    }
+
+    reserveLights(frame, static_cast<uint32_t>(frameLights.size()));
+    if (!frameLights.empty()) {
+        std::ranges::copy(frameLights, static_cast<GpuLight*>(frame.lightBuffer.mapped));
+    }
+    if (!shadowViews.empty()) {
+        std::ranges::copy(shadowViews, static_cast<glm::mat4*>(frame.shadowMatrixBuffer.mapped));
+    }
+}
+
 FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene) {
     reserveInstances(frame, static_cast<uint32_t>(scene.objects.size()));
 
@@ -1111,6 +1566,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         }
     }
 
+    buildLights(frame, scene);
+
     auto* camera = static_cast<GpuCamera*>(frame.cameraBuffer.mapped);
     float aspect = static_cast<float>(currentRenderExtent.width) / static_cast<float>(currentRenderExtent.height);
     camera->viewProjection = scene.camera.projectionMatrix(aspect) * scene.camera.viewMatrix();
@@ -1122,6 +1579,16 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                                    projectionScale,
                                    lodErrorThreshold,
                                    automaticLod ? -1.0F : static_cast<float>(lodLevel)};
+    camera->shading = glm::uvec4{static_cast<uint32_t>(frameLights.size()),
+                                 targets.shadowAtlasSlot,
+                                 useSsao ? targets.ssaoSlot : asset::INVALID_TEXTURE,
+                                 shadowViews.empty() ? 0U : SHADOW_TILES_PER_SIDE};
+    camera->ambient = glm::vec4{scene.ambientColor * scene.ambientIntensity, 0.0F};
+    camera->viewport = glm::vec4{static_cast<float>(currentRenderExtent.width),
+                                 static_cast<float>(currentRenderExtent.height),
+                                 1.0F / static_cast<float>(currentRenderExtent.width),
+                                 1.0F / static_cast<float>(currentRenderExtent.height)};
+    camera->inverseViewProjection = glm::inverse(camera->viewProjection);
 
     // 카메라나 화면이 바뀌면 경로 추적 누적을 처음부터 다시 쌓는다.
     if (camera->viewProjection != lastViewProjection) {
@@ -1442,6 +1909,45 @@ void Renderer::recordCommands(Frame& frame,
         hzbNeedsClear = false;
     }
 
+    if (ssaoNeedsClear) {
+        // 첫 프레임에는 이전 깊이가 없으므로 차폐 없음(1)으로 채운다.
+        for (const Image* image : {&targets.ssaoRaw, &targets.ssao}) {
+            imageBarrier(commandBuffer,
+                         image->handle,
+                         VK_IMAGE_ASPECT_COLOR_BIT,
+                         VK_IMAGE_LAYOUT_UNDEFINED,
+                         VK_IMAGE_LAYOUT_GENERAL,
+                         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                         0,
+                         VK_PIPELINE_STAGE_2_CLEAR_BIT,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+            VkClearColorValue clear{};
+            clear.float32[0] = 1.0F;
+            VkImageSubresourceRange range{};
+            range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            range.levelCount = VK_REMAINING_MIP_LEVELS;
+            range.layerCount = VK_REMAINING_ARRAY_LAYERS;
+            vkCmdClearColorImage(commandBuffer, image->handle, VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &range);
+        }
+
+        VkMemoryBarrier2 clearBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        clearBarrier.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+        clearBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        clearBarrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        clearBarrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+        VkDependencyInfo clearDependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        clearDependency.memoryBarrierCount = 1;
+        clearDependency.pMemoryBarriers = &clearBarrier;
+        vkCmdPipelineBarrier2(commandBuffer, &clearDependency);
+        ssaoNeedsClear = false;
+    }
+
+    // 그림자 아틀라스는 장면 패스보다 먼저 채워야 한다.
+    if (!shadowViews.empty()) {
+        recordShadowPass(commandBuffer, batches);
+    }
+
     imageBarrier(commandBuffer,
                  targets.color.handle,
                  VK_IMAGE_ASPECT_COLOR_BIT,
@@ -1480,6 +1986,8 @@ void Renderer::recordCommands(Frame& frame,
                                               geometry.vertexMeshletBuffer.address,
                                               frame.meshletGroupBuffer.address,
                                               frame.jointBuffer.address,
+                                              frame.lightBuffer.address,
+                                              frame.shadowMatrixBuffer.address,
                                               0,
                                               debugMode};
         vkCmdBindDescriptorSets(
@@ -1625,6 +2133,13 @@ void Renderer::recordCommands(Frame& frame,
                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
         recordHzbPass(commandBuffer);
+        // SSAO 도 같은 깊이를 읽는다. 결과는 다음 프레임의 셰이딩이 쓴다.
+        //
+        // ponytail: 한 프레임 늦은 깊이라 카메라가 빠르게 움직이면 차폐가 살짝 밀린다. 정확히
+        // 하려면 불투명 깊이 선행 패스를 넣고 같은 프레임 안에서 계산해야 한다.
+        if (useSsao) {
+            recordSsaoPass(commandBuffer, frame);
+        }
     }
 
     // 5) HDR 색상을 톤 매핑해 표시 이미지에 옮긴다. 편집기 뷰포트가 이 이미지를 그대로 보여준다.

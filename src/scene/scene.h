@@ -40,6 +40,29 @@ private:
     std::vector<glm::mat4> nodeWorlds;
 };
 
+enum class LightType : uint32_t {
+    DIRECTIONAL = 0,
+    POINT = 1,
+    SPOT = 2,
+    AREA = 3,
+};
+
+// 조명은 오브젝트에 달리는 부품이다. 위치와 방향은 오브젝트의 세계 변환에서 가져오며,
+// 방향광과 스폿광은 -Z 를 앞으로 본다.
+struct Light {
+    LightType type = LightType::DIRECTIONAL;
+    glm::vec3 color{1.0F};
+    float intensity = 3.0F;
+    // 점광, 스폿광, 영역광이 닿는 거리.
+    float range = 20.0F;
+    // 스폿광 원뿔의 안쪽과 바깥쪽 반각(도).
+    float innerConeDegrees = 20.0F;
+    float outerConeDegrees = 30.0F;
+    // 영역광 직사각형의 가로세로 크기.
+    glm::vec2 size{2.0F, 2.0F};
+    bool castsShadow = true;
+};
+
 struct Object {
     std::string name;
     // 부모 기준 지역 변환. 세계 변환은 Scene::worldMatrix 가 부모를 거슬러 올라가 만든다.
@@ -52,13 +75,19 @@ struct Object {
     // Scene::animators 인덱스와 그 스켈레톤의 스킨 번호. 없으면 -1.
     int32_t animator = -1;
     int32_t skin = -1;
+    // Scene::lights 인덱스. 조명이 아니면 -1.
+    int32_t light = -1;
 };
 
 struct Scene {
     std::string name;
     std::vector<Object> objects;
     std::vector<Animator> animators;
+    std::vector<Light> lights;
     Camera camera;
+    // 조명이 닿지 않는 곳을 채우는 균일 환경광.
+    glm::vec3 ambientColor{0.25F};
+    float ambientIntensity = 1.0F;
 
     // 애니메이션 시간을 진행시키고 조인트 행렬을 다시 만든다.
     void update(float deltaSeconds);

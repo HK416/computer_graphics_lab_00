@@ -82,6 +82,9 @@ set(shader_sources
     shaders/upscale.frag
     shaders/mesh.task
     shaders/mesh.mesh
+    shaders/depth_only.vert
+    shaders/ssao.comp
+    shaders/ssao_blur.comp
     shaders/cull_meshlets.comp
     shaders/hzb_reduce.comp
     shaders/pathtrace.rgen

@@ -52,7 +52,7 @@ private:
     void drawHierarchyNode(scene::Scene& active, int index);
     void buildInspector(scene::Scene& scene, const gfx::GeometryStore& geometry);
     void buildSceneView(scene::Scene& active);
-    void buildRenderSettings(float deltaSeconds);
+    void buildRenderSettings(scene::Scene& active, float deltaSeconds);
     void buildRenderTargets();
     void buildConsole();
     VkDescriptorSet textureFor(VkImageView view, VkImageLayout layout);

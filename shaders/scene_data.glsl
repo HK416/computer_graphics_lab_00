@@ -14,6 +14,8 @@ layout(push_constant) uniform PushConstants {
     VertexMeshletBuffer vertexMeshlets;
     MeshletGroupBuffer meshletGroups;
     JointBuffer joints;
+    LightBuffer lights;
+    ShadowMatrixBuffer shadowMatrices;
     // 재질 경로마다 meshlet 그룹 구간이 달라 디스패치 직전에 갱신한다.
     uint meshletGroupBase;
     uint debugMode;

@@ -5,6 +5,7 @@
 #include <string>
 #include <utility>
 
+#include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/quaternion.hpp>
 #include <imgui.h>
@@ -300,6 +301,10 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
         ImGui::OpenPopup("메쉬 선택");
     }
     ImGui::SameLine();
+    if (ImGui::Button("조명")) {
+        ImGui::OpenPopup("조명 선택");
+    }
+    ImGui::SameLine();
     if (ImGui::Button("모델")) {
         // 팝업을 열 때마다 다시 훑는다. 실행 중에 파일이 늘어날 수 있다.
         modelFiles.clear();
@@ -339,6 +344,32 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
                 active.objects.push_back(std::move(object));
                 selectedObject = static_cast<int>(active.objects.size()) - 1;
             }
+        }
+        ImGui::EndPopup();
+    }
+
+    if (ImGui::BeginPopup("조명 선택")) {
+        constexpr std::array<const char*, 4> LIGHT_NAMES{"방향광", "점광", "스폿광", "영역광"};
+        for (uint32_t type = 0; type < LIGHT_NAMES.size(); ++type) {
+            if (!ImGui::Selectable(LIGHT_NAMES[type])) {
+                continue;
+            }
+            scene::Light light;
+            light.type = static_cast<scene::LightType>(type);
+            active.lights.push_back(light);
+
+            scene::Object object;
+            object.name = LIGHT_NAMES[type];
+            object.light = static_cast<int32_t>(active.lights.size()) - 1;
+            if (light.type == scene::LightType::DIRECTIONAL) {
+                object.transform.rotation = glm::quat(glm::radians(glm::vec3{-50.0F, -30.0F, 0.0F}));
+            } else {
+                // 카메라 앞쪽에 놓고 보고 있는 쪽을 비추게 한다.
+                object.transform.position = active.camera.position + active.camera.forward();
+                object.transform.rotation = glm::quatLookAt(active.camera.forward(), glm::vec3{0.0F, 1.0F, 0.0F});
+            }
+            active.objects.push_back(std::move(object));
+            selectedObject = static_cast<int>(active.objects.size()) - 1;
         }
         ImGui::EndPopup();
     }
@@ -422,6 +453,33 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         ImGui::DragFloat3("크기", glm::value_ptr(object.transform.scale), 0.01F, 0.001F, 1000.0F);
         if (object.parent >= 0) {
             ImGui::TextDisabled("부모: %s", active.objects[static_cast<size_t>(object.parent)].name.c_str());
+        }
+    }
+
+    // 조명 속성. 위치와 방향은 변환에서 오므로 여기서는 나머지만 다룬다.
+    if (object.light >= 0 && object.light < static_cast<int>(active.lights.size()) &&
+        ImGui::CollapsingHeader("조명", ImGuiTreeNodeFlags_DefaultOpen)) {
+        scene::Light& light = active.lights[static_cast<size_t>(object.light)];
+        constexpr std::array<const char*, 4> LIGHT_NAMES{"방향광", "점광", "스폿광", "영역광"};
+        auto typeIndex = static_cast<int>(light.type);
+        if (ImGui::Combo("종류", &typeIndex, LIGHT_NAMES.data(), static_cast<int>(LIGHT_NAMES.size()))) {
+            light.type = static_cast<scene::LightType>(typeIndex);
+        }
+        ImGui::ColorEdit3("색", glm::value_ptr(light.color));
+        ImGui::DragFloat("세기", &light.intensity, 0.05F, 0.0F, 1000.0F);
+        if (light.type != scene::LightType::DIRECTIONAL) {
+            ImGui::DragFloat("거리", &light.range, 0.1F, 0.01F, 10000.0F);
+        }
+        if (light.type == scene::LightType::SPOT) {
+            ImGui::DragFloat("안쪽 각", &light.innerConeDegrees, 0.5F, 0.0F, 89.0F);
+            ImGui::DragFloat("바깥 각", &light.outerConeDegrees, 0.5F, 0.0F, 89.0F);
+            light.innerConeDegrees = std::min(light.innerConeDegrees, light.outerConeDegrees);
+        }
+        if (light.type == scene::LightType::AREA) {
+            ImGui::DragFloat2("크기", glm::value_ptr(light.size), 0.05F, 0.01F, 1000.0F);
+            ImGui::TextDisabled("영역광은 그림자를 만들지 않습니다");
+        } else {
+            ImGui::Checkbox("그림자", &light.castsShadow);
         }
     }
 
@@ -568,7 +626,7 @@ void Editor::buildSceneView(scene::Scene& active) {
     ImGui::End();
 }
 
-void Editor::buildRenderSettings(float deltaSeconds) {
+void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     if (!ImGui::Begin(WINDOW_SETTINGS)) {
         ImGui::End();
         return;
@@ -584,6 +642,25 @@ void Editor::buildRenderSettings(float deltaSeconds) {
 
     ImGui::SliderFloat("노출", &renderer.exposure, 0.05F, 8.0F, "%.2f");
     ImGui::Checkbox("와이어프레임", &renderer.wireframe);
+
+    ImGui::SeparatorText("조명");
+    ImGui::Text("장면 조명 %zu개", active.lights.size());
+    ImGui::ColorEdit3("환경광", glm::value_ptr(active.ambientColor));
+    ImGui::SliderFloat("환경광 세기", &active.ambientIntensity, 0.0F, 4.0F, "%.2f");
+    ImGui::Checkbox("그림자", &renderer.shadowsEnabled);
+    ImGui::TextDisabled("그림자 시점 %u개까지 (방향광/스폿광 1, 점광 6)", gfx::MAX_SHADOW_VIEWS);
+
+    ImGui::SeparatorText("SSAO");
+    ImGui::Checkbox("사용", &renderer.useSsao);
+    ImGui::BeginDisabled(!renderer.useSsao);
+    ImGui::SliderFloat("반지름", &renderer.ssaoRadius, 0.005F, 0.3F, "장면의 %.3f배");
+    ImGui::SliderFloat("세기", &renderer.ssaoIntensity, 0.0F, 3.0F, "%.2f");
+    ImGui::SliderFloat("편향", &renderer.ssaoBias, 0.0F, 0.02F, "%.4f");
+    int samples = static_cast<int>(renderer.ssaoSamples);
+    if (ImGui::SliderInt("표본", &samples, 4, 64)) {
+        renderer.ssaoSamples = static_cast<uint32_t>(samples);
+    }
+    ImGui::EndDisabled();
 
     ImGui::SeparatorText("컬링과 LOD");
     ImGui::Checkbox("컴퓨트 컬링", &renderer.useComputeCulling);
@@ -759,7 +836,7 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
     buildHierarchy(scenes, geometry);
     buildInspector(scenes.active(), geometry);
     buildSceneView(scenes.active());
-    buildRenderSettings(deltaSeconds);
+    buildRenderSettings(scenes.active(), deltaSeconds);
     buildRenderTargets();
     buildConsole();
 

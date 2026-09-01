@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <glm/mat4x4.hpp>
+#include <glm/vec4.hpp>
 #include <vulkan/vulkan.h>
 
 #include "gfx/lod_network.h"
@@ -29,6 +30,22 @@ class GeometryStore;
 
 inline constexpr uint32_t FRAMES_IN_FLIGHT = 2;
 inline constexpr uint32_t ALPHA_MODE_COUNT = 3;
+
+// shaders/scene_types.glsl 의 Light 와 배치가 같아야 한다.
+struct GpuLight {
+    glm::vec4 positionRange;      // xyz 위치, w 도달 거리
+    glm::vec4 directionIntensity; // xyz 앞 방향, w 세기
+    glm::vec4 colorType;          // xyz 색, w 종류
+    glm::vec4 coneSize;           // xy 원뿔 cos(안/바깥), zw 영역광 반크기
+    glm::vec4 rightShadow;        // xyz 가로축, w 그림자 아틀라스 첫 타일(-1 이면 없음)
+    glm::vec4 up;                 // xyz 세로축
+};
+
+// 그림자 아틀라스 한 변의 픽셀 수. shaders/shadow.glsl 의 SHADOW_ATLAS_SIZE 와 같아야 한다.
+inline constexpr uint32_t SHADOW_ATLAS_SIZE = 4096;
+inline constexpr uint32_t SHADOW_TILES_PER_SIDE = 4;
+inline constexpr uint32_t SHADOW_TILE_SIZE = SHADOW_ATLAS_SIZE / SHADOW_TILES_PER_SIDE;
+inline constexpr uint32_t MAX_SHADOW_VIEWS = SHADOW_TILES_PER_SIDE * SHADOW_TILES_PER_SIDE;
 
 // 간접 그리기 버퍼 안의 연속 구간. 재질 경로와 면 방향 조합마다 하나씩 둔다.
 struct DrawBatch {
@@ -72,6 +89,17 @@ struct RenderTargets {
     Image present;    // 표시 해상도. 편집기 뷰포트가 그대로 보여준다.
     // 이전 프레임 깊이로 만든 계층적 Z 버퍼. 오클루전 컬링이 읽는다.
     Image hzb;
+    // 조명별 그림자 깊이를 담는 타일 아틀라스. 화면 크기와 무관해 한 번만 만든다.
+    Image shadowAtlas;
+    uint32_t shadowAtlasSlot = 0;
+    // 반해상도 SSAO. 잡음이 많아 흐린 결과를 따로 둔다.
+    Image ssaoRaw;
+    Image ssao;
+    VkExtent2D ssaoExtent{};
+    uint32_t ssaoRawSlot = 0;
+    uint32_t ssaoRawStorageSlot = 0;
+    uint32_t ssaoSlot = 0;
+    uint32_t ssaoStorageSlot = 0;
     // 경로 추적 누적 버퍼. 카메라가 멈춰 있는 동안 표본을 쌓는다.
     Image pathAccumulation;
     uint32_t pathAccumulationStorageSlot = 0;
@@ -142,6 +170,17 @@ public:
     // 허용할 화면 공간 오차(픽셀). 클수록 낮은 단계를 고른다.
     float lodErrorThreshold = 1.0F;
 
+    // 그림자. 방향광과 스폿광은 시점 하나, 점광은 여섯 면을 아틀라스 타일에 담는다.
+    bool shadowsEnabled = true;
+
+    // 화면 공간 주변광 차폐.
+    bool useSsao = true;
+    // 장면 반지름에 대한 비율. 장면 크기가 제각각이라 절대 길이로 두지 않는다.
+    float ssaoRadius = 0.04F;
+    float ssaoIntensity = 1.0F;
+    float ssaoBias = 0.002F;
+    uint32_t ssaoSamples = 16;
+
     // GPU 컴퓨트가 meshlet 단위로 컬링하고 간접 그리기 명령을 만든다.
     bool useComputeCulling = true;
     bool frustumCulling = true;
@@ -184,6 +223,10 @@ private:
         // 스킨 인스턴스의 조인트 행렬을 이어 붙인다. 인스턴스마다 jointOffset 으로 자기 구간을 찾는다.
         Buffer jointBuffer;
         uint32_t jointCapacity = 0;
+        // 장면의 조명과 그림자 시점 행렬. 둘 다 매 프레임 다시 채운다.
+        Buffer lightBuffer;
+        Buffer shadowMatrixBuffer;
+        uint32_t lightCapacity = 0;
         uint32_t instanceCapacity = 0;
         uint32_t groupCapacity = 0;
         uint32_t meshletDrawCapacity = 0;
@@ -201,7 +244,14 @@ private:
     void reserveMeshletGroups(Frame& frame, uint32_t groupCount);
     void reserveMeshletDraws(Frame& frame, uint32_t drawCount);
     void reserveJoints(Frame& frame, uint32_t jointCount);
+    void reserveLights(Frame& frame, uint32_t lightCount);
+    // 장면의 조명을 GPU 배치로 옮기고 그림자 시점을 정한다.
+    void buildLights(Frame& frame, const scene::Scene& scene);
     void createCullPipeline();
+    void createShadowPipeline();
+    void createSsaoPipelines();
+    void recordShadowPass(VkCommandBuffer commandBuffer, const FrameBatches& batches);
+    void recordSsaoPass(VkCommandBuffer commandBuffer, const Frame& frame);
     void recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches& batches);
     void recordHzbPass(VkCommandBuffer commandBuffer);
     void updateLodNetwork(const scene::Scene& scene, Frame& frame, float projectionScale);
@@ -225,6 +275,10 @@ private:
     bool oitTargetsValid = false;
     std::function<void(VkCommandBuffer)> uiCallback;
 
+    // buildLights 가 채운다. 그림자 패스와 푸시 상수가 함께 쓴다.
+    std::vector<GpuLight> frameLights;
+    std::vector<glm::mat4> shadowViews;
+
     std::array<Frame, FRAMES_IN_FLIGHT> frames{};
     // 표시 완료 세마포어는 재사용 충돌을 피하려고 스왑체인 이미지마다 하나씩 둔다.
     std::vector<VkSemaphore> presentReady;
@@ -237,6 +291,15 @@ private:
     std::array<VkPipeline, ALPHA_MODE_COUNT> meshShaderPipelines{};
     PFN_vkCmdDrawMeshTasksIndirectEXT drawMeshTasksIndirect = nullptr;
     VkShaderStageFlags scenePushStages = 0;
+    VkPipelineLayout depthPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline shadowPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout ssaoPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline ssaoPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout ssaoBlurPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
+    // buildLights 가 재는 장면 반지름. SSAO 반지름을 장면 크기에 맞추는 데 쓴다.
+    float sceneRadius = 1.0F;
+    bool ssaoNeedsClear = true;
     VkPipelineLayout cullPipelineLayout = VK_NULL_HANDLE;
     VkPipeline cullPipeline = VK_NULL_HANDLE;
     VkPipelineLayout hzbPipelineLayout = VK_NULL_HANDLE;

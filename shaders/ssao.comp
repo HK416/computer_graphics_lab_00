@@ -1,0 +1,108 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+#include "scene_types.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(push_constant) uniform SsaoPushConstants {
+    CameraBuffer camera;
+    uint depthTexture;
+    uint occlusionStorage;
+    ivec2 size;
+    float radius;
+    float intensity;
+    float bias;
+    uint sampleCount;
+}
+ssao;
+
+// 화면 좌표와 깊이에서 월드 위치를 되돌린다. 역 뷰프로젝션 하나면 되므로 시야 공간을 따로 두지 않는다.
+vec3 worldFromDepth(Camera camera, vec2 uv, float depth) {
+    vec4 clip = camera.inverseViewProjection * vec4(uv * 2.0 - 1.0, depth, 1.0);
+    return clip.xyz / clip.w;
+}
+
+float hash(vec2 seed) {
+    return fract(sin(dot(seed, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+// 법선을 축으로 하는 반구에서 코사인 가중 표본을 뽑는다.
+vec3 hemisphereSample(vec3 normal, float u1, float u2) {
+    float radius = sqrt(u1);
+    float angle = 6.2831853 * u2;
+    vec3 tangent = normalize(abs(normal.y) < 0.99 ? cross(vec3(0.0, 1.0, 0.0), normal) : cross(vec3(1.0, 0.0, 0.0), normal));
+    vec3 bitangent = cross(normal, tangent);
+    return normalize(tangent * (radius * cos(angle)) + bitangent * (radius * sin(angle)) +
+                     normal * sqrt(max(1.0 - u1, 0.0)));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= ssao.size.x || pixel.y >= ssao.size.y) {
+        return;
+    }
+
+    Camera camera = ssao.camera.item;
+    vec2 texel = 1.0 / vec2(ssao.size);
+    vec2 uv = (vec2(pixel) + 0.5) * texel;
+
+    float depth = sampleBindless(ssao.depthTexture, uv).r;
+    // reverse-Z 라 0 은 무한히 먼 곳이다. 하늘에는 차폐가 없다.
+    if (depth <= 0.0) {
+        imageStore(bindlessStorageImages[nonuniformEXT(ssao.occlusionStorage)], pixel, vec4(1.0));
+        return;
+    }
+
+    vec3 position = worldFromDepth(camera, uv, depth);
+    // 컴퓨트에는 미분이 없어 이웃 텍셀에서 접평면을 만든다.
+    vec3 right = worldFromDepth(camera, uv + vec2(texel.x, 0.0), sampleBindless(ssao.depthTexture, uv + vec2(texel.x, 0.0)).r);
+    vec3 up = worldFromDepth(camera, uv + vec2(0.0, texel.y), sampleBindless(ssao.depthTexture, uv + vec2(0.0, texel.y)).r);
+    vec3 normal = cross(right - position, up - position);
+    if (dot(normal, normal) < 1e-12) {
+        imageStore(bindlessStorageImages[nonuniformEXT(ssao.occlusionStorage)], pixel, vec4(1.0));
+        return;
+    }
+    normal = normalize(normal);
+    vec3 toCamera = camera.position.xyz - position;
+    if (dot(normal, toCamera) < 0.0) {
+        normal = -normal;
+    }
+
+    float viewDistance = length(toCamera);
+    float rotation = hash(vec2(pixel)) * 6.2831853;
+    float occluded = 0.0;
+    for (uint i = 0; i < ssao.sampleCount; ++i) {
+        float u1 = (float(i) + 0.5) / float(ssao.sampleCount);
+        float u2 = fract(hash(vec2(pixel) + float(i)) + rotation);
+        // 가까운 표본을 더 촘촘히 둔다.
+        float scale = mix(0.1, 1.0, u1 * u1);
+        vec3 samplePosition = position + hemisphereSample(normal, u1, u2) * ssao.radius * scale;
+
+        vec4 clip = camera.viewProjection * vec4(samplePosition, 1.0);
+        if (clip.w <= 0.0) {
+            continue;
+        }
+        vec2 sampleUv = (clip.xy / clip.w) * 0.5 + 0.5;
+        if (any(lessThan(sampleUv, vec2(0.0))) || any(greaterThan(sampleUv, vec2(1.0)))) {
+            continue;
+        }
+
+        float sceneDepth = sampleBindless(ssao.depthTexture, sampleUv).r;
+        if (sceneDepth <= 0.0) {
+            continue;
+        }
+        vec3 scenePosition = worldFromDepth(camera, sampleUv, sceneDepth);
+        float sceneDistance = length(camera.position.xyz - scenePosition);
+        float sampleDistance = length(camera.position.xyz - samplePosition);
+
+        // 표본보다 앞에 무언가 있으면 가려진 것으로 본다. 너무 멀리 있는 것은 무시한다.
+        if (sceneDistance < sampleDistance - ssao.bias * viewDistance) {
+            occluded += smoothstep(0.0, 1.0, ssao.radius / max(sampleDistance - sceneDistance, 1e-4));
+        }
+    }
+
+    float occlusion = 1.0 - ssao.intensity * occluded / float(ssao.sampleCount);
+    imageStore(bindlessStorageImages[nonuniformEXT(ssao.occlusionStorage)], pixel, vec4(clamp(occlusion, 0.0, 1.0)));
+}

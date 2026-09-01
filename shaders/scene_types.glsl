@@ -100,6 +100,30 @@ struct Camera {
     vec4 position;
     // x: 근평면, y: 화면 오차 환산 배율, z: LOD 오차 임계값, w: 고정 LOD 단계(-1 이면 자동)
     vec4 parameters;
+    // 균일 환경광.
+    vec4 ambient;
+    // xy 렌더 해상도, zw 그 역수.
+    vec4 viewport;
+    // 깊이에서 월드 위치를 되돌릴 때 쓴다.
+    mat4 inverseViewProjection;
+    // x: 조명 수, y: 그림자 아틀라스 슬롯, z: SSAO 슬롯, w: 아틀라스 한 변의 타일 수.
+    // bindless 슬롯은 상위 8비트에 샘플러 번호가 들어가 float 로는 정확히 담기지 않으므로 정수로 둔다.
+    uvec4 shading;
+};
+
+#define LIGHT_TYPE_DIRECTIONAL 0u
+#define LIGHT_TYPE_POINT 1u
+#define LIGHT_TYPE_SPOT 2u
+#define LIGHT_TYPE_AREA 3u
+
+// 조명 하나. 위치와 축은 모두 월드 공간이며 렌더러가 오브젝트 변환에서 뽑아 채운다.
+struct Light {
+    vec4 positionRange;      // xyz 위치, w 도달 거리
+    vec4 directionIntensity; // xyz 앞 방향, w 세기
+    vec4 colorType;          // xyz 색, w 종류
+    vec4 coneSize;           // xy 원뿔 cos(안/바깥), zw 영역광 반크기
+    vec4 rightShadow;        // xyz 가로축, w 그림자 아틀라스 첫 타일(-1 이면 없음)
+    vec4 up;                 // xyz 세로축
 };
 
 // 간접 그리기 명령. VkDrawIndexedIndirectCommand 와 배치가 같다.
@@ -152,6 +176,12 @@ layout(buffer_reference, scalar) readonly buffer MeshletGroupBuffer {
     MeshletGroup items[];
 };
 layout(buffer_reference, scalar) readonly buffer JointBuffer {
+    mat4 items[];
+};
+layout(buffer_reference, scalar) readonly buffer LightBuffer {
+    Light items[];
+};
+layout(buffer_reference, scalar) readonly buffer ShadowMatrixBuffer {
     mat4 items[];
 };
 layout(buffer_reference, scalar) buffer DrawCommandBuffer {

@@ -22,6 +22,20 @@ constexpr float NANOSECONDS_PER_SECOND = 1.0e9F;
 // 캡처 전에 스왑체인 크기가 안정될 시간을 준다.
 constexpr uint64_t SCREENSHOT_FRAME = 8;
 
+// Unity 처럼 새 장면에는 방향광 하나를 기본으로 둔다.
+void addDefaultLight(scene::Scene& scene) {
+    scene::Light light;
+    light.type = scene::LightType::DIRECTIONAL;
+    scene.lights.push_back(light);
+
+    scene::Object object;
+    object.name = "방향광";
+    // -Z 가 앞이므로 위에서 비스듬히 내려오도록 돌려 둔다.
+    object.transform.rotation = glm::quat(glm::radians(glm::vec3{-50.0F, -30.0F, 0.0F}));
+    object.light = static_cast<int32_t>(scene.lights.size()) - 1;
+    scene.objects.push_back(std::move(object));
+}
+
 // 장면 전체가 화면에 들어오도록 카메라를 뒤로 물린다.
 void frameCamera(scene::Scene& scene, const gfx::GeometryStore& geometry) {
     glm::vec3 minimum{std::numeric_limits<float>::max()};
@@ -179,6 +193,7 @@ void Application::loadScenes() {
     // GPU 자원 생성은 순서를 지켜 한 스레드에서만 한다.
     for (asset::Model& model : models) {
         scene::Scene& created = scenes.create(model.name);
+        addDefaultLight(created);
         addModelToScene(model, created);
     }
     geometry->build();
