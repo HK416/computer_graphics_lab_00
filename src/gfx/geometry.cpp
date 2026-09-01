@@ -17,7 +17,16 @@ GeometryStore::~GeometryStore() {
     destroyBuffer(context, vertexBuffer);
 }
 
-uint32_t GeometryStore::addModel(const asset::Model& model) {
+namespace {
+uint32_t resolveTexture(uint32_t textureIndex, const std::vector<uint32_t>& textureSlots) {
+    if (textureIndex == asset::INVALID_TEXTURE || textureIndex >= textureSlots.size()) {
+        return asset::INVALID_TEXTURE;
+    }
+    return textureSlots[textureIndex];
+}
+} // namespace
+
+uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<uint32_t>& textureSlots) {
     auto firstMesh = static_cast<uint32_t>(meshes.size());
     auto materialBase = static_cast<uint32_t>(materials.size());
 
@@ -27,6 +36,13 @@ uint32_t GeometryStore::addModel(const asset::Model& model) {
         material.emissiveAndCutoff = glm::vec4{source.emissiveFactor, source.alphaCutoff};
         material.metallicFactor = source.metallicFactor;
         material.roughnessFactor = source.roughnessFactor;
+        material.normalScale = source.normalScale;
+        material.occlusionStrength = source.occlusionStrength;
+        material.baseColorTexture = resolveTexture(source.baseColorTexture, textureSlots);
+        material.metallicRoughnessTexture = resolveTexture(source.metallicRoughnessTexture, textureSlots);
+        material.normalTexture = resolveTexture(source.normalTexture, textureSlots);
+        material.occlusionTexture = resolveTexture(source.occlusionTexture, textureSlots);
+        material.emissiveTexture = resolveTexture(source.emissiveTexture, textureSlots);
         material.alphaMode = static_cast<uint32_t>(source.alphaMode);
         material.flags = source.doubleSided ? 1U : 0U;
         materials.push_back(material);

@@ -26,6 +26,7 @@ public:
 
 private:
     void beginRecording();
+    VkBuffer createStaging(const void* data, VkDeviceSize size, const char* debugName);
 
     Context& context;
     VkCommandPool transferPool = VK_NULL_HANDLE;

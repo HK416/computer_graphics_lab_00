@@ -1,9 +1,11 @@
 #version 460
 #include "scene_data.glsl"
 
-layout(location = 0) out vec3 outNormal;
-layout(location = 1) out vec2 outUv;
-layout(location = 2) flat out uint outMaterialIndex;
+layout(location = 0) out vec3 outWorldPosition;
+layout(location = 1) out vec3 outNormal;
+layout(location = 2) out vec4 outTangent;
+layout(location = 3) out vec2 outUv;
+layout(location = 4) flat out uint outMaterialIndex;
 
 void main() {
     Instance instance = pushConstants.instances.items[gl_InstanceIndex];
@@ -12,7 +14,11 @@ void main() {
 
     vec4 worldPosition = instance.model * vec4(vertex.position, 1.0);
     gl_Position = pushConstants.camera.item.viewProjection * worldPosition;
-    outNormal = mat3(instance.normalMatrix) * vertex.normal;
+
+    mat3 normalMatrix = mat3(instance.normalMatrix);
+    outWorldPosition = worldPosition.xyz;
+    outNormal = normalMatrix * vertex.normal;
+    outTangent = vec4(normalMatrix * vertex.tangent.xyz, vertex.tangent.w);
     outUv = vertex.uv;
     outMaterialIndex = mesh.materialIndex;
 }

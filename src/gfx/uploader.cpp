@@ -1,5 +1,6 @@
 #include "gfx/uploader.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "core/error.h"
@@ -35,10 +36,8 @@ Uploader::Uploader(Context& context) : context(context) {
 
     transferPool = createPool(context.device, context.queueFamilies.transfer);
     transferCommands = allocateCommands(context.device, transferPool);
-    if (needsOwnershipTransfer) {
-        graphicsPool = createPool(context.device, context.queueFamilies.graphics);
-        graphicsCommands = allocateCommands(context.device, graphicsPool);
-    }
+    graphicsPool = createPool(context.device, context.queueFamilies.graphics);
+    graphicsCommands = allocateCommands(context.device, graphicsPool);
 
     VkSemaphoreTypeCreateInfo typeInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
     typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -60,15 +59,21 @@ void Uploader::beginRecording() {
     if (recording) {
         return;
     }
-    VK_CHECK(vkResetCommandPool(context.device, transferPool, 0));
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VK_CHECK(vkResetCommandPool(context.device, transferPool, 0));
     VK_CHECK(vkBeginCommandBuffer(transferCommands, &beginInfo));
-    if (needsOwnershipTransfer) {
-        VK_CHECK(vkResetCommandPool(context.device, graphicsPool, 0));
-        VK_CHECK(vkBeginCommandBuffer(graphicsCommands, &beginInfo));
-    }
+    VK_CHECK(vkResetCommandPool(context.device, graphicsPool, 0));
+    VK_CHECK(vkBeginCommandBuffer(graphicsCommands, &beginInfo));
     recording = true;
+}
+
+VkBuffer Uploader::createStaging(const void* data, VkDeviceSize size, const char* debugName) {
+    Buffer staging =
+        createBuffer(context, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, MemoryLocation::HOST_WRITE, debugName);
+    std::memcpy(staging.mapped, data, size);
+    stagingBuffers.push_back(staging);
+    return staging.handle;
 }
 
 void Uploader::uploadBuffer(const Buffer& target, VkDeviceSize offset, const void* data, VkDeviceSize size) {
@@ -80,45 +85,43 @@ void Uploader::uploadBuffer(const Buffer& target, VkDeviceSize offset, const voi
     }
     beginRecording();
 
-    Buffer staging =
-        createBuffer(context, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, MemoryLocation::HOST_WRITE, "업로드 스테이징");
-    std::memcpy(staging.mapped, data, size);
+    VkBuffer staging = createStaging(data, size, "업로드 스테이징");
 
     VkBufferCopy2 region{VK_STRUCTURE_TYPE_BUFFER_COPY_2};
     region.dstOffset = offset;
     region.size = size;
     VkCopyBufferInfo2 copyInfo{VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2};
-    copyInfo.srcBuffer = staging.handle;
+    copyInfo.srcBuffer = staging;
     copyInfo.dstBuffer = target.handle;
     copyInfo.regionCount = 1;
     copyInfo.pRegions = &region;
     vkCmdCopyBuffer2(transferCommands, &copyInfo);
 
-    if (needsOwnershipTransfer) {
-        VkBufferMemoryBarrier2 release{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
-        release.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-        release.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        release.srcQueueFamilyIndex = context.queueFamilies.transfer;
-        release.dstQueueFamilyIndex = context.queueFamilies.graphics;
-        release.buffer = target.handle;
-        release.offset = offset;
-        release.size = size;
-
-        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-        dependency.bufferMemoryBarrierCount = 1;
-        dependency.pBufferMemoryBarriers = &release;
-        vkCmdPipelineBarrier2(transferCommands, &dependency);
-
-        VkBufferMemoryBarrier2 acquire = release;
-        acquire.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
-        acquire.srcAccessMask = 0;
-        acquire.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-        acquire.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
-        dependency.pBufferMemoryBarriers = &acquire;
-        vkCmdPipelineBarrier2(graphicsCommands, &dependency);
+    if (!needsOwnershipTransfer) {
+        return;
     }
 
-    stagingBuffers.push_back(staging);
+    VkBufferMemoryBarrier2 release{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
+    release.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    release.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    release.srcQueueFamilyIndex = context.queueFamilies.transfer;
+    release.dstQueueFamilyIndex = context.queueFamilies.graphics;
+    release.buffer = target.handle;
+    release.offset = offset;
+    release.size = size;
+
+    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.bufferMemoryBarrierCount = 1;
+    dependency.pBufferMemoryBarriers = &release;
+    vkCmdPipelineBarrier2(transferCommands, &dependency);
+
+    VkBufferMemoryBarrier2 acquire = release;
+    acquire.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+    acquire.srcAccessMask = 0;
+    acquire.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    acquire.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
+    dependency.pBufferMemoryBarriers = &acquire;
+    vkCmdPipelineBarrier2(graphicsCommands, &dependency);
 }
 
 void Uploader::uploadImage(const Image& target, const void* data, VkDeviceSize size, VkImageLayout finalLayout) {
@@ -127,10 +130,12 @@ void Uploader::uploadImage(const Image& target, const void* data, VkDeviceSize s
     }
     beginRecording();
 
-    Buffer staging = createBuffer(
-        context, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, MemoryLocation::HOST_WRITE, "이미지 업로드 스테이징");
-    std::memcpy(staging.mapped, data, size);
+    VkBuffer staging = createStaging(data, size, "이미지 업로드 스테이징");
 
+    uint32_t transferFamily = needsOwnershipTransfer ? context.queueFamilies.transfer : VK_QUEUE_FAMILY_IGNORED;
+    uint32_t graphicsFamily = needsOwnershipTransfer ? context.queueFamilies.graphics : VK_QUEUE_FAMILY_IGNORED;
+
+    // 전송 큐: 밉 0 을 채우고 그래픽스 큐로 소유권을 넘긴다.
     imageBarrier(transferCommands,
                  target.handle,
                  VK_IMAGE_ASPECT_COLOR_BIT,
@@ -146,43 +151,111 @@ void Uploader::uploadImage(const Image& target, const void* data, VkDeviceSize s
     region.imageSubresource.layerCount = target.arrayLayers;
     region.imageExtent = target.extent;
     VkCopyBufferToImageInfo2 copyInfo{VK_STRUCTURE_TYPE_COPY_BUFFER_TO_IMAGE_INFO_2};
-    copyInfo.srcBuffer = staging.handle;
+    copyInfo.srcBuffer = staging;
     copyInfo.dstImage = target.handle;
     copyInfo.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     copyInfo.regionCount = 1;
     copyInfo.pRegions = &region;
     vkCmdCopyBufferToImage2(transferCommands, &copyInfo);
 
-    uint32_t sourceFamily = needsOwnershipTransfer ? context.queueFamilies.transfer : VK_QUEUE_FAMILY_IGNORED;
-    uint32_t destinationFamily = needsOwnershipTransfer ? context.queueFamilies.graphics : VK_QUEUE_FAMILY_IGNORED;
-
     imageBarrier(transferCommands,
                  target.handle,
                  VK_IMAGE_ASPECT_COLOR_BIT,
                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 finalLayout,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                  VK_PIPELINE_STAGE_2_COPY_BIT,
                  VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                 needsOwnershipTransfer ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                 needsOwnershipTransfer ? 0 : VK_ACCESS_2_MEMORY_READ_BIT,
-                 sourceFamily,
-                 destinationFamily);
+                 VK_PIPELINE_STAGE_2_NONE,
+                 0,
+                 transferFamily,
+                 graphicsFamily);
 
-    if (needsOwnershipTransfer) {
+    // 밉 생성은 blit 이라 그래픽스 큐에서만 가능하다.
+    imageBarrier(graphicsCommands,
+                 target.handle,
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_NONE,
+                 0,
+                 VK_PIPELINE_STAGE_2_BLIT_BIT,
+                 VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 transferFamily,
+                 graphicsFamily);
+
+    auto levelWidth = static_cast<int32_t>(target.extent.width);
+    auto levelHeight = static_cast<int32_t>(target.extent.height);
+    for (uint32_t level = 1; level < target.mipLevels; ++level) {
         imageBarrier(graphicsCommands,
                      target.handle,
                      VK_IMAGE_ASPECT_COLOR_BIT,
                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                     finalLayout,
-                     VK_PIPELINE_STAGE_2_NONE,
-                     0,
-                     VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                     VK_ACCESS_2_MEMORY_READ_BIT,
-                     sourceFamily,
-                     destinationFamily);
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_BLIT_BIT,
+                     VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_BLIT_BIT,
+                     VK_ACCESS_2_TRANSFER_READ_BIT,
+                     VK_QUEUE_FAMILY_IGNORED,
+                     VK_QUEUE_FAMILY_IGNORED,
+                     level - 1,
+                     1);
+
+        int32_t nextWidth = std::max(levelWidth / 2, 1);
+        int32_t nextHeight = std::max(levelHeight / 2, 1);
+
+        VkImageBlit2 blit{VK_STRUCTURE_TYPE_IMAGE_BLIT_2};
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.mipLevel = level - 1;
+        blit.srcSubresource.layerCount = target.arrayLayers;
+        blit.srcOffsets[1] = {levelWidth, levelHeight, 1};
+        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.mipLevel = level;
+        blit.dstSubresource.layerCount = target.arrayLayers;
+        blit.dstOffsets[1] = {nextWidth, nextHeight, 1};
+
+        VkBlitImageInfo2 blitInfo{VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2};
+        blitInfo.srcImage = target.handle;
+        blitInfo.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        blitInfo.dstImage = target.handle;
+        blitInfo.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        blitInfo.regionCount = 1;
+        blitInfo.pRegions = &blit;
+        blitInfo.filter = VK_FILTER_LINEAR;
+        vkCmdBlitImage2(graphicsCommands, &blitInfo);
+
+        levelWidth = nextWidth;
+        levelHeight = nextHeight;
     }
 
-    stagingBuffers.push_back(staging);
+    if (target.mipLevels > 1) {
+        // 마지막 레벨을 뺀 나머지는 TRANSFER_SRC 상태이므로 두 번에 나누어 전이시킨다.
+        imageBarrier(graphicsCommands,
+                     target.handle,
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     finalLayout,
+                     VK_PIPELINE_STAGE_2_BLIT_BIT,
+                     VK_ACCESS_2_TRANSFER_READ_BIT,
+                     VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                     VK_ACCESS_2_MEMORY_READ_BIT,
+                     VK_QUEUE_FAMILY_IGNORED,
+                     VK_QUEUE_FAMILY_IGNORED,
+                     0,
+                     target.mipLevels - 1);
+    }
+    imageBarrier(graphicsCommands,
+                 target.handle,
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 finalLayout,
+                 VK_PIPELINE_STAGE_2_BLIT_BIT,
+                 VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                 VK_ACCESS_2_MEMORY_READ_BIT,
+                 VK_QUEUE_FAMILY_IGNORED,
+                 VK_QUEUE_FAMILY_IGNORED,
+                 target.mipLevels - 1,
+                 1);
 }
 
 void Uploader::flush() {
@@ -190,6 +263,7 @@ void Uploader::flush() {
         return;
     }
     VK_CHECK(vkEndCommandBuffer(transferCommands));
+    VK_CHECK(vkEndCommandBuffer(graphicsCommands));
 
     VkCommandBufferSubmitInfo transferCommandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
     transferCommandInfo.commandBuffer = transferCommands;
@@ -206,27 +280,23 @@ void Uploader::flush() {
     transferSubmit.pSignalSemaphoreInfos = &transferSignal;
     VK_CHECK(vkQueueSubmit2(context.transferQueue, 1, &transferSubmit, VK_NULL_HANDLE));
 
-    if (needsOwnershipTransfer) {
-        VK_CHECK(vkEndCommandBuffer(graphicsCommands));
+    VkSemaphoreSubmitInfo graphicsWait = transferSignal;
+    VkSemaphoreSubmitInfo graphicsSignal{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+    graphicsSignal.semaphore = timeline;
+    graphicsSignal.value = ++timelineValue;
+    graphicsSignal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 
-        VkSemaphoreSubmitInfo graphicsWait = transferSignal;
-        VkSemaphoreSubmitInfo graphicsSignal{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
-        graphicsSignal.semaphore = timeline;
-        graphicsSignal.value = ++timelineValue;
-        graphicsSignal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    VkCommandBufferSubmitInfo graphicsCommandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+    graphicsCommandInfo.commandBuffer = graphicsCommands;
 
-        VkCommandBufferSubmitInfo graphicsCommandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
-        graphicsCommandInfo.commandBuffer = graphicsCommands;
-
-        VkSubmitInfo2 graphicsSubmit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
-        graphicsSubmit.waitSemaphoreInfoCount = 1;
-        graphicsSubmit.pWaitSemaphoreInfos = &graphicsWait;
-        graphicsSubmit.commandBufferInfoCount = 1;
-        graphicsSubmit.pCommandBufferInfos = &graphicsCommandInfo;
-        graphicsSubmit.signalSemaphoreInfoCount = 1;
-        graphicsSubmit.pSignalSemaphoreInfos = &graphicsSignal;
-        VK_CHECK(vkQueueSubmit2(context.graphicsQueue, 1, &graphicsSubmit, VK_NULL_HANDLE));
-    }
+    VkSubmitInfo2 graphicsSubmit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    graphicsSubmit.waitSemaphoreInfoCount = 1;
+    graphicsSubmit.pWaitSemaphoreInfos = &graphicsWait;
+    graphicsSubmit.commandBufferInfoCount = 1;
+    graphicsSubmit.pCommandBufferInfos = &graphicsCommandInfo;
+    graphicsSubmit.signalSemaphoreInfoCount = 1;
+    graphicsSubmit.pSignalSemaphoreInfos = &graphicsSignal;
+    VK_CHECK(vkQueueSubmit2(context.graphicsQueue, 1, &graphicsSubmit, VK_NULL_HANDLE));
 
     VkSemaphoreWaitInfo waitInfo{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
     waitInfo.semaphoreCount = 1;

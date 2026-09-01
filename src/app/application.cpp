@@ -10,6 +10,7 @@
 
 #include "asset/model.h"
 #include "core/error.h"
+#include "gfx/uploader.h"
 
 namespace app {
 namespace {
@@ -60,15 +61,19 @@ Application::Application(const Options& options) : options(options) {
     }
 
     context = std::make_unique<gfx::Context>(window);
+    bindless = std::make_unique<gfx::BindlessTextures>(*context);
+    textures = std::make_unique<gfx::TextureCache>(*context, *bindless);
     geometry = std::make_unique<gfx::GeometryStore>(*context);
     loadScenes();
-    renderer = std::make_unique<gfx::Renderer>(*context, *geometry, window);
+    renderer = std::make_unique<gfx::Renderer>(*context, *geometry, *bindless, window);
 }
 
 Application::~Application() {
     // 렌더러가 쓰는 서피스는 윈도우보다 먼저 파괴되어야 한다.
     renderer.reset();
     geometry.reset();
+    textures.reset();
+    bindless.reset();
     context.reset();
     SDL_DestroyWindow(window);
     SDL_Quit();
@@ -89,9 +94,16 @@ void Application::loadScenes() {
     }
     std::ranges::sort(files);
 
+    gfx::Uploader uploader(*context);
     for (const std::filesystem::path& file : files) {
         asset::Model model = asset::loadGltf(file);
-        uint32_t meshBase = geometry->addModel(model);
+
+        std::vector<uint32_t> textureSlots;
+        textureSlots.reserve(model.textures.size());
+        for (const asset::Texture& texture : model.textures) {
+            textureSlots.push_back(textures->add(uploader, texture));
+        }
+        uint32_t meshBase = geometry->addModel(model, textureSlots);
 
         scene::Scene& created = scenes.create(model.name);
         created.objects.reserve(model.instances.size());
@@ -104,6 +116,7 @@ void Application::loadScenes() {
         }
     }
 
+    uploader.flush();
     geometry->build();
     for (size_t i = 0; i < scenes.count(); ++i) {
         scenes.setActive(i);

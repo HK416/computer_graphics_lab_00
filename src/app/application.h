@@ -3,9 +3,11 @@
 #include <filesystem>
 #include <memory>
 
+#include "gfx/bindless.h"
 #include "gfx/context.h"
 #include "gfx/geometry.h"
 #include "gfx/renderer.h"
+#include "gfx/texture.h"
 #include "scene/scene.h"
 
 struct SDL_Window;
@@ -32,6 +34,8 @@ private:
 
     SDL_Window* window = nullptr;
     std::unique_ptr<gfx::Context> context;
+    std::unique_ptr<gfx::BindlessTextures> bindless;
+    std::unique_ptr<gfx::TextureCache> textures;
     std::unique_ptr<gfx::GeometryStore> geometry;
     std::unique_ptr<gfx::Renderer> renderer;
     scene::SceneManager scenes;

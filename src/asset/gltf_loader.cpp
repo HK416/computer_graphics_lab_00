@@ -1,10 +1,13 @@
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 #define CGLTF_IMPLEMENTATION
 #include <cgltf.h>
+#include <glm/geometric.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <spdlog/spdlog.h>
+#include <stb_image.h>
 
 #include "asset/model.h"
 #include "core/error.h"
@@ -48,6 +51,45 @@ void generateNormals(std::vector<Vertex>& vertices, const std::vector<uint32_t>&
     }
 }
 
+// 탄젠트가 없는데 노멀 맵을 쓰는 재질이 있으면 접선 공간이 깨지므로 UV 로부터 만들어 둔다.
+void generateTangents(std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices) {
+    std::vector<glm::vec3> tangents(vertices.size(), glm::vec3{0.0F});
+    std::vector<glm::vec3> bitangents(vertices.size(), glm::vec3{0.0F});
+
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        const Vertex& a = vertices[indices[i]];
+        const Vertex& b = vertices[indices[i + 1]];
+        const Vertex& c = vertices[indices[i + 2]];
+
+        glm::vec3 edge1 = b.position - a.position;
+        glm::vec3 edge2 = c.position - a.position;
+        glm::vec2 deltaUv1 = b.uv - a.uv;
+        glm::vec2 deltaUv2 = c.uv - a.uv;
+
+        float determinant = deltaUv1.x * deltaUv2.y - deltaUv2.x * deltaUv1.y;
+        if (std::abs(determinant) < 1e-12F) {
+            continue;
+        }
+        float inverse = 1.0F / determinant;
+        glm::vec3 tangent = (edge1 * deltaUv2.y - edge2 * deltaUv1.y) * inverse;
+        glm::vec3 bitangent = (edge2 * deltaUv1.x - edge1 * deltaUv2.x) * inverse;
+
+        for (size_t corner = 0; corner < 3; ++corner) {
+            tangents[indices[i + corner]] += tangent;
+            bitangents[indices[i + corner]] += bitangent;
+        }
+    }
+
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        glm::vec3 normal = vertices[i].normal;
+        glm::vec3 tangent = tangents[i] - normal * glm::dot(normal, tangents[i]);
+        float length = glm::length(tangent);
+        tangent = length > 1e-8F ? tangent / length : glm::vec3{1.0F, 0.0F, 0.0F};
+        float handedness = glm::dot(glm::cross(normal, tangent), bitangents[i]) < 0.0F ? -1.0F : 1.0F;
+        vertices[i].tangent = glm::vec4{tangent, handedness};
+    }
+}
+
 void computeBounds(Mesh& mesh) {
     if (mesh.vertices.empty()) {
         return;
@@ -76,23 +118,114 @@ AlphaMode toAlphaMode(cgltf_alpha_mode mode) {
     }
 }
 
-Material convertMaterial(const cgltf_material& source) {
+uint32_t textureIndex(const cgltf_texture_view& view, const cgltf_data& data) {
+    if (view.texture == nullptr) {
+        return INVALID_TEXTURE;
+    }
+    return static_cast<uint32_t>(view.texture - data.textures);
+}
+
+SamplerDesc toSamplerDesc(const cgltf_sampler* sampler) {
+    SamplerDesc desc;
+    if (sampler == nullptr) {
+        return desc;
+    }
+    if (sampler->mag_filter != 0) {
+        desc.magFilter = static_cast<uint32_t>(sampler->mag_filter);
+    }
+    if (sampler->min_filter != 0) {
+        desc.minFilter = static_cast<uint32_t>(sampler->min_filter);
+    }
+    if (sampler->wrap_s != 0) {
+        desc.wrapS = static_cast<uint32_t>(sampler->wrap_s);
+    }
+    if (sampler->wrap_t != 0) {
+        desc.wrapT = static_cast<uint32_t>(sampler->wrap_t);
+    }
+    return desc;
+}
+
+bool decodePixels(const uint8_t* bytes, size_t size, Texture& texture) {
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_uc* decoded = stbi_load_from_memory(bytes, static_cast<int>(size), &width, &height, &channels, 4);
+    if (decoded == nullptr) {
+        return false;
+    }
+    texture.width = static_cast<uint32_t>(width);
+    texture.height = static_cast<uint32_t>(height);
+    texture.pixels.assign(decoded, decoded + static_cast<size_t>(width) * height * 4);
+    stbi_image_free(decoded);
+    return true;
+}
+
+bool loadTexturePixels(const cgltf_image& image, const std::filesystem::path& baseDirectory, Texture& texture) {
+    if (image.buffer_view != nullptr && image.buffer_view->buffer->data != nullptr) {
+        const auto* bytes = static_cast<const uint8_t*>(image.buffer_view->buffer->data) + image.buffer_view->offset;
+        return decodePixels(bytes, image.buffer_view->size, texture);
+    }
+    if (image.uri == nullptr) {
+        return false;
+    }
+
+    std::filesystem::path file = baseDirectory / image.uri;
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_uc* decoded = stbi_load(file.string().c_str(), &width, &height, &channels, 4);
+    if (decoded == nullptr) {
+        return false;
+    }
+    texture.width = static_cast<uint32_t>(width);
+    texture.height = static_cast<uint32_t>(height);
+    texture.pixels.assign(decoded, decoded + static_cast<size_t>(width) * height * 4);
+    stbi_image_free(decoded);
+    return true;
+}
+
+// 같은 이미지라도 쓰이는 슬롯에 따라 sRGB 여부가 다르므로 재질을 먼저 훑어 색 공간을 정한다.
+std::vector<bool> collectSrgbFlags(const cgltf_data& data) {
+    std::vector<bool> srgb(data.textures_count, false);
+    for (cgltf_size i = 0; i < data.materials_count; ++i) {
+        const cgltf_material& material = data.materials[i];
+        if (material.has_pbr_metallic_roughness != 0) {
+            uint32_t index = textureIndex(material.pbr_metallic_roughness.base_color_texture, data);
+            if (index != INVALID_TEXTURE) {
+                srgb[index] = true;
+            }
+        }
+        uint32_t emissive = textureIndex(material.emissive_texture, data);
+        if (emissive != INVALID_TEXTURE) {
+            srgb[emissive] = true;
+        }
+    }
+    return srgb;
+}
+
+Material convertMaterial(const cgltf_material& source, const cgltf_data& data) {
     Material material;
     material.name = source.name != nullptr ? source.name : "재질";
     material.alphaMode = toAlphaMode(source.alpha_mode);
     material.alphaCutoff = source.alpha_cutoff;
     material.doubleSided = source.double_sided != 0;
     material.emissiveFactor = glm::make_vec3(source.emissive_factor);
+    material.normalScale = source.normal_texture.scale;
+    material.occlusionStrength = source.occlusion_texture.scale;
+    material.normalTexture = textureIndex(source.normal_texture, data);
+    material.occlusionTexture = textureIndex(source.occlusion_texture, data);
+    material.emissiveTexture = textureIndex(source.emissive_texture, data);
     if (source.has_pbr_metallic_roughness != 0) {
         material.baseColorFactor = glm::make_vec4(source.pbr_metallic_roughness.base_color_factor);
         material.metallicFactor = source.pbr_metallic_roughness.metallic_factor;
         material.roughnessFactor = source.pbr_metallic_roughness.roughness_factor;
+        material.baseColorTexture = textureIndex(source.pbr_metallic_roughness.base_color_texture, data);
+        material.metallicRoughnessTexture =
+            textureIndex(source.pbr_metallic_roughness.metallic_roughness_texture, data);
     }
     return material;
 }
 
-// glTF 의 mesh 는 프리미티브를 여러 개 가질 수 있고 프리미티브마다 재질이 다르다.
-// 렌더러는 프리미티브 단위로 그리므로 여기서 평탄화한다.
 struct PrimitiveRange {
     uint32_t first = 0;
     uint32_t count = 0;
@@ -118,8 +251,6 @@ void appendPrimitive(Model& model, const cgltf_data& data, const cgltf_primitive
         readFloats(uvs, i, glm::value_ptr(vertex.uv), 2);
         if (tangents != nullptr) {
             readFloats(tangents, i, glm::value_ptr(vertex.tangent), 4);
-        } else {
-            vertex.tangent = glm::vec4{1.0F, 0.0F, 0.0F, 1.0F};
         }
     }
 
@@ -137,6 +268,9 @@ void appendPrimitive(Model& model, const cgltf_data& data, const cgltf_primitive
 
     if (normals == nullptr) {
         generateNormals(mesh.vertices, mesh.indices);
+    }
+    if (tangents == nullptr) {
+        generateTangents(mesh.vertices, mesh.indices);
     }
     computeBounds(mesh);
 
@@ -192,9 +326,24 @@ Model loadGltf(const std::filesystem::path& path) {
     Model model;
     model.name = path.stem().string();
 
+    std::filesystem::path baseDirectory = path.parent_path();
+    std::vector<bool> srgbFlags = collectSrgbFlags(*data);
+    model.textures.reserve(data->textures_count);
+    for (cgltf_size i = 0; i < data->textures_count; ++i) {
+        const cgltf_texture& source = data->textures[i];
+        Texture texture;
+        texture.name = source.name != nullptr ? source.name : "텍스처";
+        texture.srgb = srgbFlags[i];
+        texture.sampler = toSamplerDesc(source.sampler);
+        if (source.image == nullptr || !loadTexturePixels(*source.image, baseDirectory, texture)) {
+            spdlog::warn("텍스처를 해석하지 못했습니다: {} ({})", texture.name, model.name);
+        }
+        model.textures.push_back(std::move(texture));
+    }
+
     model.materials.reserve(data->materials_count + 1);
     for (cgltf_size i = 0; i < data->materials_count; ++i) {
-        model.materials.push_back(convertMaterial(data->materials[i]));
+        model.materials.push_back(convertMaterial(data->materials[i], *data));
     }
     // 재질이 지정되지 않은 프리미티브가 쓸 기본 재질을 마지막에 둔다.
     Material fallback;
@@ -231,10 +380,11 @@ Model loadGltf(const std::filesystem::path& path) {
     for (const Mesh& mesh : model.meshes) {
         triangleCount += mesh.indices.size() / 3;
     }
-    spdlog::info("glTF 적재: {} (메쉬 {}, 재질 {}, 인스턴스 {}, 삼각형 {})",
+    spdlog::info("glTF 적재: {} (메쉬 {}, 재질 {}, 텍스처 {}, 인스턴스 {}, 삼각형 {})",
                  model.name,
                  model.meshes.size(),
                  model.materials.size(),
+                 model.textures.size(),
                  model.instances.size(),
                  triangleCount);
     return model;

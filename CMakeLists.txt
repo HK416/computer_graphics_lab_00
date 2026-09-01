@@ -102,10 +102,12 @@ add_executable(cg_lab
     src/asset/gltf_loader.cpp
     src/core/error.cpp
     src/gfx/context.cpp
+    src/gfx/bindless.cpp
     src/gfx/geometry.cpp
     src/gfx/renderer.cpp
     src/gfx/resources.cpp
     src/gfx/stb_impl.cpp
+    src/gfx/texture.cpp
     src/gfx/swapchain.cpp
     src/gfx/uploader.cpp
     src/gfx/vma_impl.cpp

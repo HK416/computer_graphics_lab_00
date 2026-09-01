@@ -27,8 +27,17 @@ struct GpuMaterial {
     glm::vec4 emissiveAndCutoff; // xyz 방사, w 알파 컷오프
     float metallicFactor;
     float roughnessFactor;
+    float normalScale;
+    float occlusionStrength;
+    // bindless 슬롯 번호. 없으면 asset::INVALID_TEXTURE.
+    uint32_t baseColorTexture;
+    uint32_t metallicRoughnessTexture;
+    uint32_t normalTexture;
+    uint32_t occlusionTexture;
+    uint32_t emissiveTexture;
     uint32_t alphaMode;
     uint32_t flags; // bit 0: 양면
+    uint32_t padding;
 };
 
 struct GpuInstance {
@@ -47,7 +56,8 @@ public:
     GeometryStore& operator=(const GeometryStore&) = delete;
 
     // 모델을 누적하고 이 모델의 메쉬가 시작되는 전역 인덱스를 돌려준다.
-    uint32_t addModel(const asset::Model& model);
+    // textureSlots 는 model.textures 와 같은 순서의 bindless 슬롯 번호다.
+    uint32_t addModel(const asset::Model& model, const std::vector<uint32_t>& textureSlots);
     void build();
 
     const GpuMesh& mesh(uint32_t index) const { return meshes[index]; }

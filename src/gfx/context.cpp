@@ -157,6 +157,7 @@ std::vector<const char*> missingRequiredFeatures(const FeatureChain& f) {
     require(f.v12.shaderSampledImageArrayNonUniformIndexing, "shaderSampledImageArrayNonUniformIndexing");
     require(f.v12.shaderStorageBufferArrayNonUniformIndexing, "shaderStorageBufferArrayNonUniformIndexing");
     require(f.v12.descriptorBindingPartiallyBound, "descriptorBindingPartiallyBound");
+    require(f.v12.descriptorBindingUpdateUnusedWhilePending, "descriptorBindingUpdateUnusedWhilePending");
     require(f.v12.descriptorBindingVariableDescriptorCount, "descriptorBindingVariableDescriptorCount");
     require(f.v12.descriptorBindingSampledImageUpdateAfterBind, "descriptorBindingSampledImageUpdateAfterBind");
     require(f.v12.descriptorBindingStorageBufferUpdateAfterBind, "descriptorBindingStorageBufferUpdateAfterBind");
@@ -166,6 +167,7 @@ std::vector<const char*> missingRequiredFeatures(const FeatureChain& f) {
     require(f.v13.dynamicRendering, "dynamicRendering");
     require(f.v13.synchronization2, "synchronization2");
     require(f.v13.maintenance4, "maintenance4");
+    require(f.v13.shaderDemoteToHelperInvocation, "shaderDemoteToHelperInvocation");
     return missing;
 }
 
@@ -515,6 +517,7 @@ Context::Context(SDL_Window* window) {
     enabled.v12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
     enabled.v12.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
     enabled.v12.descriptorBindingPartiallyBound = VK_TRUE;
+    enabled.v12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
     enabled.v12.descriptorBindingVariableDescriptorCount = VK_TRUE;
     enabled.v12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     enabled.v12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
@@ -528,6 +531,7 @@ Context::Context(SDL_Window* window) {
     enabled.v13.dynamicRendering = VK_TRUE;
     enabled.v13.synchronization2 = VK_TRUE;
     enabled.v13.maintenance4 = VK_TRUE;
+    enabled.v13.shaderDemoteToHelperInvocation = VK_TRUE;
     enabled.v13.subgroupSizeControl = caps.subgroupSizeControl ? VK_TRUE : VK_FALSE;
     enabled.v13.computeFullSubgroups = caps.subgroupSizeControl ? VK_TRUE : VK_FALSE;
     enabled.mesh.meshShader = caps.meshShader ? VK_TRUE : VK_FALSE;

@@ -1,6 +1,7 @@
 #include "gfx/renderer.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -13,7 +14,9 @@
 #include <spdlog/spdlog.h>
 #include <stb_image_write.h>
 
+#include "asset/model.h"
 #include "core/error.h"
+#include "gfx/bindless.h"
 #include "gfx/context.h"
 #include "gfx/geometry.h"
 #include "gfx/swapchain.h"
@@ -69,13 +72,13 @@ VkShaderModule createShaderModule(VkDevice device, const std::string& name) {
 
 } // namespace
 
-Renderer::Renderer(Context& context, GeometryStore& geometry, SDL_Window* window)
-    : context(context), geometry(geometry) {
+Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& bindless, SDL_Window* window)
+    : context(context), geometry(geometry), bindless(bindless) {
     swapchain = std::make_unique<Swapchain>(context, window, vsync);
     createDepthImage();
     createFrames();
     createPresentSemaphores();
-    createMeshPipeline();
+    createMeshPipelines();
 
     VkSemaphoreTypeCreateInfo timelineInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
     timelineInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -86,7 +89,9 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, SDL_Window* window
 
 Renderer::~Renderer() {
     waitIdle();
-    vkDestroyPipeline(context.device, meshPipeline, nullptr);
+    for (VkPipeline pipeline : meshPipelines) {
+        vkDestroyPipeline(context.device, pipeline, nullptr);
+    }
     vkDestroyPipelineLayout(context.device, meshPipelineLayout, nullptr);
     vkDestroySemaphore(context.device, frameTimeline, nullptr);
     destroyPresentSemaphores();
@@ -174,18 +179,30 @@ void Renderer::destroyPresentSemaphores() {
     presentReady.clear();
 }
 
-void Renderer::createMeshPipeline() {
+void Renderer::createMeshPipelines() {
     VkPushConstantRange pushConstantRange{};
     pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushConstantRange.size = sizeof(ScenePushConstants);
 
+    VkDescriptorSetLayout bindlessLayout = bindless.layout();
     VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &bindlessLayout;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushConstantRange;
     VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &meshPipelineLayout));
 
     VkShaderModule vertexModule = createShaderModule(context.device, "mesh.vert.spv");
     VkShaderModule fragmentModule = createShaderModule(context.device, "mesh.frag.spv");
+
+    // 프래그먼트 셰이더의 알파 경로를 특수화 상수로 고정해, 불투명 경로에서는 discard 가 사라진다.
+    uint32_t alphaVariant = 0;
+    VkSpecializationMapEntry specializationEntry{0, 0, sizeof(uint32_t)};
+    VkSpecializationInfo specialization{};
+    specialization.mapEntryCount = 1;
+    specialization.pMapEntries = &specializationEntry;
+    specialization.dataSize = sizeof(alphaVariant);
+    specialization.pData = &alphaVariant;
 
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -196,6 +213,7 @@ void Renderer::createMeshPipeline() {
     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     stages[1].module = fragmentModule;
     stages[1].pName = "main";
+    stages[1].pSpecializationInfo = &specialization;
 
     VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
@@ -227,9 +245,10 @@ void Renderer::createMeshPipeline() {
     colorBlend.attachmentCount = 1;
     colorBlend.pAttachments = &blendAttachment;
 
-    VkDynamicState dynamicStates[]{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    // 양면 재질은 컬 모드만 다르므로 파이프라인을 늘리지 않고 동적 상태로 전환한다.
+    VkDynamicState dynamicStates[]{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_CULL_MODE};
     VkPipelineDynamicStateCreateInfo dynamicState{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    dynamicState.dynamicStateCount = 2;
+    dynamicState.dynamicStateCount = 3;
     dynamicState.pDynamicStates = dynamicStates;
 
     VkPipelineRenderingCreateInfo renderingInfo{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
@@ -250,7 +269,22 @@ void Renderer::createMeshPipeline() {
     pipelineInfo.pColorBlendState = &colorBlend;
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = meshPipelineLayout;
-    VK_CHECK(vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &meshPipeline));
+
+    for (uint32_t variant = 0; variant < ALPHA_MODE_COUNT; ++variant) {
+        alphaVariant = variant;
+        bool translucent = variant == static_cast<uint32_t>(asset::AlphaMode::TRANSLUCENT);
+        // 반투명은 깊이를 쓰지 않고 알파 블렌딩한다. 순서 독립 처리는 다음 단계에서 대체한다.
+        depthStencil.depthWriteEnable = translucent ? VK_FALSE : VK_TRUE;
+        blendAttachment.blendEnable = translucent ? VK_TRUE : VK_FALSE;
+        blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        VK_CHECK(vkCreateGraphicsPipelines(
+            context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &meshPipelines[variant]));
+    }
 
     vkDestroyShaderModule(context.device, fragmentModule, nullptr);
     vkDestroyShaderModule(context.device, vertexModule, nullptr);
@@ -265,31 +299,62 @@ void Renderer::recreateSwapchain() {
     resizeRequested = false;
 }
 
-uint32_t Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene) {
+DrawBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene) {
     reserveInstances(frame, static_cast<uint32_t>(scene.objects.size()));
 
     auto* instances = static_cast<GpuInstance*>(frame.instanceBuffer.mapped);
     auto* draws = static_cast<VkDrawIndexedIndirectCommand*>(frame.drawBuffer.mapped);
 
-    uint32_t drawCount = 0;
+    // 재질 경로와 면 방향 조합마다 간접 명령이 연속 구간을 이루도록 두 번 순회한다.
+    auto bucketOf = [this](const scene::Object& object) {
+        const asset::Material& material = geometry.material(geometry.mesh(object.meshIndex).materialIndex);
+        return std::pair<size_t, size_t>{static_cast<size_t>(material.alphaMode), material.doubleSided ? 1U : 0U};
+    };
+
+    DrawBatches batches{};
     for (const scene::Object& object : scene.objects) {
         if (!object.visible || object.meshIndex >= geometry.meshCount()) {
             continue;
         }
+        auto [mode, sided] = bucketOf(object);
+        ++batches[mode][sided].count;
+    }
+
+    uint32_t offset = 0;
+    for (auto& modeBatches : batches) {
+        for (DrawBatch& batch : modeBatches) {
+            batch.first = offset;
+            offset += batch.count;
+        }
+    }
+
+    std::array<std::array<uint32_t, 2>, ALPHA_MODE_COUNT> cursors{};
+    for (size_t mode = 0; mode < ALPHA_MODE_COUNT; ++mode) {
+        for (size_t sided = 0; sided < 2; ++sided) {
+            cursors[mode][sided] = batches[mode][sided].first;
+        }
+    }
+
+    for (const scene::Object& object : scene.objects) {
+        if (!object.visible || object.meshIndex >= geometry.meshCount()) {
+            continue;
+        }
+        auto [mode, sided] = bucketOf(object);
+        uint32_t slot = cursors[mode][sided]++;
+
         const GpuMesh& mesh = geometry.mesh(object.meshIndex);
         glm::mat4 model = object.transform.matrix();
 
-        instances[drawCount].model = model;
-        instances[drawCount].normalMatrix = glm::mat4(glm::inverseTranspose(glm::mat3(model)));
-        instances[drawCount].meshIndex = object.meshIndex;
+        instances[slot].model = model;
+        instances[slot].normalMatrix = glm::mat4(glm::inverseTranspose(glm::mat3(model)));
+        instances[slot].meshIndex = object.meshIndex;
 
-        draws[drawCount].indexCount = mesh.indexCount;
-        draws[drawCount].instanceCount = 1;
-        draws[drawCount].firstIndex = mesh.indexOffset;
-        draws[drawCount].vertexOffset = mesh.vertexOffset;
+        draws[slot].indexCount = mesh.indexCount;
+        draws[slot].instanceCount = 1;
+        draws[slot].firstIndex = mesh.indexOffset;
+        draws[slot].vertexOffset = mesh.vertexOffset;
         // 셰이더는 gl_InstanceIndex 로 인스턴스 배열을 참조한다.
-        draws[drawCount].firstInstance = drawCount;
-        ++drawCount;
+        draws[slot].firstInstance = slot;
     }
 
     auto* camera = static_cast<GpuCamera*>(frame.cameraBuffer.mapped);
@@ -297,10 +362,10 @@ uint32_t Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene) {
     camera->viewProjection = scene.camera.projectionMatrix(aspect) * scene.camera.viewMatrix();
     camera->position = glm::vec4{scene.camera.position, 1.0F};
 
-    return drawCount;
+    return batches;
 }
 
-void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, uint32_t drawCount) {
+void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, const DrawBatches& batches) {
     VkCommandBuffer commandBuffer = frame.commandBuffer;
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -357,22 +422,41 @@ void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, uint32_t drawCo
     scissor.extent = swapchain->extent;
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-    if (drawCount > 0) {
-        ScenePushConstants pushConstants{geometry.vertexBuffer.address,
-                                         geometry.meshBuffer.address,
-                                         frame.instanceBuffer.address,
-                                         geometry.materialBuffer.address,
-                                         frame.cameraBuffer.address};
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline);
-        vkCmdPushConstants(commandBuffer,
-                           meshPipelineLayout,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0,
-                           sizeof(pushConstants),
-                           &pushConstants);
-        vkCmdBindIndexBuffer(commandBuffer, geometry.indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexedIndirect(
-            commandBuffer, frame.drawBuffer.handle, 0, drawCount, sizeof(VkDrawIndexedIndirectCommand));
+    ScenePushConstants pushConstants{geometry.vertexBuffer.address,
+                                     geometry.meshBuffer.address,
+                                     frame.instanceBuffer.address,
+                                     geometry.materialBuffer.address,
+                                     frame.cameraBuffer.address};
+    VkDescriptorSet bindlessSet = bindless.set();
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+    vkCmdPushConstants(commandBuffer,
+                       meshPipelineLayout,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0,
+                       sizeof(pushConstants),
+                       &pushConstants);
+    vkCmdBindIndexBuffer(commandBuffer, geometry.indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
+
+    constexpr VkDeviceSize DRAW_STRIDE = sizeof(VkDrawIndexedIndirectCommand);
+    for (size_t mode = 0; mode < ALPHA_MODE_COUNT; ++mode) {
+        bool bound = false;
+        for (size_t sided = 0; sided < 2; ++sided) {
+            const DrawBatch& batch = batches[mode][sided];
+            if (batch.count == 0) {
+                continue;
+            }
+            if (!bound) {
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipelines[mode]);
+                bound = true;
+            }
+            vkCmdSetCullMode(commandBuffer, sided == 1 ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT);
+            vkCmdDrawIndexedIndirect(commandBuffer,
+                                     frame.drawBuffer.handle,
+                                     batch.first * DRAW_STRIDE,
+                                     batch.count,
+                                     static_cast<uint32_t>(DRAW_STRIDE));
+        }
     }
 
     vkCmdEndRendering(commandBuffer);
@@ -478,7 +562,7 @@ void Renderer::drawFrame(const scene::Scene& scene) {
         core::fatal("스왑체인 이미지 획득에 실패했습니다: {}", toString(acquireResult));
     }
 
-    uint32_t drawCount = buildDrawCommands(frame, scene);
+    DrawBatches batches = buildDrawCommands(frame, scene);
 
     if (!capturePath.empty()) {
         VkDeviceSize required = static_cast<VkDeviceSize>(swapchain->extent.width) * swapchain->extent.height * 4;
@@ -490,7 +574,7 @@ void Renderer::drawFrame(const scene::Scene& scene) {
     }
 
     VK_CHECK(vkResetCommandPool(context.device, frame.commandPool, 0));
-    recordCommands(frame, imageIndex, drawCount);
+    recordCommands(frame, imageIndex, batches);
 
     VkSemaphoreSubmitInfo waitSemaphore{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     waitSemaphore.semaphore = frame.imageAvailable;

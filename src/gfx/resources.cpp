@@ -134,7 +134,9 @@ void imageBarrier(VkCommandBuffer commandBuffer,
                   VkPipelineStageFlags2 destinationStage,
                   VkAccessFlags2 destinationAccess,
                   uint32_t sourceQueueFamily,
-                  uint32_t destinationQueueFamily) {
+                  uint32_t destinationQueueFamily,
+                  uint32_t baseMipLevel,
+                  uint32_t mipLevelCount) {
     VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
     barrier.srcStageMask = sourceStage;
     barrier.srcAccessMask = sourceAccess;
@@ -146,7 +148,8 @@ void imageBarrier(VkCommandBuffer commandBuffer,
     barrier.dstQueueFamilyIndex = destinationQueueFamily;
     barrier.image = image;
     barrier.subresourceRange.aspectMask = aspect;
-    barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+    barrier.subresourceRange.baseMipLevel = baseMipLevel;
+    barrier.subresourceRange.levelCount = mipLevelCount;
     barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 
     VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};

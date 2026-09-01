@@ -20,13 +20,22 @@ namespace gfx {
 
 struct Context;
 struct Swapchain;
+class BindlessTextures;
 class GeometryStore;
 
 inline constexpr uint32_t FRAMES_IN_FLIGHT = 2;
+inline constexpr uint32_t ALPHA_MODE_COUNT = 3;
+
+// 간접 그리기 버퍼 안의 연속 구간. 재질 경로와 면 방향 조합마다 하나씩 둔다.
+struct DrawBatch {
+    uint32_t first = 0;
+    uint32_t count = 0;
+};
+using DrawBatches = std::array<std::array<DrawBatch, 2>, ALPHA_MODE_COUNT>;
 
 class Renderer {
 public:
-    Renderer(Context& context, GeometryStore& geometry, SDL_Window* window);
+    Renderer(Context& context, GeometryStore& geometry, BindlessTextures& bindless, SDL_Window* window);
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
@@ -52,16 +61,17 @@ private:
     void createPresentSemaphores();
     void destroyPresentSemaphores();
     void createDepthImage();
-    void createMeshPipeline();
+    void createMeshPipelines();
     void recreateSwapchain();
     void reserveInstances(Frame& frame, uint32_t instanceCount);
-    // 장면을 순회하며 인스턴스와 간접 그리기 명령을 채우고 그린 인스턴스 수를 돌려준다.
-    uint32_t buildDrawCommands(Frame& frame, const scene::Scene& scene);
-    void recordCommands(Frame& frame, uint32_t imageIndex, uint32_t drawCount);
+    // 장면을 순회하며 인스턴스와 간접 그리기 명령을 재질 경로별 구간으로 채운다.
+    DrawBatches buildDrawCommands(Frame& frame, const scene::Scene& scene);
+    void recordCommands(Frame& frame, uint32_t imageIndex, const DrawBatches& batches);
     void writeCapture();
 
     Context& context;
     GeometryStore& geometry;
+    BindlessTextures& bindless;
     std::unique_ptr<Swapchain> swapchain;
     Image depthImage;
 
@@ -72,7 +82,7 @@ private:
     uint64_t frameIndex = 0;
 
     VkPipelineLayout meshPipelineLayout = VK_NULL_HANDLE;
-    VkPipeline meshPipeline = VK_NULL_HANDLE;
+    std::array<VkPipeline, ALPHA_MODE_COUNT> meshPipelines{};
 
     std::filesystem::path capturePath;
     Buffer captureBuffer;
