@@ -52,6 +52,8 @@ public:
 private:
     void buildDockspace();
     void buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStore& geometry);
+    // F 키로 선택한 오브젝트를 궤도 중심으로 옮긴다.
+    void focusSelected(scene::Scene& active, const gfx::GeometryStore& geometry);
     // 계층 패널의 노드 하나와 그 자식들을 그린다.
     void drawHierarchyNode(scene::Scene& active, int index);
     void buildInspector(scene::Scene& scene, const gfx::GeometryStore& geometry);

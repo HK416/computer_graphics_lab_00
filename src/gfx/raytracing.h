@@ -33,6 +33,8 @@ struct PathTraceOptions {
     // 반딧불이 표본을 자르는 상한.
     float radianceClamp = 8.0F;
     float skyIntensity = 1.0F;
+
+    bool operator==(const PathTraceOptions&) const = default;
 };
 
 class RayTracer {

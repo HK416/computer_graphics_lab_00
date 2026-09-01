@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <format>
 #include <string>
 #include <vector>
@@ -31,8 +32,16 @@ void configureLoaderPaths() {
         return;
     }
     std::string root = sdk;
+    // 레이어 매니페스트 위치는 배포판마다 다르다. 실제로 있는 디렉터리일 때만 지정한다. 없는 경로를
+    // 넣으면 로더가 시스템에 설치된 레이어까지 못 찾아 오히려 망가진다.
     if (SDL_getenv("VK_LAYER_PATH") == nullptr) {
-        SDL_setenv_unsafe("VK_LAYER_PATH", (root + "/share/vulkan/explicit_layer.d").c_str(), 1);
+        for (const char* candidate : {"/share/vulkan/explicit_layer.d", "/Bin", "/etc/vulkan/explicit_layer.d"}) {
+            std::error_code error;
+            if (std::filesystem::is_directory(root + candidate, error)) {
+                SDL_setenv_unsafe("VK_LAYER_PATH", (root + candidate).c_str(), 1);
+                break;
+            }
+        }
     }
 #if defined(__APPLE__)
     if (SDL_getenv("VK_ICD_FILENAMES") == nullptr && SDL_getenv("VK_DRIVER_FILES") == nullptr) {

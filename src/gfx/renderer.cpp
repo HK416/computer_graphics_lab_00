@@ -1847,7 +1847,16 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     glm::mat4 cameraViewProjection = scene.camera.projectionMatrix(aspect) * scene.camera.viewMatrix();
 
     buildLights(frame, scene);
-    buildShadowDraws(frame, batches, cameraViewProjection);
+    if (usePathTracing && rayTracer != nullptr) {
+        // 경로 추적은 그림자 아틀라스를 읽지 않는다. 시점마다 캐스터를 걸러 명령을 짜는 CPU 비용을
+        // 통째로 아끼고, 편집기 표시도 실제로 그리는 양과 어긋나지 않게 0 으로 둔다.
+        shadowBatches.clear();
+        shadowLayerDirty.assign(MAX_SHADOW_VIEWS, 0);
+        shadowDrawsIssued = 0;
+        shadowDrawsTotal = 0;
+    } else {
+        buildShadowDraws(frame, batches, cameraViewProjection);
+    }
 
     auto* camera = static_cast<GpuCamera*>(frame.cameraBuffer.mapped);
     camera->viewProjection = cameraViewProjection;
@@ -1876,8 +1885,12 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                                  1.0F / static_cast<float>(currentRenderExtent.height)};
     camera->inverseViewProjection = glm::inverse(camera->viewProjection);
 
-    // 카메라나 화면, 장면이 바뀌면 경로 추적 누적을 처음부터 다시 쌓는다.
-    if (camera->viewProjection != lastViewProjection || sceneChangedThisFrame) {
+    // 카메라나 화면, 장면, 경로 추적 설정이 바뀌면 누적을 처음부터 다시 쌓는다. 설정 변경을 빼면
+    // 수백 표본이 쌓인 뒤에는 새 표본이 1/N 밖에 못 섞여 화면이 멈춘 것처럼 보인다.
+    bool traceInputsChanged = pathTrace != lastPathTrace || useIbl != lastUseIbl;
+    lastPathTrace = pathTrace;
+    lastUseIbl = useIbl;
+    if (camera->viewProjection != lastViewProjection || sceneChangedThisFrame || traceInputsChanged) {
         lastViewProjection = camera->viewProjection;
         pathSampleCount = 0;
     }
@@ -2088,6 +2101,9 @@ void Renderer::recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches&
     vkCmdPipelineBarrier2(commandBuffer, &cullDependency);
 }
 
+// ponytail: 스킨 메쉬는 하위 가속 구조를 정점 원본으로 만들어 두므로 경로 추적에서는 바인드 포즈로
+// 굳어 있다. 게다가 재생 중인 애니메이터는 매 프레임 장면 리비전을 올려 누적을 계속 버리게 하므로
+// 화면이 1표본짜리 잡음으로 남는다. 제대로 하려면 스킨 결과를 버퍼로 뽑아 BLAS 를 다시 지어야 한다.
 void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, const scene::Scene& scene) {
     // 장면이 그대로면 가속 구조도 그대로다.
     if (sceneChangedThisFrame || !rayTracer->ready()) {
@@ -2259,7 +2275,10 @@ void Renderer::recordCommands(Frame& frame,
     // 환경 맵은 설정이 바뀔 때만 다시 굽는다. 래스터와 경로 추적이 같은 환경을 본다.
     {
         uint32_t environmentZone = frameProfiler.begin("환경", commandBuffer);
-        environment->update(commandBuffer, scene.environment, sunDirection);
+        if (environment->update(commandBuffer, scene.environment, sunDirection)) {
+            // 하늘이 바뀌었으면 쌓아 둔 경로 추적 표본은 옛 환경의 것이다.
+            pathSampleCount = 0;
+        }
         frameProfiler.end(environmentZone, commandBuffer);
     }
 

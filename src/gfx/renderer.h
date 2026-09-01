@@ -407,6 +407,10 @@ private:
     Buffer captureBuffer;
 
     std::unique_ptr<RayTracer> rayTracer;
+    // 누적을 언제 버려야 하는지 판단하려고 지난 프레임 값을 들고 있다. 카메라와 장면만 보면
+    // 렌더 설정을 바꿔도 화면이 그대로여서 멈춘 것처럼 보인다.
+    PathTraceOptions lastPathTrace{};
+    bool lastUseIbl = true;
     std::unique_ptr<EnvironmentMap> environment;
     // 첫 방향광의 진행 방향. 하늘의 태양을 그림자와 맞추는 데 쓴다.
     glm::vec3 sunDirection{0.0F, -1.0F, 0.0F};

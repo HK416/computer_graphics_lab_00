@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <!-- 프로세스의 ANSI 코드 페이지를 UTF-8 로 고정한다. 이게 없으면 한글이 섞인 경로에서
+       std::filesystem::path::string() 이 깨지거나 예외를 던지고, 그 문자열을 그대로 받는
+       fopen / cgltf / stb_image 가 파일을 못 연다. Windows 10 1903 이상에서 동작한다. -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+  <!-- 고해상도 디스플레이에서 창이 흐려지지 않게 한다. -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>

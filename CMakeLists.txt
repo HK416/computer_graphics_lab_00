@@ -182,6 +182,11 @@ add_executable(cg_lab
 
 add_dependencies(cg_lab cg_lab_shaders)
 
+# 한글이 섞인 경로에서 좁은 문자열 변환이 깨지지 않도록 프로세스 코드 페이지를 UTF-8 로 고정한다.
+if(WIN32)
+    target_sources(cg_lab PRIVATE platform/windows/cg_lab.manifest)
+endif()
+
 # 서드파티 단일 헤더 구현부는 경고 검사에서 제외한다.
 set_source_files_properties(src/gfx/vma_impl.cpp src/gfx/stb_impl.cpp src/asset/gltf_loader.cpp
     PROPERTIES COMPILE_OPTIONS "$<IF:$<BOOL:${MSVC}>,/w,-w>")
@@ -224,6 +229,7 @@ add_executable(cg_lab_animation_tests tests/animation_test.cpp src/asset/animati
 add_executable(cg_lab_camera_tests tests/camera_test.cpp src/scene/camera.cpp)
 add_executable(cg_lab_scene_tests tests/scene_test.cpp src/scene/scene.cpp src/asset/animation.cpp src/core/error.cpp)
 add_executable(cg_lab_scene_io_tests tests/scene_io_test.cpp src/scene/scene_io.cpp src/scene/scene.cpp
+    src/scene/camera.cpp
     src/asset/animation.cpp src/core/error.cpp)
 add_executable(cg_lab_profiler_tests tests/profiler_test.cpp src/gfx/profiler_math.cpp)
 add_executable(cg_lab_shadow_tests tests/shadow_test.cpp src/gfx/shadow_math.cpp)

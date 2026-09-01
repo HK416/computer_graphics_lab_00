@@ -18,6 +18,9 @@ scene::ModelTable makeTable() {
 scene::Scene makeScene() {
     scene::Scene scene;
     scene.name = "시험 장면";
+    scene.camera.mode = scene::CameraMode::FLY;
+    scene.camera.target = glm::vec3{1.0F, 3.0F, -2.0F};
+    scene.camera.distance = 12.5F;
     scene.ambientColor = glm::vec3{0.1F, 0.2F, 0.3F};
     scene.ambientIntensity = 0.75F;
     scene.environment.useHdr = true;
@@ -123,6 +126,11 @@ int main() {
     assert(std::abs(environment.zenithColor.b - 0.07F) < 1e-5F);
     assert(environment.horizonColor == scene::Environment{}.horizonColor && "적지 않은 값은 기본값이어야 한다");
     assert(std::abs(loaded.scene.camera.yawDegrees - 45.0F) < 1e-5F);
+
+    // 카메라 조작 방식도 장면과 함께 남아야 한다. 궤도 중심을 잃으면 다시 열 때 시점이 튄다.
+    assert(loaded.scene.camera.mode == scene::CameraMode::FLY);
+    assert(std::abs(loaded.scene.camera.distance - 12.5F) < 1e-5F);
+    assert(std::abs(loaded.scene.camera.target.y - 3.0F) < 1e-5F);
 
     // 한 번 더 돌려도 같은 문자열이어야 한다.
     scene::Scene rebuilt = loaded.scene;

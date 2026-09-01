@@ -1,12 +1,21 @@
 #include <cstdlib>
 #include <string_view>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #include <SDL3/SDL_main.h>
 #include <spdlog/spdlog.h>
 
 #include "app/application.h"
 
 int main(int argc, char* argv[]) {
+#if defined(_WIN32)
+    // 매니페스트의 activeCodePage 는 콘솔 출력 코드 페이지까지 바꾸지는 않는다. 로그가 한글이라
+    // 이걸 안 맞추면 cmd.exe 에 깨져 나온다.
+    SetConsoleOutputCP(CP_UTF8);
+#endif
     spdlog::set_pattern("[%H:%M:%S.%e] [%^%l%$] %v");
 #ifndef NDEBUG
     spdlog::set_level(spdlog::level::debug);

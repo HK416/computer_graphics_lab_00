@@ -672,6 +672,26 @@ void Editor::buildSceneView(scene::Scene& active) {
     if (ImGui::Button(gizmoMode == ImGuizmo::LOCAL ? "로컬" : "월드")) {
         gizmoMode = gizmoMode == ImGuizmo::LOCAL ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
     }
+
+    // 카메라 조작 방식. 기본은 궤도이고, 자유 모드는 1인칭처럼 날아다닌다.
+    ImGui::SameLine();
+    ImGui::TextUnformatted("|");
+    ImGui::SameLine();
+    bool orbit = active.camera.mode == scene::CameraMode::ORBIT;
+    if (ImGui::RadioButton("궤도", orbit)) {
+        active.camera.setMode(scene::CameraMode::ORBIT);
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("자유", !orbit)) {
+        active.camera.setMode(scene::CameraMode::FLY);
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled(orbit ? "(?) 우클릭 회전, 휠 확대, 가운데 단추 이동"
+                              : "(?) 우클릭 시선, WASD/방향키 이동, 휠 속도");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(orbit ? "선택한 오브젝트로 궤도 중심을 옮기려면 계층에서 F 를 누른다"
+                                : "Q/E 또는 PageUp/PageDown 으로 오르내리고, Shift 로 4배 빨라진다");
+    }
     ImGui::EndGroup();
 
     ImGui::End();
@@ -1011,6 +1031,30 @@ void Editor::buildConsole() {
     ImGui::End();
 }
 
+// F 키로 선택한 오브젝트를 궤도 중심으로 삼는다. 텍스트를 입력하는 중에는 받지 않는다.
+void Editor::focusSelected(scene::Scene& active, const gfx::GeometryStore& geometry) {
+    if (selectedObject < 0 || static_cast<size_t>(selectedObject) >= active.objects.size()) {
+        return;
+    }
+    if (ImGui::GetIO().WantTextInput || !ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+        return;
+    }
+
+    auto index = static_cast<uint32_t>(selectedObject);
+    glm::mat4 world = active.worldMatrix(index);
+    glm::vec3 center = glm::vec3(world[3]);
+    float radius = 1.0F;
+    if (active.objects[index].meshIndex < geometry.meshCount()) {
+        glm::vec4 sphere = geometry.mesh(active.objects[index].meshIndex).boundingSphere;
+        center = glm::vec3(world * glm::vec4{glm::vec3(sphere), 1.0F});
+        // 비균등 스케일은 가장 긴 축으로 보수적으로 잡는다.
+        radius = sphere.w * std::sqrt(std::max({glm::dot(glm::vec3(world[0]), glm::vec3(world[0])),
+                                                glm::dot(glm::vec3(world[1]), glm::vec3(world[1])),
+                                                glm::dot(glm::vec3(world[2]), glm::vec3(world[2]))}));
+    }
+    active.camera.focusOn(center, std::max(radius * 3.0F, 0.5F));
+}
+
 void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geometry, float deltaSeconds) {
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplSDL3_NewFrame();
@@ -1026,6 +1070,7 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
     buildRenderSettings(scenes.active(), deltaSeconds);
     buildRenderTargets();
     buildConsole();
+    focusSelected(scenes.active(), geometry);
 
     // 적재와 장면 전환은 지오메트리 버퍼를 다시 만들기 때문에 패널을 다 그린 뒤에 처리한다.
     if (!pendingModel.empty()) {

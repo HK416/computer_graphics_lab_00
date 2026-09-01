@@ -67,10 +67,14 @@ void frameCamera(scene::Scene& scene, const gfx::GeometryStore& geometry) {
 
     glm::vec3 center = (minimum + maximum) * 0.5F;
     float radius = glm::length(maximum - minimum) * 0.5F;
-    scene.camera.position = center + glm::vec3{0.0F, radius * 0.35F, -radius * 2.4F};
     scene.camera.yawDegrees = 90.0F;
     scene.camera.pitchDegrees = -8.0F;
     scene.camera.moveSpeed = std::max(radius, 0.5F);
+    // 궤도 중심을 장면 한가운데로 잡는다. 자유 모드였다면 위치만 같은 자리로 옮긴다.
+    scene.camera.focusOn(center, std::max(radius * 2.4F, 0.5F));
+    if (scene.camera.mode != scene::CameraMode::ORBIT) {
+        scene.camera.position = center - scene.camera.forward() * scene.camera.distance;
+    }
 }
 
 } // namespace
@@ -438,7 +442,9 @@ void Application::run() {
             }
             editorUi->processEvent(event);
             // 카메라 조작은 장면 뷰 위에서 시작한 경우에만 받는다.
-            if (editorUi->viewportHovered() || scenes.active().camera.isLooking()) {
+            bool overViewport = editorUi->viewportHovered();
+            scenes.active().camera.keyboardEnabled = overViewport;
+            if (overViewport || scenes.active().camera.isLooking()) {
                 scenes.active().camera.handleEvent(event);
             }
         }

@@ -62,6 +62,35 @@ int main() {
     glm::vec3 center = computeRayDirection(camera.viewMatrix(), gizmo, {0.0F, 0.0F});
     assert(std::abs(glm::dot(center, camera.forward())) > 0.999F && "화면 중앙 광선은 카메라 전방과 나란해야 한다");
 
+    // ---- 궤도 카메라 ----
+    {
+        scene::Camera orbit;
+        orbit.mode = scene::CameraMode::ORBIT;
+        orbit.focusOn(glm::vec3{2.0F, 1.0F, -3.0F}, 6.0F);
+        assert(std::abs(orbit.distance - 6.0F) < 1e-5F);
+        // 위치는 대상에서 시선 반대쪽으로 거리만큼 떨어져 있어야 한다.
+        glm::vec3 expected = orbit.target - orbit.forward() * orbit.distance;
+        assert(glm::length(orbit.position - expected) < 1e-4F);
+        // 그러므로 시선을 따라가면 정확히 대상에 닿는다.
+        glm::vec3 hit = orbit.position + orbit.forward() * orbit.distance;
+        assert(glm::length(hit - orbit.target) < 1e-4F && "궤도 카메라는 항상 대상을 본다");
+
+        // 모드를 오갔다 와도 화면이 튀면 안 된다.
+        glm::vec3 before = orbit.position;
+        glm::vec3 direction = orbit.forward();
+        orbit.setMode(scene::CameraMode::FLY);
+        assert(glm::length(orbit.position - before) < 1e-4F && "자유 모드로 바꿔도 위치는 그대로다");
+        orbit.setMode(scene::CameraMode::ORBIT);
+        orbit.applyOrbit();
+        assert(glm::length(orbit.position - before) < 1e-3F && "궤도로 돌아와도 위치는 그대로다");
+        assert(glm::length(orbit.forward() - direction) < 1e-5F);
+
+        // 거리는 0 이 될 수 없다. 회전 중심이 눈 안으로 들어오면 조작이 뒤집힌다.
+        orbit.distance = 0.0F;
+        orbit.applyOrbit();
+        assert(orbit.distance > 0.0F);
+    }
+
     std::printf("카메라 자체 점검 통과\n");
     return 0;
 }

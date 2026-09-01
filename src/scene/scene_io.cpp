@@ -54,6 +54,26 @@ LightType toLightType(const std::string& name) {
     return LightType::DIRECTIONAL;
 }
 
+// 뿌리 안에 있으면 상대 경로로, 밖이면 절대 경로로 적는다. 파일에는 항상 슬래시 형식을 쓴다.
+//
+// path::native() 는 Windows 에서 std::wstring 이라 좁은 문자열과 섞어 쓸 수 없다. generic_string()
+// 으로 한 번 바꿔 두면 비교와 저장이 두 플랫폼에서 같은 코드로 끝난다.
+std::string relativeToRoot(const std::filesystem::path& path, const std::filesystem::path& root) {
+    if (path.empty()) {
+        return {};
+    }
+    if (root.empty()) {
+        return path.generic_string();
+    }
+    std::error_code error;
+    std::filesystem::path relative = std::filesystem::relative(path, root, error);
+    if (error || relative.empty()) {
+        return path.generic_string();
+    }
+    std::string generic = relative.generic_string();
+    return generic.rfind("../", 0) == 0 || generic == ".." ? path.generic_string() : generic;
+}
+
 // 전역 메쉬 인덱스가 속한 모델과 그 안에서의 번호를 찾는다.
 bool locateMesh(const ModelTable& models, uint32_t meshIndex, int32_t& model, uint32_t& localMesh) {
     for (size_t i = 0; i < models.paths.size(); ++i) {
@@ -75,11 +95,7 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
 
     json modelPaths = json::array();
     for (const std::filesystem::path& path : models.paths) {
-        std::error_code error;
-        std::filesystem::path relative = root.empty() ? path : std::filesystem::relative(path, root, error);
-        // 뿌리 밖에 있는 모델은 절대 경로 그대로 둔다.
-        bool inside = !relative.empty() && !error && relative.native().rfind("..", 0) != 0;
-        modelPaths.push_back((inside ? relative : path).generic_string());
+        modelPaths.push_back(relativeToRoot(path, root));
     }
     document["models"] = modelPaths;
 
@@ -88,17 +104,13 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
                           {"pitch", scene.camera.pitchDegrees},
                           {"fovY", scene.camera.fovYDegrees},
                           {"near", scene.camera.nearPlane},
-                          {"moveSpeed", scene.camera.moveSpeed}};
+                          {"moveSpeed", scene.camera.moveSpeed},
+                          {"mode", scene.camera.mode == CameraMode::FLY ? "fly" : "orbit"},
+                          {"target", toJson(scene.camera.target)},
+                          {"distance", scene.camera.distance}};
     document["ambient"] = {{"color", toJson(scene.ambientColor)}, {"intensity", scene.ambientIntensity}};
-    // HDR 경로도 모델처럼 뿌리 기준 상대 경로로 적는다. 뿌리 밖이면 절대 경로 그대로 둔다.
-    std::string hdrPath = scene.environment.hdrPath.generic_string();
-    if (!scene.environment.hdrPath.empty() && !root.empty()) {
-        std::error_code error;
-        std::filesystem::path relative = std::filesystem::relative(scene.environment.hdrPath, root, error);
-        if (!relative.empty() && !error && relative.native().rfind("..", 0) != 0) {
-            hdrPath = relative.generic_string();
-        }
-    }
+    // HDR 경로도 모델과 같은 규칙으로 적는다.
+    std::string hdrPath = relativeToRoot(scene.environment.hdrPath, root);
     document["environment"] = {{"useHdr", scene.environment.useHdr},
                                {"hdr", hdrPath},
                                {"sunColor", toJson(scene.environment.sunColor)},
@@ -184,6 +196,13 @@ SceneFile readScene(const std::string& text) {
     file.scene.camera.fovYDegrees = camera.value("fovY", 60.0F);
     file.scene.camera.nearPlane = camera.value("near", 0.05F);
     file.scene.camera.moveSpeed = camera.value("moveSpeed", 1.0F);
+    file.scene.camera.mode = camera.value("mode", std::string{"orbit"}) == "fly" ? CameraMode::FLY : CameraMode::ORBIT;
+    file.scene.camera.distance = camera.value("distance", 2.5F);
+    // 궤도 중심이 없는 옛 파일은 보고 있던 앞쪽 한 점을 중심으로 삼는다. 그냥 기본값을 쓰면
+    // 장면을 열자마자 카메라가 뒤로 튄다.
+    file.scene.camera.target =
+        toVec3(camera.value("target", json{}),
+               file.scene.camera.position + file.scene.camera.forward() * file.scene.camera.distance);
 
     const json& ambient = document.value("ambient", json::object());
     file.scene.ambientColor = toVec3(ambient.value("color", json{}), glm::vec3{0.25F});
