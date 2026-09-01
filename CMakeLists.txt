@@ -79,6 +79,7 @@ set(shader_sources
     shaders/fullscreen.vert
     shaders/oit_composite.frag
     shaders/tonemap.frag
+    shaders/upscale.frag
     shaders/mesh.task
     shaders/mesh.mesh
     shaders/cull_meshlets.comp

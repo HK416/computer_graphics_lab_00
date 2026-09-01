@@ -31,6 +31,9 @@ struct Options {
     uint32_t lodLevel = AUTOMATIC_LOD;
     float lodErrorThreshold = 1.0F;
     bool neuralLod = false;
+    float renderScale = 1.0F;
+    // 0 통과, 1 내장 공간 업스케일
+    uint32_t upscaler = 1;
     float triangleBudget = 0.0F;
 };
 

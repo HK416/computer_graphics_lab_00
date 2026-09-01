@@ -113,6 +113,13 @@ struct TonemapPushConstants {
     uint32_t sampleCount;
 };
 
+struct UpscalePushConstants {
+    uint32_t sourceTexture;
+    float sharpness;
+    float sourceSize[2];
+    float destinationSize[2];
+};
+
 std::vector<uint32_t> readSpirv(const std::string& name) {
     std::filesystem::path path = std::filesystem::path(CG_LAB_SHADER_ROOT) / name;
     std::error_code error;
@@ -175,6 +182,7 @@ void setFullViewport(VkCommandBuffer commandBuffer, VkExtent2D extent) {
 Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& bindless, SDL_Window* window)
     : context(context), geometry(geometry), bindless(bindless) {
     swapchain = std::make_unique<Swapchain>(context, window, vsync);
+    currentDisplayExtent = swapchain->extent;
     currentRenderExtent = swapchain->extent;
 
     // 오프스크린 대상을 셰이더에서 읽을 때 쓰는 샘플러. 화면 해상도 그대로 읽으므로 보간이 필요 없다.
@@ -208,6 +216,9 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& 
 
 Renderer::~Renderer() {
     waitIdle();
+    for (VkPipeline pipeline : upscalePipelines) {
+        vkDestroyPipeline(context.device, pipeline, nullptr);
+    }
     vkDestroyPipeline(context.device, tonemapPipeline, nullptr);
     vkDestroyPipeline(context.device, compositePipeline, nullptr);
     vkDestroyPipelineLayout(context.device, postPipelineLayout, nullptr);
@@ -243,6 +254,7 @@ Renderer::~Renderer() {
     }
     destroyImage(context, targets.hzb);
     destroyImage(context, targets.pathAccumulation);
+    destroyImage(context, targets.tonemapped);
     destroyImage(context, targets.present);
     destroyImage(context, targets.oitRevealage);
     destroyImage(context, targets.oitAccumulation);
@@ -264,21 +276,50 @@ void Renderer::setVsync(bool enabled) {
     resizeRequested = true;
 }
 
-void Renderer::setRenderExtent(VkExtent2D extent) {
-    extent.width = std::max(extent.width, 1U);
-    extent.height = std::max(extent.height, 1U);
-    if (extent.width == currentRenderExtent.width && extent.height == currentRenderExtent.height) {
+void Renderer::updateRenderExtent() {
+    float scale = std::clamp(renderScale, 0.25F, 2.0F);
+    VkExtent2D scaled{std::max(static_cast<uint32_t>(static_cast<float>(currentDisplayExtent.width) * scale), 1U),
+                      std::max(static_cast<uint32_t>(static_cast<float>(currentDisplayExtent.height) * scale), 1U)};
+    if (scaled.width == currentRenderExtent.width && scaled.height == currentRenderExtent.height) {
         return;
     }
     waitIdle();
-    currentRenderExtent = extent;
+    currentRenderExtent = scaled;
     createRenderTargets();
+}
+
+void Renderer::setDisplayExtent(VkExtent2D extent) {
+    extent.width = std::max(extent.width, 1U);
+    extent.height = std::max(extent.height, 1U);
+    if (extent.width != currentDisplayExtent.width || extent.height != currentDisplayExtent.height) {
+        waitIdle();
+        currentDisplayExtent = extent;
+        currentRenderExtent = {};
+    }
+    updateRenderExtent();
+}
+
+std::vector<UpscalerInfo> Renderer::upscalers() const {
+    bool isNvidia = context.properties.vendorID == 0x10DE;
+#if defined(__APPLE__)
+    constexpr bool IS_APPLE = true;
+#else
+    constexpr bool IS_APPLE = false;
+#endif
+    return {
+        {Upscaler::NONE, "없음 (통과)", true, ""},
+        {Upscaler::SPATIAL, "내장 공간 업스케일", true, ""},
+        {Upscaler::FSR, "FSR", false, "FidelityFX SDK 미포함"},
+        {Upscaler::DLSS, "DLSS", false, isNvidia ? "NGX SDK 미포함" : "NVIDIA 장치 아님"},
+        {Upscaler::METALFX, "MetalFX", false, IS_APPLE ? "Metal 상호운용 필요" : "Apple 플랫폼 아님"},
+    };
 }
 
 std::vector<Renderer::TargetView> Renderer::targetViews() const {
     constexpr VkImageLayout READ_ONLY = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     std::vector<TargetView> views{{"색상 (HDR)", targets.color.view, READ_ONLY},
-                                  {"표시 (톤 매핑)", targets.present.view, READ_ONLY},
+                                  {"톤 매핑", targets.tonemapped.view, READ_ONLY},
+                                  {"표시 (업스케일)", targets.present.view, READ_ONLY},
                                   {"깊이", targets.depth.view, READ_ONLY},
                                   // HZB 는 컴퓨트가 쓰고 읽으므로 계속 GENERAL 이다.
                                   {"HZB", targets.hzb.view, VK_IMAGE_LAYOUT_GENERAL}};
@@ -298,6 +339,7 @@ uint32_t Renderer::swapchainImageCount() const {
 }
 
 void Renderer::createRenderTargets() {
+    destroyImage(context, targets.tonemapped);
     destroyImage(context, targets.present);
     destroyImage(context, targets.oitRevealage);
     destroyImage(context, targets.oitAccumulation);
@@ -333,9 +375,15 @@ void Renderer::createRenderTargets() {
     pathAccumulationDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     targets.pathAccumulation = createImage(context, pathAccumulationDesc, "경로 추적 누적");
 
-    ImageDesc presentDesc = colorDesc;
-    presentDesc.format = PRESENT_FORMAT;
-    presentDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    destroyImage(context, targets.tonemapped);
+    ImageDesc tonemappedDesc;
+    tonemappedDesc.extent = extent;
+    tonemappedDesc.format = PRESENT_FORMAT;
+    tonemappedDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    targets.tonemapped = createImage(context, tonemappedDesc, "톤 매핑");
+
+    ImageDesc presentDesc = tonemappedDesc;
+    presentDesc.extent = {currentDisplayExtent.width, currentDisplayExtent.height, 1};
     targets.present = createImage(context, presentDesc, "표시");
 
     for (VkImageView view : targets.hzbMipViews) {
@@ -375,6 +423,7 @@ void Renderer::createRenderTargets() {
         targets.accumulationSlot = bindless.add(targets.oitAccumulation.view, postSampler);
         targets.revealageSlot = bindless.add(targets.oitRevealage.view, postSampler);
         targets.depthSlot = bindless.add(targets.depth.view, postSampler);
+        targets.tonemappedSlot = bindless.add(targets.tonemapped.view, postSampler);
         // HZB 는 컴퓨트가 쓰고 읽으므로 계속 GENERAL 레이아웃에 둔다.
         targets.hzbSampledSlot = bindless.add(targets.hzb.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
         targets.pathAccumulationStorageSlot = bindless.addStorageImageRgba(targets.pathAccumulation.view);
@@ -390,6 +439,7 @@ void Renderer::createRenderTargets() {
         bindless.update(targets.accumulationSlot, targets.oitAccumulation.view, postSampler);
         bindless.update(targets.revealageSlot, targets.oitRevealage.view, postSampler);
         bindless.update(targets.depthSlot, targets.depth.view, postSampler);
+        bindless.update(targets.tonemappedSlot, targets.tonemapped.view, postSampler);
         bindless.update(targets.hzbSampledSlot, targets.hzb.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
         bindless.updateStorageImageRgba(targets.pathAccumulationStorageSlot, targets.pathAccumulation.view);
         bindless.update(
@@ -787,7 +837,7 @@ void Renderer::createMeshPipelines() {
 void Renderer::createPostPipelines() {
     VkPushConstantRange pushConstantRange{};
     pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    pushConstantRange.size = sizeof(TonemapPushConstants);
+    pushConstantRange.size = std::max(sizeof(TonemapPushConstants), sizeof(UpscalePushConstants));
 
     VkDescriptorSetLayout bindlessLayout = bindless.layout();
     VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -869,6 +919,25 @@ void Renderer::createPostPipelines() {
     colorFormat = PRESENT_FORMAT;
     VK_CHECK(vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &tonemapPipeline));
 
+    // 업스케일은 통과와 공간 확대 두 벌을 특수화 상수로 나눈다.
+    VkShaderModule upscaleFragment = createShaderModule(context.device, "upscale.frag.spv");
+    uint32_t upscaleMode = 0;
+    VkSpecializationMapEntry upscaleEntry{0, 0, sizeof(uint32_t)};
+    VkSpecializationInfo upscaleSpecialization{};
+    upscaleSpecialization.mapEntryCount = 1;
+    upscaleSpecialization.pMapEntries = &upscaleEntry;
+    upscaleSpecialization.dataSize = sizeof(upscaleMode);
+    upscaleSpecialization.pData = &upscaleMode;
+
+    stages[1].module = upscaleFragment;
+    stages[1].pSpecializationInfo = &upscaleSpecialization;
+    for (uint32_t variant = 0; variant < upscalePipelines.size(); ++variant) {
+        upscaleMode = variant;
+        VK_CHECK(vkCreateGraphicsPipelines(
+            context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &upscalePipelines[variant]));
+    }
+
+    vkDestroyShaderModule(context.device, upscaleFragment, nullptr);
     vkDestroyShaderModule(context.device, tonemapFragment, nullptr);
     vkDestroyShaderModule(context.device, compositeFragment, nullptr);
     vkDestroyShaderModule(context.device, vertexModule, nullptr);
@@ -1521,7 +1590,7 @@ void Renderer::recordCommands(Frame& frame,
                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     imageBarrier(commandBuffer,
-                 targets.present.handle,
+                 targets.tonemapped.handle,
                  VK_IMAGE_ASPECT_COLOR_BIT,
                  VK_IMAGE_LAYOUT_UNDEFINED,
                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -1530,12 +1599,13 @@ void Renderer::recordCommands(Frame& frame,
                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
 
-    VkRenderingAttachmentInfo presentColor = colorAttachment(targets.present.view, VK_ATTACHMENT_LOAD_OP_DONT_CARE, {});
+    VkRenderingAttachmentInfo tonemappedColor =
+        colorAttachment(targets.tonemapped.view, VK_ATTACHMENT_LOAD_OP_DONT_CARE, {});
     VkRenderingInfo tonemapPass{VK_STRUCTURE_TYPE_RENDERING_INFO};
     tonemapPass.renderArea.extent = currentRenderExtent;
     tonemapPass.layerCount = 1;
     tonemapPass.colorAttachmentCount = 1;
-    tonemapPass.pColorAttachments = &presentColor;
+    tonemapPass.pColorAttachments = &tonemappedColor;
 
     TonemapPushConstants tonemapPushConstants{};
     tonemapPushConstants.colorTexture = pathTracing ? targets.pathAccumulationSampledSlot : targets.colorSlot;
@@ -1555,7 +1625,59 @@ void Renderer::recordCommands(Frame& frame,
     vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     vkCmdEndRendering(commandBuffer);
 
-    // 6) 편집기 UI 를 스왑체인에 그린다. 오프스크린 대상들은 UI 가 샘플링할 수 있는 레이아웃으로 옮긴다.
+    // 6) 렌더 해상도의 톤 매핑 결과를 표시 해상도로 확대한다.
+    imageBarrier(commandBuffer,
+                 targets.tonemapped.handle,
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    imageBarrier(commandBuffer,
+                 targets.present.handle,
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                 0,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+
+    VkRenderingAttachmentInfo upscaleColor = colorAttachment(targets.present.view, VK_ATTACHMENT_LOAD_OP_DONT_CARE, {});
+    VkRenderingInfo upscalePass{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    upscalePass.renderArea.extent = currentDisplayExtent;
+    upscalePass.layerCount = 1;
+    upscalePass.colorAttachmentCount = 1;
+    upscalePass.pColorAttachments = &upscaleColor;
+
+    UpscalePushConstants upscalePushConstants{};
+    upscalePushConstants.sourceTexture = targets.tonemappedSlot;
+    upscalePushConstants.sharpness = upscaleSharpness;
+    upscalePushConstants.sourceSize[0] = static_cast<float>(currentRenderExtent.width);
+    upscalePushConstants.sourceSize[1] = static_cast<float>(currentRenderExtent.height);
+    upscalePushConstants.destinationSize[0] = static_cast<float>(currentDisplayExtent.width);
+    upscalePushConstants.destinationSize[1] = static_cast<float>(currentDisplayExtent.height);
+
+    // 구현된 방식은 통과와 내장 공간 업스케일 둘뿐이다. 나머지는 벤더 SDK 가 필요해 통과로 떨어진다.
+    size_t upscaleVariant = upscaler == Upscaler::SPATIAL ? 1 : 0;
+
+    vkCmdBeginRendering(commandBuffer, &upscalePass);
+    setFullViewport(commandBuffer, currentDisplayExtent);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, upscalePipelines[upscaleVariant]);
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, postPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+    vkCmdPushConstants(commandBuffer,
+                       postPipelineLayout,
+                       VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0,
+                       sizeof(upscalePushConstants),
+                       &upscalePushConstants);
+    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    vkCmdEndRendering(commandBuffer);
+
+    // 7) 편집기 UI 를 스왑체인에 그린다. 오프스크린 대상들은 UI 가 샘플링할 수 있는 레이아웃으로 옮긴다.
     imageBarrier(commandBuffer,
                  targets.present.handle,
                  VK_IMAGE_ASPECT_COLOR_BIT,

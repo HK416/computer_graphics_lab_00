@@ -46,13 +46,31 @@ struct FrameBatches {
     uint32_t instanceCount = 0;
 };
 
+// 업스케일 방식. 벤더 SDK 가 필요한 것들은 감지만 하고 사용 가능 여부를 보고한다.
+enum class Upscaler : uint32_t {
+    NONE = 0,
+    SPATIAL = 1,
+    FSR = 2,
+    DLSS = 3,
+    METALFX = 4,
+};
+
+struct UpscalerInfo {
+    Upscaler kind;
+    const char* name;
+    bool available;
+    // 쓸 수 없을 때의 이유. 사용 가능하면 비어 있다.
+    const char* reason;
+};
+
 // 화면 크기에 맞춰 다시 만들어지는 오프스크린 대상들. 셰이더에서 읽으려고 bindless 슬롯도 함께 잡는다.
 struct RenderTargets {
     Image color; // 선형 HDR
     Image depth;
     Image oitAccumulation;
     Image oitRevealage;
-    Image present; // 톤 매핑 결과. 편집기 뷰포트에 그대로 표시한다.
+    Image tonemapped; // 렌더 해상도의 톤 매핑 결과. 업스케일 입력이다.
+    Image present;    // 표시 해상도. 편집기 뷰포트가 그대로 보여준다.
     // 이전 프레임 깊이로 만든 계층적 Z 버퍼. 오클루전 컬링이 읽는다.
     Image hzb;
     // 경로 추적 누적 버퍼. 카메라가 멈춰 있는 동안 표본을 쌓는다.
@@ -65,6 +83,7 @@ struct RenderTargets {
     uint32_t hzbSampledSlot = 0;
     uint32_t depthSlot = 0;
     uint32_t colorSlot = 0;
+    uint32_t tonemappedSlot = 0;
     uint32_t accumulationSlot = 0;
     uint32_t revealageSlot = 0;
     bool slotsAllocated = false;
@@ -80,9 +99,16 @@ public:
     void drawFrame(const scene::Scene& scene);
     void requestResize() { resizeRequested = true; }
 
-    // 장면을 그릴 해상도. 편집기 뷰포트 크기에 맞춰 바뀐다.
-    void setRenderExtent(VkExtent2D extent);
+    // 표시 해상도. 편집기 뷰포트 크기에 맞춰 바뀐다. 장면은 여기에 렌더 배율을 곱한 해상도로 그린다.
+    void setDisplayExtent(VkExtent2D extent);
+    VkExtent2D displayExtent() const { return currentDisplayExtent; }
     VkExtent2D renderExtent() const { return currentRenderExtent; }
+
+    // 업스케일 설정. 배율을 낮추면 장면을 작게 그린 뒤 확대한다.
+    float renderScale = 1.0F;
+    Upscaler upscaler = Upscaler::SPATIAL;
+    float upscaleSharpness = 0.25F;
+    std::vector<UpscalerInfo> upscalers() const;
     // 스왑체인에 UI 를 기록할 콜백. 편집기가 채운다.
     void setUiCallback(std::function<void(VkCommandBuffer)> callback) { uiCallback = std::move(callback); }
 
@@ -162,6 +188,7 @@ private:
     void createRenderTargets();
     void createMeshPipelines();
     void createPostPipelines();
+    void updateRenderExtent();
     void recreateSwapchain();
     void reserveInstances(Frame& frame, uint32_t instanceCount);
     void reserveMeshletGroups(Frame& frame, uint32_t groupCount);
@@ -184,6 +211,7 @@ private:
     std::unique_ptr<Swapchain> swapchain;
     RenderTargets targets;
     VkSampler postSampler = VK_NULL_HANDLE;
+    VkExtent2D currentDisplayExtent{};
     VkExtent2D currentRenderExtent{};
     uint64_t generation = 0;
     bool oitTargetsValid = false;
@@ -209,6 +237,7 @@ private:
     VkPipelineLayout postPipelineLayout = VK_NULL_HANDLE;
     VkPipeline compositePipeline = VK_NULL_HANDLE;
     VkPipeline tonemapPipeline = VK_NULL_HANDLE;
+    std::array<VkPipeline, 2> upscalePipelines{};
 
     std::filesystem::path capturePath;
     Buffer captureBuffer;

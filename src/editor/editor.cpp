@@ -480,6 +480,32 @@ void Editor::buildRenderSettings(float deltaSeconds) {
         }
     }
 
+    ImGui::SeparatorText("해상도와 업스케일");
+    if (ImGui::SliderFloat("렌더 배율", &renderer.renderScale, 0.25F, 2.0F, "%.2f")) {
+        // 배율은 다음 프레임의 표시 크기 갱신에서 반영된다.
+    }
+    ImGui::Text("장면 %ux%u -> 표시 %ux%u",
+                renderer.renderExtent().width,
+                renderer.renderExtent().height,
+                renderer.displayExtent().width,
+                renderer.displayExtent().height);
+
+    std::vector<gfx::UpscalerInfo> upscalers = renderer.upscalers();
+    for (const gfx::UpscalerInfo& info : upscalers) {
+        ImGui::BeginDisabled(!info.available);
+        if (ImGui::RadioButton(info.name, renderer.upscaler == info.kind)) {
+            renderer.upscaler = info.kind;
+        }
+        ImGui::EndDisabled();
+        if (!info.available) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%s)", info.reason);
+        }
+    }
+    if (renderer.upscaler == gfx::Upscaler::SPATIAL) {
+        ImGui::SliderFloat("선명화", &renderer.upscaleSharpness, 0.0F, 1.0F, "%.2f");
+    }
+
     ImGui::SeparatorText("경로 추적");
     ImGui::BeginDisabled(!renderer.pathTracingAvailable());
     ImGui::Checkbox("경로 추적", &renderer.usePathTracing);

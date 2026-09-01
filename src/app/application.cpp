@@ -75,6 +75,8 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     }
     renderer->lodErrorThreshold = options.lodErrorThreshold;
     renderer->useNeuralLod = options.neuralLod;
+    renderer->renderScale = options.renderScale;
+    renderer->upscaler = static_cast<gfx::Upscaler>(options.upscaler);
     if (options.triangleBudget > 0.0F) {
         renderer->triangleBudget = options.triangleBudget;
     }
@@ -237,7 +239,7 @@ void Application::run() {
         }
 
         scenes.active().camera.update(deltaSeconds);
-        renderer->setRenderExtent(editorUi->desiredRenderExtent());
+        renderer->setDisplayExtent(editorUi->desiredRenderExtent());
         editorUi->build(scenes, *geometry, deltaSeconds);
         renderer->drawFrame(scenes.active());
         ++frameCount;
