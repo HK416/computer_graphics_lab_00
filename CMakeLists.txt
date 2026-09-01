@@ -84,6 +84,7 @@ set(shader_sources
     shaders/mesh.task
     shaders/mesh.mesh
     shaders/depth_only.vert
+    shaders/shadow_cutoff.frag
     shaders/ssao.comp
     shaders/ssao_blur.comp
     shaders/cull_meshlets.comp

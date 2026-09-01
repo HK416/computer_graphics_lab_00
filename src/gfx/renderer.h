@@ -207,6 +207,8 @@ public:
     // mesh shader 미지원 장치에서는 켤 수 없다.
     bool useMeshShader = false;
     bool meshShaderAvailable() const { return meshShaderPipelines[0] != VK_NULL_HANDLE; }
+    // 와이어프레임 디버그 뷰는 고전 경로에만 있으므로 그때는 mesh shader 경로를 쓰지 않는다.
+    bool useMeshPath() const { return useMeshShader && meshShaderAvailable() && !wireframe; }
 
     // GPU/CPU 구간 계측. 편집기가 켜고 끄며, 꺼져 있으면 기록 자체를 하지 않는다.
     GpuProfiler& profiler() { return frameProfiler; }
@@ -311,6 +313,8 @@ private:
     VkShaderStageFlags scenePushStages = 0;
     VkPipelineLayout depthPipelineLayout = VK_NULL_HANDLE;
     VkPipeline shadowPipeline = VK_NULL_HANDLE;
+    // 컷오프 캐스터는 프래그먼트 셰이더에서 discard 해야 실루엣이 맞는다.
+    VkPipeline shadowCutoffPipeline = VK_NULL_HANDLE;
     VkPipelineLayout ssaoPipelineLayout = VK_NULL_HANDLE;
     VkPipeline ssaoPipeline = VK_NULL_HANDLE;
     VkPipelineLayout ssaoBlurPipelineLayout = VK_NULL_HANDLE;

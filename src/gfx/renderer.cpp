@@ -125,6 +125,8 @@ struct DepthPushConstants {
     VkDeviceAddress vertices;
     VkDeviceAddress instances;
     VkDeviceAddress joints;
+    VkDeviceAddress meshes;
+    VkDeviceAddress materials;
 };
 
 struct SsaoPushConstants {
@@ -280,6 +282,7 @@ Renderer::~Renderer() {
     vkDestroyPipelineLayout(context.device, ssaoBlurPipelineLayout, nullptr);
     vkDestroyPipeline(context.device, ssaoPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, ssaoPipelineLayout, nullptr);
+    vkDestroyPipeline(context.device, shadowCutoffPipeline, nullptr);
     vkDestroyPipeline(context.device, shadowPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, depthPipelineLayout, nullptr);
     vkDestroyPipelineLayout(context.device, cullPipelineLayout, nullptr);
@@ -673,17 +676,24 @@ void Renderer::reserveMeshletDraws(Frame& frame, uint32_t drawCount) {
 }
 
 void Renderer::createShadowPipeline() {
+    // 컷오프 캐스터가 기저 색 텍스처를 읽어야 하므로 bindless 셋을 붙인다. 불투명 파이프라인도
+    // 같은 레이아웃을 쓴다. 안 쓰는 셋을 바인드하는 비용은 없고 레이아웃이 둘로 늘지 않는다.
     VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushConstantRange.size = sizeof(DepthPushConstants);
 
+    VkDescriptorSetLayout bindlessLayout = bindless.layout();
     VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &bindlessLayout;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushConstantRange;
     VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &depthPipelineLayout));
 
     VkShaderModule vertexModule = createShaderModule(context.device, "depth_only.vert.spv");
-    VkPipelineShaderStageCreateInfo stage = shaderStage(VK_SHADER_STAGE_VERTEX_BIT, vertexModule);
+    VkShaderModule cutoffModule = createShaderModule(context.device, "shadow_cutoff.frag.spv");
+    std::array<VkPipelineShaderStageCreateInfo, 2> stages{shaderStage(VK_SHADER_STAGE_VERTEX_BIT, vertexModule),
+                                                          shaderStage(VK_SHADER_STAGE_FRAGMENT_BIT, cutoffModule)};
 
     VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
@@ -702,6 +712,8 @@ void Renderer::createShadowPipeline() {
     rasterization.depthBiasEnable = VK_TRUE;
     rasterization.depthBiasConstantFactor = 1.25F;
     rasterization.depthBiasSlopeFactor = 2.5F;
+    // 근평면 앞의 캐스터를 잘라 내지 않고 눌러 담는다. 없으면 그림자가 사라진다.
+    rasterization.depthClampEnable = context.caps.depthClamp ? VK_TRUE : VK_FALSE;
 
     VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
@@ -724,8 +736,9 @@ void Renderer::createShadowPipeline() {
 
     VkGraphicsPipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     pipelineInfo.pNext = &renderingInfo;
+    // 불투명 캐스터는 프래그먼트 셰이더 없이 그린다. discard 가 없으니 조기 깊이 판정을 온전히 쓴다.
     pipelineInfo.stageCount = 1;
-    pipelineInfo.pStages = &stage;
+    pipelineInfo.pStages = stages.data();
     pipelineInfo.pVertexInputState = &vertexInput;
     pipelineInfo.pInputAssemblyState = &inputAssembly;
     pipelineInfo.pViewportState = &viewportState;
@@ -736,6 +749,12 @@ void Renderer::createShadowPipeline() {
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = depthPipelineLayout;
     VK_CHECK(vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &shadowPipeline));
+
+    pipelineInfo.stageCount = 2;
+    VK_CHECK(
+        vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &shadowCutoffPipeline));
+
+    vkDestroyShaderModule(context.device, cutoffModule, nullptr);
     vkDestroyShaderModule(context.device, vertexModule, nullptr);
 }
 
@@ -827,12 +846,20 @@ void Renderer::recordShadowPass(VkCommandBuffer commandBuffer, const FrameBatche
     constexpr VkDeviceSize DRAW_STRIDE = sizeof(VkDrawIndexedIndirectCommand);
     Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];
 
-    // 불투명과 컷오프 경로만 그림자를 만든다. 이 구간은 그리기 버퍼에서 연속이다.
+    // 불투명과 컷오프만 그림자를 만든다. 알파 경로마다 파이프라인이 달라 구간을 나눠 그린다.
+    // 같은 알파 경로의 단면/양면은 그리기 버퍼에서 연속이다.
+    struct CasterRange {
+        VkPipeline pipeline;
+        uint32_t first;
+        uint32_t count;
+    };
+    std::array<CasterRange, TRANSLUCENT_MODE> casters{};
     uint32_t drawCount = 0;
     for (size_t mode = 0; mode < TRANSLUCENT_MODE; ++mode) {
-        for (size_t sided = 0; sided < 2; ++sided) {
-            drawCount += batches.draws[mode][sided].count;
-        }
+        casters[mode].pipeline = mode == 0 ? shadowPipeline : shadowCutoffPipeline;
+        casters[mode].first = batches.draws[mode][0].first;
+        casters[mode].count = batches.draws[mode][0].count + batches.draws[mode][1].count;
+        drawCount += casters[mode].count;
     }
 
     imageBarrier(commandBuffer,
@@ -859,13 +886,17 @@ void Renderer::recordShadowPass(VkCommandBuffer commandBuffer, const FrameBatche
     vkCmdBeginRendering(commandBuffer, &rendering);
 
     if (drawCount > 0) {
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
+        VkDescriptorSet bindlessSet = bindless.set();
+        vkCmdBindDescriptorSets(
+            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, depthPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
         vkCmdBindIndexBuffer(commandBuffer, geometry.indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
 
         DepthPushConstants pushConstants{};
         pushConstants.vertices = geometry.vertexBuffer.address;
         pushConstants.instances = frame.instanceBuffer.address;
         pushConstants.joints = frame.jointBuffer.address;
+        pushConstants.meshes = geometry.meshBuffer.address;
+        pushConstants.materials = geometry.materialBuffer.address;
 
         // 시점마다 아틀라스의 타일 하나만 뷰포트로 잡는다.
         for (size_t view = 0; view < shadowViews.size(); ++view) {
@@ -886,12 +917,21 @@ void Renderer::recordShadowPass(VkCommandBuffer commandBuffer, const FrameBatche
             pushConstants.viewProjection = shadowViews[view];
             vkCmdPushConstants(commandBuffer,
                                depthPipelineLayout,
-                               VK_SHADER_STAGE_VERTEX_BIT,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                0,
                                sizeof(pushConstants),
                                &pushConstants);
-            vkCmdDrawIndexedIndirect(
-                commandBuffer, frame.drawBuffer.handle, 0, drawCount, static_cast<uint32_t>(DRAW_STRIDE));
+            for (const CasterRange& caster : casters) {
+                if (caster.count == 0) {
+                    continue;
+                }
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, caster.pipeline);
+                vkCmdDrawIndexedIndirect(commandBuffer,
+                                         frame.drawBuffer.handle,
+                                         caster.first * DRAW_STRIDE,
+                                         caster.count,
+                                         static_cast<uint32_t>(DRAW_STRIDE));
+            }
         }
     }
     vkCmdEndRendering(commandBuffer);
@@ -1613,8 +1653,7 @@ void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer, const FrameBatc
     constexpr VkDeviceSize TASK_STRIDE = sizeof(VkDrawMeshTasksIndirectCommandEXT);
 
     Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];
-    // 와이어프레임 디버그 뷰는 고전 경로에만 있으므로 그때는 mesh shader 경로를 쓰지 않는다.
-    bool meshPath = useMeshShader && meshShaderAvailable() && !wireframe;
+    bool meshPath = useMeshPath();
     bool cullPath = useComputeCulling && !meshPath;
 
     size_t firstMode = translucentPass ? TRANSLUCENT_MODE : 0;
@@ -1958,8 +1997,10 @@ void Renderer::recordCommands(Frame& frame,
         ssaoNeedsClear = false;
     }
 
-    // 그림자 아틀라스는 장면 패스보다 먼저 채워야 한다.
-    if (!shadowViews.empty()) {
+    bool pathTracing = usePathTracing && rayTracer != nullptr;
+
+    // 그림자 아틀라스는 장면 패스보다 먼저 채워야 한다. 경로 추적은 아틀라스를 읽지 않으므로 건너뛴다.
+    if (!pathTracing && !shadowViews.empty()) {
         uint32_t shadowZone = frameProfiler.begin("그림자", commandBuffer);
         recordShadowPass(commandBuffer, batches);
         frameProfiler.end(shadowZone, commandBuffer);
@@ -1985,13 +2026,14 @@ void Renderer::recordCommands(Frame& frame,
                  VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 
     VkDescriptorSet bindlessSet = bindless.set();
-    bool pathTracing = usePathTracing && rayTracer != nullptr;
     if (pathTracing) {
         uint32_t pathZone = frameProfiler.begin("경로 추적", commandBuffer);
         recordPathTracePass(commandBuffer, frame, scene);
         frameProfiler.end(pathZone, commandBuffer);
     } else {
-        if (useComputeCulling) {
+        // mesh shader 경로는 태스크 셰이더가 직접 컬링한다. 컬 컴퓨트 결과를 아무도 읽지 않으므로
+        // 그때는 디스패치 자체를 하지 않는다.
+        if (useComputeCulling && !useMeshPath()) {
             uint32_t cullZone = frameProfiler.begin("컬링", commandBuffer);
             recordCullPass(commandBuffer, batches);
             frameProfiler.end(cullZone, commandBuffer);

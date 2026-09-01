@@ -32,6 +32,8 @@ struct Capabilities {
     bool memoryPriority = false;
     // 타임스탬프 쿼리로 GPU 구간 시간을 잴 수 있는지. 주기와 유효 비트가 모두 있어야 한다.
     bool timestamps = false;
+    // 그림자 절두체 근평면 앞의 캐스터를 잘라 내지 않고 눌러 담을 수 있는지.
+    bool depthClamp = false;
     uint32_t subgroupSize = 0;
 };
 

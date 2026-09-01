@@ -249,6 +249,7 @@ Capabilities queryCapabilities(const FeatureChain& f,
     caps.drawIndirectCount = f.v12.drawIndirectCount == VK_TRUE;
     caps.samplerFilterMinmax = f.v12.samplerFilterMinmax == VK_TRUE;
     caps.pipelineStatistics = f.features2.features.pipelineStatisticsQuery == VK_TRUE;
+    caps.depthClamp = f.features2.features.depthClamp == VK_TRUE;
     caps.shaderFloat16 = f.v12.shaderFloat16 == VK_TRUE;
     caps.shaderInt8 = f.v12.shaderInt8 == VK_TRUE;
     caps.subgroupSizeControl = f.v13.subgroupSizeControl == VK_TRUE;
@@ -523,6 +524,7 @@ Context::Context(SDL_Window* window) {
     enabled.features2.features.samplerAnisotropy = VK_TRUE;
     enabled.features2.features.shaderInt64 = VK_TRUE;
     enabled.features2.features.pipelineStatisticsQuery = caps.pipelineStatistics ? VK_TRUE : VK_FALSE;
+    enabled.features2.features.depthClamp = caps.depthClamp ? VK_TRUE : VK_FALSE;
     enabled.features2.features.textureCompressionBC = caps.textureCompressionBc ? VK_TRUE : VK_FALSE;
     enabled.features2.features.textureCompressionASTC_LDR = caps.textureCompressionAstc ? VK_TRUE : VK_FALSE;
     enabled.v11.shaderDrawParameters = VK_TRUE;

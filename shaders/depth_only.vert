@@ -8,12 +8,20 @@ layout(push_constant) uniform DepthPushConstants {
     VertexBuffer vertices;
     InstanceBuffer instances;
     JointBuffer joints;
+    MeshBuffer meshes;
+    MaterialBuffer materials;
 }
 depthPush;
+
+// 컷오프 파이프라인만 읽는다. 불투명 파이프라인에는 프래그먼트 셰이더가 없어 그냥 버려진다.
+layout(location = 0) out vec2 outUv;
+layout(location = 1) flat out uint outMaterialIndex;
 
 void main() {
     Instance instance = depthPush.instances.items[gl_InstanceIndex];
     Vertex vertex = depthPush.vertices.items[gl_VertexIndex];
+    outUv = vertex.uv;
+    outMaterialIndex = depthPush.meshes.items[instance.meshIndex].materialIndex;
 
     vec3 position = vertex.position;
     if (instance.jointOffset != NO_JOINTS) {
