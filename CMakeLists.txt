@@ -62,6 +62,7 @@ find_package(glm CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_package(imguizmo CONFIG REQUIRED)
 find_package(meshoptimizer CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
@@ -137,7 +138,8 @@ add_executable(cg_lab
     src/gfx/uploader.cpp
     src/gfx/vma_impl.cpp
     src/scene/camera.cpp
-    src/scene/scene.cpp)
+    src/scene/scene.cpp
+    src/scene/scene_io.cpp)
 
 add_dependencies(cg_lab cg_lab_shaders)
 
@@ -156,7 +158,7 @@ find_file(VMA_HEADER_PATH
 file(WRITE "${CMAKE_BINARY_DIR}/compat/vma/vk_mem_alloc.h" "#pragma once\n#include \"${VMA_HEADER_PATH}\"\n")
 
 target_include_directories(cg_lab PRIVATE src "${CMAKE_BINARY_DIR}/compat")
-target_link_libraries(cg_lab PRIVATE Vulkan::Vulkan SDL3::SDL3 glm::glm imgui::imgui imguizmo::imguizmo meshoptimizer::meshoptimizer spdlog::spdlog GPUOpen::VulkanMemoryAllocator)
+target_link_libraries(cg_lab PRIVATE Vulkan::Vulkan SDL3::SDL3 glm::glm imgui::imgui imguizmo::imguizmo meshoptimizer::meshoptimizer nlohmann_json::nlohmann_json spdlog::spdlog GPUOpen::VulkanMemoryAllocator)
 
 if(MSVC)
     target_compile_options(cg_lab PRIVATE /W4 /utf-8)
@@ -182,6 +184,8 @@ add_executable(cg_lab_tests tests/lod_network_test.cpp src/gfx/lod_network.cpp)
 add_executable(cg_lab_animation_tests tests/animation_test.cpp src/asset/animation.cpp)
 add_executable(cg_lab_camera_tests tests/camera_test.cpp src/scene/camera.cpp)
 add_executable(cg_lab_scene_tests tests/scene_test.cpp src/scene/scene.cpp src/asset/animation.cpp src/core/error.cpp)
+add_executable(cg_lab_scene_io_tests tests/scene_io_test.cpp src/scene/scene_io.cpp src/scene/scene.cpp
+    src/asset/animation.cpp src/core/error.cpp)
 add_executable(cg_lab_concurrency_tests tests/lock_free_queue_test.cpp src/core/job_system.cpp)
 target_include_directories(cg_lab_concurrency_tests PRIVATE src)
 find_package(Threads REQUIRED)
@@ -217,10 +221,20 @@ else()
     target_compile_options(cg_lab_scene_tests PRIVATE -Wall -Wextra)
 endif()
 
+target_include_directories(cg_lab_scene_io_tests PRIVATE src)
+target_link_libraries(cg_lab_scene_io_tests PRIVATE SDL3::SDL3 spdlog::spdlog glm::glm nlohmann_json::nlohmann_json)
+target_compile_definitions(cg_lab_scene_io_tests PRIVATE GLM_ENABLE_EXPERIMENTAL)
+if(MSVC)
+    target_compile_options(cg_lab_scene_io_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(cg_lab_scene_io_tests PRIVATE -Wall -Wextra)
+endif()
+
 add_test(NAME lod_network COMMAND cg_lab_tests)
 add_test(NAME animation COMMAND cg_lab_animation_tests)
 add_test(NAME camera COMMAND cg_lab_camera_tests)
 add_test(NAME scene COMMAND cg_lab_scene_tests)
+add_test(NAME scene_io COMMAND cg_lab_scene_io_tests)
 add_test(NAME concurrency COMMAND cg_lab_concurrency_tests)
 
 # cmake --build --preset debug --target run 으로 빌드한 뒤 바로 실행한다.

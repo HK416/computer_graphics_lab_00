@@ -39,6 +39,10 @@ public:
     void processEvent(const SDL_Event& event);
     // 편집기에서 glTF 를 런타임에 불러올 때 쓸 후보 목록의 뿌리와 실제 적재 함수.
     void setModelLoader(std::filesystem::path root, std::function<void(const std::filesystem::path&)> loader);
+    // 장면 파일을 저장하고 여는 함수와 그 파일들이 놓이는 폴더.
+    void setSceneIo(std::filesystem::path root,
+                    std::function<void(const std::filesystem::path&)> saver,
+                    std::function<void(const std::filesystem::path&)> opener);
     void build(scene::SceneManager& scenes, const gfx::GeometryStore& geometry, float deltaSeconds);
     void record(VkCommandBuffer commandBuffer);
 
@@ -78,6 +82,13 @@ private:
     std::vector<std::filesystem::path> modelFiles;
     std::filesystem::path pendingModel;
     std::array<char, 512> modelPathInput{};
+    std::function<void(const std::filesystem::path&)> sceneSaver;
+    std::function<void(const std::filesystem::path&)> sceneOpener;
+    std::filesystem::path sceneRoot;
+    std::vector<std::filesystem::path> sceneFiles;
+    std::filesystem::path pendingSceneSave;
+    std::filesystem::path pendingSceneOpen;
+    std::array<char, 256> sceneNameInput{};
     int selectedTarget = 0;
     // ImGuizmo::OPERATION 과 MODE 값. 헤더에서 ImGuizmo 를 끌어오지 않으려고 정수로 둔다.
     int gizmoOperation = 7;

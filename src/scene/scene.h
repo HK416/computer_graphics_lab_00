@@ -28,6 +28,8 @@ struct Transform {
 struct Animator {
     std::string name;
     asset::Skeleton skeleton;
+    // 이 스켈레톤이 온 모델의 번호. 장면을 저장하고 다시 읽을 때 스켈레톤을 되찾는 데 쓴다.
+    int32_t model = -1;
     uint32_t clip = 0;
     float clipTime = 0.0F;
     bool playing = true;

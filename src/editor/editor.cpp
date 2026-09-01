@@ -228,6 +228,14 @@ void Editor::setModelLoader(std::filesystem::path root, std::function<void(const
     modelLoader = std::move(loader);
 }
 
+void Editor::setSceneIo(std::filesystem::path root,
+                        std::function<void(const std::filesystem::path&)> saver,
+                        std::function<void(const std::filesystem::path&)> opener) {
+    sceneRoot = std::move(root);
+    sceneSaver = std::move(saver);
+    sceneOpener = std::move(opener);
+}
+
 void Editor::drawHierarchyNode(scene::Scene& active, int index) {
     scene::Object& object = active.objects[static_cast<size_t>(index)];
     bool hasChildren = std::ranges::any_of(
@@ -291,6 +299,47 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
             }
         }
         ImGui::EndCombo();
+    }
+    if (ImGui::Button("장면 저장")) {
+        std::string suggested = scenes.active().name + ".json";
+        std::copy_n(suggested.c_str(), std::min(suggested.size() + 1, sceneNameInput.size()), sceneNameInput.begin());
+        sceneNameInput.back() = '\0';
+        ImGui::OpenPopup("장면 저장");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("장면 열기")) {
+        sceneFiles.clear();
+        std::error_code error;
+        for (const auto& entry : std::filesystem::directory_iterator(sceneRoot, error)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".json") {
+                sceneFiles.push_back(entry.path());
+            }
+        }
+        std::ranges::sort(sceneFiles);
+        ImGui::OpenPopup("장면 열기");
+    }
+
+    if (ImGui::BeginPopup("장면 저장")) {
+        ImGui::TextDisabled("%s", sceneRoot.string().c_str());
+        ImGui::SetNextItemWidth(280.0F);
+        ImGui::InputText("파일 이름", sceneNameInput.data(), sceneNameInput.size());
+        ImGui::SameLine();
+        if (ImGui::Button("저장##확인") && sceneNameInput[0] != '\0') {
+            pendingSceneSave = sceneRoot / sceneNameInput.data();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    if (ImGui::BeginPopup("장면 열기")) {
+        if (sceneFiles.empty()) {
+            ImGui::TextDisabled("%s 에 저장된 장면이 없습니다", sceneRoot.string().c_str());
+        }
+        for (const std::filesystem::path& file : sceneFiles) {
+            if (ImGui::Selectable(file.filename().string().c_str())) {
+                pendingSceneOpen = file;
+            }
+        }
+        ImGui::EndPopup();
     }
     ImGui::Separator();
 
@@ -858,11 +907,24 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
     buildRenderTargets();
     buildConsole();
 
-    // 적재는 지오메트리 버퍼를 다시 만들기 때문에 패널을 다 그린 뒤에 한 번만 처리한다.
+    // 적재와 장면 전환은 지오메트리 버퍼를 다시 만들기 때문에 패널을 다 그린 뒤에 처리한다.
     if (!pendingModel.empty()) {
         std::filesystem::path path = std::exchange(pendingModel, {});
         if (modelLoader) {
             modelLoader(path);
+        }
+    }
+    if (!pendingSceneSave.empty()) {
+        std::filesystem::path path = std::exchange(pendingSceneSave, {});
+        if (sceneSaver) {
+            sceneSaver(path);
+        }
+    }
+    if (!pendingSceneOpen.empty()) {
+        std::filesystem::path path = std::exchange(pendingSceneOpen, {});
+        if (sceneOpener) {
+            sceneOpener(path);
+            selectedObject = -1;
         }
     }
 

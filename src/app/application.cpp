@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <vector>
 
@@ -12,6 +13,7 @@
 #include "asset/model.h"
 #include "core/error.h"
 #include "gfx/uploader.h"
+#include "scene/scene_io.h"
 
 namespace app {
 namespace {
@@ -107,6 +109,10 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     }
     renderer->setUiCallback([this](VkCommandBuffer commandBuffer) { editorUi->record(commandBuffer); });
     editorUi->setModelLoader(assetRoot, [this](const std::filesystem::path& path) { loadModel(path); });
+    editorUi->setSceneIo(
+        sceneRoot,
+        [this](const std::filesystem::path& path) { saveScene(path); },
+        [this](const std::filesystem::path& path) { openScene(path); });
 }
 
 Application::~Application() {
@@ -123,6 +129,7 @@ Application::~Application() {
 
 void Application::loadScenes() {
     assetRoot = std::filesystem::path(CG_LAB_ASSET_ROOT) / "assets";
+    sceneRoot = std::filesystem::path(CG_LAB_ASSET_ROOT) / "scenes";
 
     std::vector<std::filesystem::path> files;
     std::error_code error;
@@ -191,10 +198,11 @@ void Application::loadScenes() {
                  jobs.workerCount());
 
     // GPU 자원 생성은 순서를 지켜 한 스레드에서만 한다.
-    for (asset::Model& model : models) {
-        scene::Scene& created = scenes.create(model.name);
+    for (size_t i = 0; i < files.size(); ++i) {
+        uint32_t modelIndex = registerModel(files[i], models[i]);
+        scene::Scene& created = scenes.create(files[i].stem().string());
         addDefaultLight(created);
-        addModelToScene(model, created);
+        instantiateModel(modelIndex, created);
     }
     geometry->build();
     for (size_t i = 0; i < scenes.count(); ++i) {
@@ -205,38 +213,73 @@ void Application::loadScenes() {
     spdlog::info("장면 {}개 준비 완료, 현재 장면: {}", scenes.count(), scenes.active().name);
 }
 
-void Application::addModelToScene(asset::Model& model, scene::Scene& scene) {
+uint32_t Application::registerModel(const std::filesystem::path& path, asset::Model& model) {
     gfx::Uploader uploader(*context);
     std::vector<uint32_t> textureSlots;
     textureSlots.reserve(model.textures.size());
     for (const asset::Texture& texture : model.textures) {
         textureSlots.push_back(textures->add(uploader, texture));
     }
-    uint32_t meshBase = geometry->addModel(model, textureSlots);
+
+    LoadedModel entry;
+    entry.path = path;
+    entry.meshBase = geometry->addModel(model, textureSlots);
+    entry.meshCount = static_cast<uint32_t>(model.meshes.size());
+    entry.skeleton = std::move(model.skeleton);
+    entry.instances = std::move(model.instances);
     uploader.flush();
+
+    loadedModels.push_back(std::move(entry));
+    return static_cast<uint32_t>(loadedModels.size()) - 1;
+}
+
+uint32_t Application::ensureModel(const std::filesystem::path& path) {
+    std::error_code error;
+    for (uint32_t i = 0; i < loadedModels.size(); ++i) {
+        if (std::filesystem::equivalent(loadedModels[i].path, path, error)) {
+            return i;
+        }
+    }
+
+    asset::Model model = asset::loadGltf(path);
+    jobs.parallelFor(static_cast<uint32_t>(model.textures.size()), 1, [&model](uint32_t begin, uint32_t end) {
+        for (uint32_t i = begin; i < end; ++i) {
+            asset::decodeTexture(model.textures[i]);
+        }
+    });
+    for (asset::Mesh& mesh : model.meshes) {
+        asset::buildLodHierarchy(mesh, &jobs);
+    }
+    return registerModel(path, model);
+}
+
+void Application::instantiateModel(uint32_t modelIndex, scene::Scene& scene) {
+    const LoadedModel& entry = loadedModels[modelIndex];
 
     // 모델 하나가 계층의 뿌리 하나를 이룬다. 기즈모로 뿌리를 옮기면 자식이 함께 따라간다.
     auto root = static_cast<int32_t>(scene.objects.size());
+    std::string name = entry.path.stem().string();
     scene::Object rootObject;
-    rootObject.name = model.name;
+    rootObject.name = name;
     scene.objects.push_back(std::move(rootObject));
 
     int32_t animator = -1;
-    if (!model.skeleton.skins.empty()) {
+    if (!entry.skeleton.skins.empty()) {
         animator = static_cast<int32_t>(scene.animators.size());
         scene::Animator created;
-        created.name = model.name;
-        created.skeleton = std::move(model.skeleton);
+        created.name = name;
+        created.skeleton = entry.skeleton;
+        created.model = static_cast<int32_t>(modelIndex);
         scene.animators.push_back(std::move(created));
         // 애니메이션 컨트롤러는 Unity 처럼 뿌리 오브젝트에 붙인다.
         scene.objects[static_cast<size_t>(root)].animator = animator;
     }
 
-    for (const asset::Instance& instance : model.instances) {
+    for (const asset::Instance& instance : entry.instances) {
         scene::Object object;
         object.name = instance.name;
         object.parent = root;
-        object.meshIndex = meshBase + instance.meshIndex;
+        object.meshIndex = entry.meshBase + instance.meshIndex;
         object.transform = scene::Transform::fromMatrix(instance.transform);
         if (instance.skin >= 0) {
             object.animator = animator;
@@ -252,23 +295,103 @@ void Application::addModelToScene(asset::Model& model, scene::Scene& scene) {
 void Application::loadModel(const std::filesystem::path& path) {
     // 지오메트리 버퍼를 통째로 다시 만들기 때문에 진행 중인 프레임이 끝난 뒤에 손대야 한다.
     renderer->waitIdle();
-
     uint64_t start = SDL_GetTicksNS();
-    asset::Model model = asset::loadGltf(path);
-    jobs.parallelFor(static_cast<uint32_t>(model.textures.size()), 1, [&model](uint32_t begin, uint32_t end) {
-        for (uint32_t i = begin; i < end; ++i) {
-            asset::decodeTexture(model.textures[i]);
-        }
-    });
-    for (asset::Mesh& mesh : model.meshes) {
-        asset::buildLodHierarchy(mesh, &jobs);
-    }
 
-    addModelToScene(model, scenes.active());
+    uint32_t modelIndex = ensureModel(path);
     geometry->build();
     renderer->onGeometryChanged();
+    instantiateModel(modelIndex, scenes.active());
+
     spdlog::info(
         "모델 적재: {} ({:.1f} ms)", path.filename().string(), static_cast<double>(SDL_GetTicksNS() - start) / 1.0e6);
+}
+
+void Application::saveScene(const std::filesystem::path& path) {
+    const scene::Scene& active = scenes.active();
+
+    // 이 장면이 실제로 쓰는 모델만 적는다. 그래야 다시 열 때 필요한 것만 올린다.
+    std::vector<int32_t> fileIndex(loadedModels.size(), -1);
+    scene::ModelTable table;
+    auto useModel = [&](uint32_t modelIndex) {
+        if (fileIndex[modelIndex] < 0) {
+            fileIndex[modelIndex] = static_cast<int32_t>(table.paths.size());
+            table.paths.push_back(loadedModels[modelIndex].path);
+            table.meshBase.push_back(loadedModels[modelIndex].meshBase);
+            table.meshCount.push_back(loadedModels[modelIndex].meshCount);
+        }
+    };
+    for (const scene::Object& object : active.objects) {
+        for (uint32_t i = 0; i < loadedModels.size(); ++i) {
+            if (object.meshIndex >= loadedModels[i].meshBase &&
+                object.meshIndex < loadedModels[i].meshBase + loadedModels[i].meshCount) {
+                useModel(i);
+                break;
+            }
+        }
+    }
+    for (const scene::Animator& animator : active.animators) {
+        if (animator.model >= 0) {
+            useModel(static_cast<uint32_t>(animator.model));
+        }
+    }
+
+    // 애니메이터가 가리키는 번호를 파일 안의 번호로 옮긴다.
+    scene::Scene remapped = active;
+    for (scene::Animator& animator : remapped.animators) {
+        animator.model = animator.model >= 0 ? fileIndex[static_cast<size_t>(animator.model)] : -1;
+    }
+
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    std::ofstream file(path);
+    if (!file) {
+        spdlog::error("장면을 저장하지 못했습니다: {}", path.string());
+        return;
+    }
+    file << scene::writeScene(remapped, table, assetRoot);
+    spdlog::info("장면 저장: {}", path.string());
+}
+
+void Application::openScene(const std::filesystem::path& path) {
+    std::ifstream file(path);
+    if (!file) {
+        spdlog::error("장면을 열지 못했습니다: {}", path.string());
+        return;
+    }
+    std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    scene::SceneFile loaded = scene::readScene(text);
+
+    // 적재는 지오메트리 버퍼를 다시 만드므로 진행 중인 프레임이 끝난 뒤에 한다.
+    renderer->waitIdle();
+    std::vector<uint32_t> modelIndices;
+    modelIndices.reserve(loaded.models.size());
+    for (const std::filesystem::path& modelPath : loaded.models) {
+        // 상대 경로는 에셋 뿌리 기준으로 푼다.
+        modelIndices.push_back(ensureModel(modelPath.is_absolute() ? modelPath : assetRoot / modelPath));
+    }
+    if (!loaded.models.empty()) {
+        geometry->build();
+        renderer->onGeometryChanged();
+    }
+
+    scene::Scene& created = scenes.create(loaded.scene.name);
+    created = std::move(loaded.scene);
+    for (size_t i = 0; i < created.objects.size(); ++i) {
+        int32_t model = loaded.objectModels[i];
+        if (model >= 0 && static_cast<size_t>(model) < modelIndices.size()) {
+            created.objects[i].meshIndex = loadedModels[modelIndices[model]].meshBase + loaded.objectLocalMeshes[i];
+        }
+    }
+    for (size_t i = 0; i < created.animators.size(); ++i) {
+        int32_t model = loaded.animatorModels[i];
+        if (model >= 0 && static_cast<size_t>(model) < modelIndices.size()) {
+            created.animators[i].skeleton = loadedModels[modelIndices[model]].skeleton;
+        }
+    }
+    created.update(0.0F);
+
+    scenes.setActive(scenes.count() - 1);
+    spdlog::info("장면 열기: {} (오브젝트 {}, 조명 {})", path.string(), created.objects.size(), created.lights.size());
 }
 
 void Application::run() {

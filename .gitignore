@@ -690,3 +690,6 @@ FodyWeavers.xsd
 ### Project ###
 build/
 external/
+
+# 편집기에서 저장한 장면 파일
+/public/scenes/

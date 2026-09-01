@@ -6,6 +6,7 @@
     "glm",
     "imguizmo",
     "meshoptimizer",
+    "nlohmann-json",
     "spdlog",
     "stb",
     "vulkan-memory-allocator",

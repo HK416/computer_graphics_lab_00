@@ -48,11 +48,27 @@ public:
     void run();
 
 private:
+    // 한 번 적재한 모델. 같은 파일을 두 번 올리지 않고, 장면 파일이 가리킬 대상이 된다.
+    struct LoadedModel {
+        std::filesystem::path path;
+        uint32_t meshBase = 0;
+        uint32_t meshCount = 0;
+        asset::Skeleton skeleton;
+        std::vector<asset::Instance> instances;
+    };
+
     void loadScenes();
-    // 모델 하나를 지오메트리 저장소에 넣고 장면에 뿌리 오브젝트와 자식들을 만든다.
-    void addModelToScene(asset::Model& model, scene::Scene& scene);
+    // 이미 해석해 둔 모델을 GPU 에 올리고 등록 번호를 돌려준다. 지오메트리 재구축은 부르는 쪽 몫이다.
+    uint32_t registerModel(const std::filesystem::path& path, asset::Model& model);
+    // 모델을 아직 올리지 않았으면 해석해서 올리고 등록 번호를 돌려준다.
+    uint32_t ensureModel(const std::filesystem::path& path);
+    // 등록된 모델로 장면에 뿌리 오브젝트와 자식들을 만든다.
+    void instantiateModel(uint32_t modelIndex, scene::Scene& scene);
     // 편집기가 부르는 런타임 적재. 지오메트리 버퍼를 다시 만들고 활성 장면에 붙인다.
     void loadModel(const std::filesystem::path& path);
+    // 장면을 커스텀 JSON 으로 저장하고 읽는다. 읽은 장면은 새 장면으로 추가한 뒤 전환한다.
+    void saveScene(const std::filesystem::path& path);
+    void openScene(const std::filesystem::path& path);
 
     SDL_Window* window = nullptr;
     std::unique_ptr<gfx::Context> context;
@@ -64,6 +80,8 @@ private:
     core::JobSystem jobs;
     scene::SceneManager scenes;
     std::filesystem::path assetRoot;
+    std::filesystem::path sceneRoot;
+    std::vector<LoadedModel> loadedModels;
     Options options;
 };
 
