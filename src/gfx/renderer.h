@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -300,6 +301,9 @@ private:
     void createRenderTargets();
     // 편집기가 방식을 바꾸면 시간축 업스케일러를 다시 만든다.
     void updateUpscaler();
+    // 시간축 업스케일러가 붙어 있고 마지막 크기 변경도 성공했는지. 벤더 SDK 는 컨텍스트 생성이
+    // 실패할 수 있어, 그때는 지터도 끄고 공간 경로로 돌아가야 한다.
+    bool temporalReady() const { return temporalUpscaler != nullptr && temporalUpscaler->ready(); }
     void createMeshPipelines();
     void createPostPipelines();
     void updateRenderExtent();
@@ -436,6 +440,9 @@ private:
     glm::vec2 currentJitter{0.0F};
     bool temporalResetThisFrame = true;
     uint32_t jitterIndex = 0;
+    // 프레임 간격. 벤더 업스케일러가 히스토리 감쇠에 쓴다. 편집기의 시간과 따로 재도 무방하다.
+    std::chrono::steady_clock::time_point lastFrameTime{};
+    float frameDeltaSeconds = 1.0F / 60.0F;
     // 경로에 따라 한쪽만 쓰이는 후처리 대상의 첫 레이아웃을 맞춘다.
     bool postTargetsNeedInit = true;
 

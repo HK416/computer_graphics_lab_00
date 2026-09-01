@@ -15,8 +15,10 @@ UpscalerInfo upscalerInfo(Upscaler kind, const Context& context) {
         return {kind, "내장 공간 업스케일", true, ""};
     case Upscaler::TAAU:
         return {kind, "내장 시간축 업스케일", true, ""};
-    case Upscaler::FSR:
-        return {kind, "FSR 3.1", false, "FidelityFX SDK 미포함"};
+    case Upscaler::FSR: {
+        const char* reason = fsrUnavailableReason();
+        return {kind, "FSR 3.1", reason == nullptr, reason == nullptr ? "" : reason};
+    }
     case Upscaler::DLSS:
         return {kind,
                 "DLSS",
@@ -32,6 +34,9 @@ std::unique_ptr<TemporalUpscaler> createUpscaler(Upscaler kind, Context& context
     }
     if (kind == Upscaler::TAAU) {
         return createTaauUpscaler(context, bindless);
+    }
+    if (kind == Upscaler::FSR) {
+        return createFsrUpscaler(context, bindless);
     }
     return nullptr;
 }

@@ -2041,7 +2041,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     // 경로 추적은 흔들지 않는다. 카메라가 바뀐 것으로 보여 누적을 매 프레임 버리게 된다.
     glm::vec2 jitterNdc{0.0F};
     currentJitter = glm::vec2{0.0F};
-    if (temporalUpscaler != nullptr && !(usePathTracing && rayTracer != nullptr)) {
+    if (temporalReady() && !(usePathTracing && rayTracer != nullptr)) {
         uint32_t phases = jitterPhaseCount(currentRenderExtent.width, currentDisplayExtent.width);
         currentJitter = haltonJitter(jitterIndex % phases + 1);
         ++jitterIndex;
@@ -2887,7 +2887,7 @@ void Renderer::recordCommands(Frame& frame,
                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
     // 경로 추적은 누적 버퍼가 이미 표본을 쌓고 있어 시간축 업스케일과 겹친다. 지터도 꺼져 있다.
-    bool temporalUpscale = temporalUpscaler != nullptr && !pathTracing;
+    bool temporalUpscale = temporalReady() && !pathTracing;
 
     TonemapPushConstants tonemapPushConstants{};
     tonemapPushConstants.colorTexture = pathTracing ? targets.pathAccumulationSampledSlot : targets.colorSlot;
@@ -2909,12 +2909,17 @@ void Renderer::recordCommands(Frame& frame,
                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
         UpscaleInputs inputs{};
+        inputs.color = &targets.color;
+        inputs.depth = &targets.depth;
+        inputs.velocity = &targets.velocity;
+        inputs.output = &targets.upscaledColor;
         inputs.colorTexture = targets.colorSlot;
         inputs.depthTexture = targets.depthSlot;
         inputs.velocityTexture = targets.velocitySlot;
         inputs.outputStorage = targets.upscaledColorStorageSlot;
         inputs.bindlessSet = bindlessSet;
         inputs.jitter = currentJitter;
+        inputs.deltaSeconds = frameDeltaSeconds;
         inputs.nearPlane = scene.camera.nearPlane;
         inputs.verticalFovRadians = glm::radians(scene.camera.fovYDegrees);
         inputs.reset = temporalResetThisFrame;
@@ -3131,6 +3136,14 @@ void Renderer::drawFrame(const scene::Scene& scene) {
 
     // 편집기가 방식을 바꿨으면 여기서 갈아 끼운다. 지터를 정하기 전이어야 한다.
     updateUpscaler();
+
+    auto now = std::chrono::steady_clock::now();
+    if (lastFrameTime.time_since_epoch().count() != 0) {
+        // 창을 옮기거나 장치가 멈추면 간격이 크게 튄다. 업스케일러가 히스토리를 통째로 버리지
+        // 않도록 한 자리에서 막아 둔다.
+        frameDeltaSeconds = std::clamp(std::chrono::duration<float>(now - lastFrameTime).count(), 1e-4F, 0.1F);
+    }
+    lastFrameTime = now;
 
     Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];
 

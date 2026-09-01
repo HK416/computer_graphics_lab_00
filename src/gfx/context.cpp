@@ -347,6 +347,12 @@ DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
     if (contains(extensions, "VK_KHR_portability_subset")) {
         candidate.enabledExtensions.push_back("VK_KHR_portability_subset");
     }
+    // 1.1 에서 코어로 올라간 확장이지만, vkGetDeviceProcAddr 은 확장을 명시적으로 켜야 KHR 접미사
+    // 별칭을 돌려준다. FidelityFX 백엔드가 vkGetBufferMemoryRequirements2KHR 을 그 이름으로 찾아
+    // 가드 없이 부르므로, 켜 두지 않으면 널 포인터를 호출한다.
+    if (contains(extensions, VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME)) {
+        candidate.enabledExtensions.push_back(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+    }
     if (candidate.caps.meshShader) {
         candidate.enabledExtensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
     }

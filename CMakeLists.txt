@@ -179,6 +179,7 @@ add_executable(cg_lab
     src/gfx/texture.cpp
     src/gfx/swapchain.cpp
     src/gfx/upscaler.cpp
+    src/gfx/upscaler_fsr.cpp
     src/gfx/upscaler_math.cpp
     src/gfx/upscaler_taau.cpp
     src/gfx/uploader.cpp
@@ -207,6 +208,54 @@ find_file(VMA_HEADER_PATH
     NO_DEFAULT_PATH
     REQUIRED)
 file(WRITE "${CMAKE_BINARY_DIR}/compat/vma/vk_mem_alloc.h" "#pragma once\n#include \"${VMA_HEADER_PATH}\"\n")
+
+# FSR 3.1 은 FidelityFX API 의 서명된 DLL 로 붙인다. SDK 를 통째로 빌드하면 셰이더 순열을
+# 수천 개 컴파일해야 하는데, 우리가 쓰는 것은 헤더와 amd_fidelityfx_vk.dll 뿐이다. DLL 은 실행
+# 시점에 찾으므로 없으면 편집기에서 FSR 만 비활성으로 나온다. 링크는 걸지 않는다.
+option(CG_LAB_FSR "FidelityFX FSR 3.1 업스케일러를 포함한다" ${WIN32})
+set(FIDELITYFX_TAG "v1.1.4" CACHE STRING "고정할 FidelityFX SDK 태그")
+set(FIDELITYFX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/fidelityfx")
+
+if(CG_LAB_FSR AND NOT WIN32)
+    message(STATUS "FidelityFX API 는 Windows 전용이라 FSR 을 끕니다")
+    set(CG_LAB_FSR OFF)
+endif()
+
+if(CG_LAB_FSR AND NOT EXISTS "${FIDELITYFX_DIR}/ffx-api/include/ffx_api/ffx_api.h")
+    find_package(Git REQUIRED)
+    message(STATUS "FidelityFX SDK ${FIDELITYFX_TAG} 클론: ${FIDELITYFX_DIR}")
+    # 히스토리와 blob 을 받지 않고 필요한 두 디렉터리만 채운다. 저장소 전체는 수백 MB 다.
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" clone --filter=blob:none --no-checkout --depth 1
+                --branch "${FIDELITYFX_TAG}"
+                https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git "${FIDELITYFX_DIR}"
+        RESULT_VARIABLE ffx_clone_result)
+    if(ffx_clone_result EQUAL 0)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" sparse-checkout set --cone ffx-api/include PrebuiltSignedDLL
+            WORKING_DIRECTORY "${FIDELITYFX_DIR}"
+            RESULT_VARIABLE ffx_sparse_result)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" checkout "${FIDELITYFX_TAG}"
+            WORKING_DIRECTORY "${FIDELITYFX_DIR}"
+            RESULT_VARIABLE ffx_checkout_result)
+    endif()
+    if(NOT EXISTS "${FIDELITYFX_DIR}/ffx-api/include/ffx_api/ffx_api.h")
+        message(WARNING "FidelityFX SDK 를 받지 못해 FSR 을 끕니다")
+        set(CG_LAB_FSR OFF)
+    endif()
+endif()
+
+if(CG_LAB_FSR)
+    target_compile_definitions(cg_lab PRIVATE CG_LAB_FSR)
+    target_include_directories(cg_lab PRIVATE "${FIDELITYFX_DIR}/ffx-api/include")
+    # 서명된 DLL 을 실행 파일 옆에 둔다. 링크가 아니라 실행 시점에 찾는다.
+    add_custom_command(TARGET cg_lab POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${FIDELITYFX_DIR}/PrebuiltSignedDLL/amd_fidelityfx_vk.dll"
+                "$<TARGET_FILE_DIR:cg_lab>/amd_fidelityfx_vk.dll"
+        COMMENT "amd_fidelityfx_vk.dll 복사")
+endif()
 
 target_include_directories(cg_lab PRIVATE src "${CMAKE_BINARY_DIR}/compat")
 target_link_libraries(cg_lab PRIVATE Vulkan::Vulkan SDL3::SDL3 glm::glm imgui::imgui imguizmo::imguizmo meshoptimizer::meshoptimizer nlohmann_json::nlohmann_json spdlog::spdlog GPUOpen::VulkanMemoryAllocator)

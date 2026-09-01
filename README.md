@@ -284,13 +284,52 @@ SPIR-V 로 컴파일되고 `RayQueryKHR` 능력이 변종에만 붙는다는 것
 - 표본은 `c / (1 + max(c))` 로 눌러 평균을 낸 뒤 되돌린다. 밝은 표본 하나가 평균을 지배해
   반딧불이로 남는 것을 막으면서도 결과가 어두운 쪽으로 치우치지 않는다.
 
-DamagedHelmet 을 렌더 배율 0.5 로 그리고 4배 초표본 기준과 견준 평균 절대 픽셀차(헬멧 영역):
-통과 4.32, 공간 4.47, 시간축 3.56. 8배속으로 뛰는 여우를 같은 배율로 돌려도 잔상이 남지 않는다.
+### FSR 3.1
 
-### FSR 과 DLSS
+AMD FidelityFX API 를 그대로 쓴다. SDK 는 vcpkg 처럼 고정 태그로 `external/fidelityfx` 에 성긴
+체크아웃하며, 받는 것은 헤더와 서명된 `amd_fidelityfx_vk.dll` 뿐이다. SDK 를 통째로 빌드하면 셰이더
+순열을 수천 개 컴파일해야 하는데 우리가 쓰는 것은 그 DLL 하나다.
 
-각각 AMD FidelityFX SDK 와 NVIDIA NGX SDK 가 필요하다. 편집기에서 항목은 보이되 쓸 수 없는 이유와
-함께 비활성으로 표시된다.
+DLL 은 **링크하지 않고 실행 시점에 찾는다**(`LoadLibrary` + `GetProcAddress`). 없으면 편집기에서
+FSR 항목만 비활성으로 나오고 나머지는 그대로 돈다. `-DCG_LAB_FSR=OFF` 로 통째로 뺄 수도 있고,
+Windows 가 아니면 자동으로 꺼진다.
+
+FSR 4 를 위해 따로 붙일 것은 없다. FidelityFX API 는 같은 진입점으로 하드웨어에 맞는 구현을
+고르므로, RDNA4 와 충분히 새 드라이버에서는 이 자리에 FSR 4 가 들어온다.
+
+넘기는 값 중 규약을 맞춰야 하는 것:
+
+- 색은 톤 매핑 앞의 선형 HDR 이라 `ENABLE_HIGH_DYNAMIC_RANGE` 를 켠다.
+- 깊이는 reverse-Z 무한 원거리라 `ENABLE_DEPTH_INVERTED` 와 `ENABLE_DEPTH_INFINITE` 를 켠다.
+- 모션 벡터를 화면 UV 로 담았으므로 `motionVectorScale` 에 렌더 해상도를 넣어 픽셀 단위로 되돌린다.
+  방향은 현재에서 이전으로, FSR 이 기대하는 것과 같다.
+- 생성 서술자에 엮은 포인터는 컨텍스트를 지울 때까지 살아 있어야 해서 멤버로 들고 있는다.
+
+**`VK_KHR_get_memory_requirements2` 를 장치에 켜야 한다.** 1.1 에서 코어로 올라간 확장이지만
+`vkGetDeviceProcAddr` 은 확장을 명시적으로 켠 경우에만 `KHR` 접미사 별칭을 돌려준다. FidelityFX
+백엔드는 `vkGetBufferMemoryRequirements2KHR` 을 그 이름으로 찾아 **가드 없이** 부르므로, 켜 두지
+않으면 컨텍스트 생성 중에 널 포인터를 호출하고 프로세스가 죽는다.
+
+검증 레이어를 켜면 FSR 이 내부 `rw_luma_history` 를 `rgba8` 로 선언하고 rgba16f 뷰에 묶는다는
+경고가 나온다. 벤더 DLL 안쪽이라 이 저장소에서 고칠 수 있는 것이 아니고, 실행에는 지장이 없다.
+
+### 품질 비교
+
+DamagedHelmet 을 렌더 배율 0.5, 고정 LOD 로 그리고 4배 초표본 기준과 견준 평균 절대 픽셀차
+(헬멧 영역, 프레임 120):
+
+| 방식 | 픽셀차 |
+| --- | --- |
+| FSR 3.1 | 3.22 |
+| 내장 시간축 (TAAU) | 3.82 |
+| 통과 | 4.32 |
+| 내장 공간 | 4.47 |
+
+8배속으로 뛰는 여우를 같은 배율로 돌려도 두 시간축 경로 모두 잔상이 남지 않는다.
+
+### DLSS
+
+NVIDIA NGX SDK 가 필요하다. 편집기에서 항목은 보이되 쓸 수 없는 이유와 함께 비활성으로 표시된다.
 
 ## 하드웨어 기능 게이트
 
@@ -302,6 +341,7 @@ DamagedHelmet 을 렌더 배율 0.5 로 그리고 4배 초표본 기준과 견�
 
 | 경로 | 설명 |
 | --- | --- |
+| `external` | 고정 태그로 자동 클론하는 의존성(vcpkg, FidelityFX SDK). 저장소에 담지 않는다 |
 | `src/app` | 애플리케이션 수명 주기, 윈도우, 입력 |
 | `src/asset` | glTF 적재와 CPU 측 모델 표현 |
 | `src/editor` | ImGui 기반 편집기 GUI |
