@@ -58,6 +58,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Vulkan REQUIRED)
+find_package(glm CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
@@ -101,7 +102,9 @@ add_executable(cg_lab
     src/core/error.cpp
     src/gfx/context.cpp
     src/gfx/renderer.cpp
+    src/gfx/resources.cpp
     src/gfx/swapchain.cpp
+    src/gfx/uploader.cpp
     src/gfx/vma_impl.cpp)
 
 add_dependencies(cg_lab cg_lab_shaders)
@@ -120,7 +123,7 @@ find_file(VMA_HEADER_PATH
 file(WRITE "${CMAKE_BINARY_DIR}/compat/vma/vk_mem_alloc.h" "#pragma once\n#include \"${VMA_HEADER_PATH}\"\n")
 
 target_include_directories(cg_lab PRIVATE src "${CMAKE_BINARY_DIR}/compat")
-target_link_libraries(cg_lab PRIVATE Vulkan::Vulkan SDL3::SDL3 spdlog::spdlog GPUOpen::VulkanMemoryAllocator)
+target_link_libraries(cg_lab PRIVATE Vulkan::Vulkan SDL3::SDL3 glm::glm spdlog::spdlog GPUOpen::VulkanMemoryAllocator)
 
 if(MSVC)
     target_compile_options(cg_lab PRIVATE /W4 /utf-8)

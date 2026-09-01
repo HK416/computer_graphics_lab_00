@@ -7,6 +7,8 @@
 
 #include <vulkan/vulkan.h>
 
+#include "gfx/resources.h"
+
 struct SDL_Window;
 
 namespace gfx {
@@ -37,6 +39,7 @@ private:
     void createFrames();
     void createPresentSemaphores();
     void destroyPresentSemaphores();
+    void createTriangleResources();
     void createTrianglePipeline();
     void recreateSwapchain();
     void recordCommands(VkCommandBuffer commandBuffer, uint32_t imageIndex);
@@ -52,6 +55,7 @@ private:
 
     VkPipelineLayout trianglePipelineLayout = VK_NULL_HANDLE;
     VkPipeline trianglePipeline = VK_NULL_HANDLE;
+    Buffer triangleVertices;
 
     bool resizeRequested = false;
     bool vsync = true;

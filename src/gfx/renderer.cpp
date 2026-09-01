@@ -5,16 +5,29 @@
 #include <string>
 #include <vector>
 
+#include <glm/vec2.hpp>
+#include <glm/vec3.hpp>
 #include <SDL3/SDL.h>
 #include <spdlog/spdlog.h>
 
 #include "core/error.h"
 #include "gfx/context.h"
 #include "gfx/swapchain.h"
+#include "gfx/uploader.h"
 #include "gfx/vk_check.h"
 
 namespace gfx {
 namespace {
+
+// 셰이더의 scalar 레이아웃 구조체와 그대로 맞춘다.
+struct TriangleVertex {
+    glm::vec2 position;
+    glm::vec3 color;
+};
+
+struct TrianglePushConstants {
+    VkDeviceAddress vertexBuffer;
+};
 
 std::vector<uint32_t> readSpirv(const std::string& name) {
     std::filesystem::path path = std::filesystem::path(CG_LAB_SHADER_ROOT) / name;
@@ -77,6 +90,7 @@ Renderer::Renderer(Context& context, SDL_Window* window) : context(context) {
     swapchain = std::make_unique<Swapchain>(context, window, vsync);
     createFrames();
     createPresentSemaphores();
+    createTriangleResources();
     createTrianglePipeline();
 
     VkSemaphoreTypeCreateInfo timelineInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
@@ -89,6 +103,7 @@ Renderer::Renderer(Context& context, SDL_Window* window) : context(context) {
 
 Renderer::~Renderer() {
     waitIdle();
+    destroyBuffer(context, triangleVertices);
     vkDestroyPipeline(context.device, trianglePipeline, nullptr);
     vkDestroyPipelineLayout(context.device, trianglePipelineLayout, nullptr);
     vkDestroySemaphore(context.device, frameTimeline, nullptr);
@@ -138,8 +153,29 @@ void Renderer::destroyPresentSemaphores() {
     presentReady.clear();
 }
 
+void Renderer::createTriangleResources() {
+    const TriangleVertex VERTICES[3]{
+        {{0.0F, -0.6F}, {1.0F, 0.2F, 0.2F}}, {{0.6F, 0.6F}, {0.2F, 1.0F, 0.2F}}, {{-0.6F, 0.6F}, {0.2F, 0.4F, 1.0F}}};
+
+    triangleVertices = createBuffer(context,
+                                    sizeof(VERTICES),
+                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                    MemoryLocation::DEVICE,
+                                    "삼각형 정점");
+
+    Uploader uploader(context);
+    uploader.uploadBuffer(triangleVertices, 0, VERTICES, sizeof(VERTICES));
+    uploader.flush();
+}
+
 void Renderer::createTrianglePipeline() {
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushConstantRange.size = sizeof(TrianglePushConstants);
+
     VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushConstantRange;
     VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &trianglePipelineLayout));
 
     VkShaderModule vertexModule = createShaderModule(context.device, "triangle.vert.spv");
@@ -256,6 +292,9 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, uint32_t imageIndex
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, trianglePipeline);
+    TrianglePushConstants pushConstants{triangleVertices.address};
+    vkCmdPushConstants(
+        commandBuffer, trianglePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pushConstants), &pushConstants);
     vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 
     vkCmdEndRendering(commandBuffer);
