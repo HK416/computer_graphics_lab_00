@@ -47,7 +47,7 @@ void frameCamera(scene::Scene& scene, const gfx::GeometryStore& geometry) {
 
 } // namespace
 
-Application::Application(const Options& options) : options(options) {
+Application::Application(const Options& options) : jobs(options.threadCount), options(options) {
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         core::fatal("SDL 초기화에 실패했습니다: {}", SDL_GetError());
     }
@@ -67,6 +67,7 @@ Application::Application(const Options& options) : options(options) {
     loadScenes();
     renderer = std::make_unique<gfx::Renderer>(*context, *geometry, *bindless, window);
     editorUi = std::make_unique<editor::Editor>(*context, *renderer, window);
+    editorUi->workerCount = jobs.workerCount();
     renderer->debugMode = options.debugMode;
     if (options.lodLevel != AUTOMATIC_LOD) {
         renderer->automaticLod = false;
@@ -107,10 +108,63 @@ void Application::loadScenes() {
     }
     std::ranges::sort(files);
 
-    gfx::Uploader uploader(*context);
-    for (const std::filesystem::path& file : files) {
-        asset::Model model = asset::loadGltf(file);
+    // glTF 파싱과 LOD 계층 구성은 서로 독립이므로 워커에 흩뿌린다. 적재 시간의 대부분이 여기다.
+    uint64_t loadStart = SDL_GetTicksNS();
+    std::vector<asset::Model> models(files.size());
+    jobs.parallelFor(static_cast<uint32_t>(files.size()), 1, [&files, &models](uint32_t begin, uint32_t end) {
+        for (uint32_t i = begin; i < end; ++i) {
+            models[i] = asset::loadGltf(files[i]);
+        }
+    });
 
+    // 텍스처 디코딩과 LOD 구성 모두 모델 경계를 넘어 하나의 목록으로 펼쳐야 워커에 고르게 퍼진다.
+    std::vector<asset::Texture*> allTextures;
+    for (asset::Model& model : models) {
+        for (asset::Texture& texture : model.textures) {
+            allTextures.push_back(&texture);
+        }
+    }
+    jobs.parallelFor(static_cast<uint32_t>(allTextures.size()), 1, [&allTextures](uint32_t begin, uint32_t end) {
+        for (uint32_t i = begin; i < end; ++i) {
+            asset::decodeTexture(*allTextures[i]);
+        }
+    });
+
+    std::vector<asset::Mesh*> allMeshes;
+    for (asset::Model& model : models) {
+        for (asset::Mesh& mesh : model.meshes) {
+            allMeshes.push_back(&mesh);
+        }
+    }
+    // 메쉬가 적으면 메쉬 단위 분배만으로는 워커가 놀기 때문에 계층 구성 안쪽까지 나눈다.
+    if (allMeshes.size() >= jobs.workerCount()) {
+        jobs.parallelFor(static_cast<uint32_t>(allMeshes.size()), 1, [&allMeshes](uint32_t begin, uint32_t end) {
+            for (uint32_t i = begin; i < end; ++i) {
+                asset::buildLodHierarchy(*allMeshes[i]);
+            }
+        });
+    } else {
+        for (asset::Mesh* mesh : allMeshes) {
+            asset::buildLodHierarchy(*mesh, &jobs);
+        }
+    }
+
+    size_t meshletTotal = 0;
+    size_t maxLodLevels = 0;
+    for (const asset::Mesh* mesh : allMeshes) {
+        meshletTotal += mesh->meshlets.size();
+        maxLodLevels = std::max(maxLodLevels, mesh->lods.size());
+    }
+    spdlog::info("에셋 적재 완료: 메쉬 {}, meshlet {}, LOD {}단계, {:.1f} ms, 워커 {}",
+                 allMeshes.size(),
+                 meshletTotal,
+                 maxLodLevels,
+                 static_cast<double>(SDL_GetTicksNS() - loadStart) / 1.0e6,
+                 jobs.workerCount());
+
+    // GPU 자원 생성은 순서를 지켜 한 스레드에서만 한다.
+    gfx::Uploader uploader(*context);
+    for (asset::Model& model : models) {
         std::vector<uint32_t> textureSlots;
         textureSlots.reserve(model.textures.size());
         for (const asset::Texture& texture : model.textures) {

@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include "asset/model.h"
+#include "core/job_system.h"
 
 namespace asset {
 namespace {
@@ -147,7 +148,7 @@ std::vector<std::vector<size_t>> partitionMeshlets(const std::vector<BuildMeshle
 
 } // namespace
 
-void buildLodHierarchy(Mesh& mesh) {
+void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs) {
     if (mesh.indices.empty() || mesh.vertices.empty()) {
         return;
     }
@@ -176,62 +177,91 @@ void buildLodHierarchy(Mesh& mesh) {
         std::vector<BuildMeshlet> next;
         bool anySimplified = false;
 
-        for (const std::vector<size_t>& group : groups) {
-            if (group.empty()) {
+        // 그룹끼리는 서로 겹치지 않으므로 단순화를 병렬로 돌릴 수 있다. 자식에 쓰는 부모 정보도
+        // 그룹마다 서로 다른 meshlet 을 건드리므로 경합이 없다.
+        struct GroupResult {
+            std::vector<BuildMeshlet> produced;
+            bool reduced = false;
+            bool valid = false;
+        };
+        std::vector<GroupResult> results(groups.size());
+
+        auto processGroups = [&](uint32_t begin, uint32_t end) {
+            for (uint32_t groupIndex = begin; groupIndex < end; ++groupIndex) {
+                const std::vector<size_t>& group = groups[groupIndex];
+                if (group.empty()) {
+                    continue;
+                }
+
+                std::vector<uint32_t> merged;
+                std::vector<glm::vec4> childSpheres;
+                float childError = 0.0F;
+                for (size_t child : group) {
+                    std::vector<uint32_t> expanded = expandIndices(previous[child]);
+                    merged.insert(merged.end(), expanded.begin(), expanded.end());
+                    childSpheres.push_back(previous[child].boundingSphere);
+                    childError = std::max(childError, previous[child].error);
+                }
+
+                auto targetIndexCount = static_cast<size_t>(static_cast<float>(merged.size()) * SIMPLIFY_RATIO);
+                targetIndexCount = (targetIndexCount / 3) * 3;
+                if (targetIndexCount < 3) {
+                    continue;
+                }
+
+                std::vector<uint32_t> simplified(merged.size());
+                float relativeError = 0.0F;
+                size_t simplifiedCount = meshopt_simplify(simplified.data(),
+                                                          merged.data(),
+                                                          merged.size(),
+                                                          positions,
+                                                          canonical.size(),
+                                                          sizeof(Vertex),
+                                                          targetIndexCount,
+                                                          SIMPLIFY_TARGET_ERROR,
+                                                          meshopt_SimplifyLockBorder,
+                                                          &relativeError);
+
+                bool reduced =
+                    static_cast<float>(simplifiedCount) <= static_cast<float>(merged.size()) * MIN_SIMPLIFY_PROGRESS;
+                if (reduced) {
+                    simplified.resize(simplifiedCount);
+                } else {
+                    // 줄지 않은 그룹도 그대로 올려 두어야 이 단계만 그렸을 때 빈 곳이 생기지 않는다.
+                    simplified = merged;
+                }
+
+                glm::vec4 groupSphere = mergeSpheres(childSpheres);
+                float groupError =
+                    childError + (reduced ? relativeError * simplifyScale : simplifyScale * CARRY_ERROR_EPSILON);
+
+                for (size_t child : group) {
+                    previous[child].parentSphere = groupSphere;
+                    previous[child].parentError = groupError;
+                }
+
+                results[groupIndex].produced = splitIntoMeshlets(simplified, canonical, level);
+                for (BuildMeshlet& meshlet : results[groupIndex].produced) {
+                    meshlet.errorSphere = groupSphere;
+                    meshlet.error = groupError;
+                }
+                results[groupIndex].reduced = reduced;
+                results[groupIndex].valid = true;
+            }
+        };
+
+        if (jobs != nullptr) {
+            jobs->parallelFor(static_cast<uint32_t>(groups.size()), 1, processGroups);
+        } else {
+            processGroups(0, static_cast<uint32_t>(groups.size()));
+        }
+
+        for (GroupResult& result : results) {
+            if (!result.valid) {
                 continue;
             }
-
-            std::vector<uint32_t> merged;
-            std::vector<glm::vec4> childSpheres;
-            float childError = 0.0F;
-            for (size_t child : group) {
-                std::vector<uint32_t> expanded = expandIndices(previous[child]);
-                merged.insert(merged.end(), expanded.begin(), expanded.end());
-                childSpheres.push_back(previous[child].boundingSphere);
-                childError = std::max(childError, previous[child].error);
-            }
-
-            auto targetIndexCount = static_cast<size_t>(static_cast<float>(merged.size()) * SIMPLIFY_RATIO);
-            targetIndexCount = (targetIndexCount / 3) * 3;
-            if (targetIndexCount < 3) {
-                continue;
-            }
-
-            std::vector<uint32_t> simplified(merged.size());
-            float relativeError = 0.0F;
-            size_t simplifiedCount = meshopt_simplify(simplified.data(),
-                                                      merged.data(),
-                                                      merged.size(),
-                                                      positions,
-                                                      canonical.size(),
-                                                      sizeof(Vertex),
-                                                      targetIndexCount,
-                                                      SIMPLIFY_TARGET_ERROR,
-                                                      meshopt_SimplifyLockBorder,
-                                                      &relativeError);
-            bool reduced =
-                static_cast<float>(simplifiedCount) <= static_cast<float>(merged.size()) * MIN_SIMPLIFY_PROGRESS;
-            anySimplified = anySimplified || reduced;
-            if (reduced) {
-                simplified.resize(simplifiedCount);
-            } else {
-                // 줄지 않은 그룹도 그대로 올려 두어야 이 단계만 그렸을 때 빈 곳이 생기지 않는다.
-                simplified = merged;
-            }
-
-            glm::vec4 groupSphere = mergeSpheres(childSpheres);
-            float groupError =
-                childError + (reduced ? relativeError * simplifyScale : simplifyScale * CARRY_ERROR_EPSILON);
-
-            for (size_t child : group) {
-                previous[child].parentSphere = groupSphere;
-                previous[child].parentError = groupError;
-            }
-
-            std::vector<BuildMeshlet> produced = splitIntoMeshlets(simplified, canonical, level);
-            for (BuildMeshlet& meshlet : produced) {
-                meshlet.errorSphere = groupSphere;
-                meshlet.error = groupError;
+            anySimplified = anySimplified || result.reduced;
+            for (BuildMeshlet& meshlet : result.produced) {
                 next.push_back(std::move(meshlet));
             }
         }

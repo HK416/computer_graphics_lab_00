@@ -68,6 +68,10 @@ private:
     int gizmoMode = 1;
     bool gizmoUsing = false;
     float frameTimeMilliseconds = 0.0F;
+
+public:
+    // 통계 표시용. 애플리케이션이 채운다.
+    unsigned workerCount = 0;
 };
 
 } // namespace editor

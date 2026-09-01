@@ -31,6 +31,7 @@ cmake --build --preset debug
 | `--lod-error <px>` | 자동 선정이 허용할 화면 공간 오차 |
 | `--neural-lod` | 신경망 LOD 임계값 보정 사용 |
 | `--triangle-budget <n>` | 신경망이 맞출 삼각형 예산 |
+| `--threads <n>` | 작업 워커 수. 0 이면 하드웨어 동시성에 맞춘다 |
 
 장면 뷰 위에서 마우스 오른쪽 버튼을 누른 채 WASD/QE 로 카메라를 움직인다. 장면 전환은 계층 패널의
 드롭다운이나 숫자 키로 한다.

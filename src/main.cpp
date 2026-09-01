@@ -29,6 +29,8 @@ int main(int argc, char* argv[]) {
             options.neuralLod = true;
         } else if (argument == "--triangle-budget" && i + 1 < argc) {
             options.triangleBudget = static_cast<float>(std::atof(argv[++i]));
+        } else if (argument == "--threads" && i + 1 < argc) {
+            options.threadCount = static_cast<unsigned>(std::atoi(argv[++i]));
         }
     }
 

@@ -10,6 +10,10 @@
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
+namespace core {
+class JobSystem;
+} // namespace core
+
 namespace asset {
 
 // 재질별로 다른 파이프라인 경로를 타므로 렌더러가 이 값으로 그리기 순서를 나눈다.
@@ -38,6 +42,8 @@ struct Texture {
     // 기저 색과 방사는 sRGB, 나머지는 선형으로 해석한다.
     bool srgb = false;
     SamplerDesc sampler;
+    // 적재 직후에는 인코딩된 바이트만 담고, 디코딩은 나중에 병렬로 한다.
+    std::vector<uint8_t> encoded;
     std::vector<uint8_t> pixels; // RGBA8
 };
 
@@ -133,6 +139,9 @@ Model loadGltf(const std::filesystem::path& path);
 
 // 정점 캐시와 오버드로를 최적화한 뒤 meshlet 으로 나누고, 단계별로 묶어 단순화해 LOD DAG 를 만든다.
 // 정점 버퍼는 meshlet 마다 정점을 소유하도록, 인덱스 버퍼는 LOD 단계별로 이어지도록 다시 만들어진다.
-void buildLodHierarchy(Mesh& mesh);
+void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs = nullptr);
+
+// 인코딩된 바이트를 RGBA8 로 푼다. 텍스처마다 독립이라 병렬로 돌릴 수 있다.
+void decodeTexture(Texture& texture);
 
 } // namespace asset

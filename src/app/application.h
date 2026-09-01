@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <memory>
 
+#include "core/job_system.h"
 #include "editor/editor.h"
 #include "gfx/bindless.h"
 #include "gfx/context.h"
@@ -24,6 +25,8 @@ struct Options {
     size_t initialScene = 0;
     // shaders/scene_data.glsl 의 DEBUG_MODE_* 값.
     uint32_t debugMode = 0;
+    // 0 이면 하드웨어 동시성에 맞춰 정한다.
+    unsigned threadCount = 0;
     // AUTOMATIC_LOD 면 오차 기반 자동 선정을 쓴다.
     uint32_t lodLevel = AUTOMATIC_LOD;
     float lodErrorThreshold = 1.0F;
@@ -50,6 +53,7 @@ private:
     std::unique_ptr<gfx::GeometryStore> geometry;
     std::unique_ptr<gfx::Renderer> renderer;
     std::unique_ptr<editor::Editor> editorUi;
+    core::JobSystem jobs;
     scene::SceneManager scenes;
     Options options;
 };

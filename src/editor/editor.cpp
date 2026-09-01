@@ -438,6 +438,7 @@ void Editor::buildRenderSettings(float deltaSeconds) {
                 frameTimeMilliseconds,
                 frameTimeMilliseconds > 0.0F ? 1000.0F / frameTimeMilliseconds : 0.0F);
     ImGui::Text("렌더 해상도 %ux%u", renderer.renderExtent().width, renderer.renderExtent().height);
+    ImGui::Text("작업 워커 %u", workerCount);
     ImGui::Separator();
 
     ImGui::SliderFloat("노출", &renderer.exposure, 0.05F, 8.0F, "%.2f");

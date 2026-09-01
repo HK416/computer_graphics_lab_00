@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <vector>
 
 #define CGLTF_IMPLEMENTATION
@@ -145,43 +146,31 @@ SamplerDesc toSamplerDesc(const cgltf_sampler* sampler) {
     return desc;
 }
 
-bool decodePixels(const uint8_t* bytes, size_t size, Texture& texture) {
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    stbi_uc* decoded = stbi_load_from_memory(bytes, static_cast<int>(size), &width, &height, &channels, 4);
-    if (decoded == nullptr) {
-        return false;
-    }
-    texture.width = static_cast<uint32_t>(width);
-    texture.height = static_cast<uint32_t>(height);
-    texture.pixels.assign(decoded, decoded + static_cast<size_t>(width) * height * 4);
-    stbi_image_free(decoded);
-    return true;
-}
-
-bool loadTexturePixels(const cgltf_image& image, const std::filesystem::path& baseDirectory, Texture& texture) {
+// 인코딩된 바이트만 모아 둔다. 실제 디코딩은 decodeTexture 가 나중에 병렬로 처리한다.
+bool loadTextureSource(const cgltf_image& image, const std::filesystem::path& baseDirectory, Texture& texture) {
     if (image.buffer_view != nullptr && image.buffer_view->buffer->data != nullptr) {
         const auto* bytes = static_cast<const uint8_t*>(image.buffer_view->buffer->data) + image.buffer_view->offset;
-        return decodePixels(bytes, image.buffer_view->size, texture);
+        texture.encoded.assign(bytes, bytes + image.buffer_view->size);
+        return true;
     }
     if (image.uri == nullptr) {
         return false;
     }
 
     std::filesystem::path file = baseDirectory / image.uri;
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    stbi_uc* decoded = stbi_load(file.string().c_str(), &width, &height, &channels, 4);
-    if (decoded == nullptr) {
+    std::error_code error;
+    auto size = std::filesystem::file_size(file, error);
+    if (error || size == 0) {
         return false;
     }
-    texture.width = static_cast<uint32_t>(width);
-    texture.height = static_cast<uint32_t>(height);
-    texture.pixels.assign(decoded, decoded + static_cast<size_t>(width) * height * 4);
-    stbi_image_free(decoded);
-    return true;
+    texture.encoded.resize(size);
+    std::FILE* handle = std::fopen(file.string().c_str(), "rb");
+    if (handle == nullptr) {
+        return false;
+    }
+    size_t read = std::fread(texture.encoded.data(), 1, size, handle);
+    std::fclose(handle);
+    return read == size;
 }
 
 // 같은 이미지라도 쓰이는 슬롯에 따라 sRGB 여부가 다르므로 재질을 먼저 훑어 색 공간을 정한다.
@@ -273,7 +262,6 @@ void appendPrimitive(Model& model, const cgltf_data& data, const cgltf_primitive
         generateTangents(mesh.vertices, mesh.indices);
     }
     computeBounds(mesh);
-    buildLodHierarchy(mesh);
 
     mesh.materialIndex = static_cast<uint32_t>(model.materials.size() - 1);
     if (primitive.material != nullptr) {
@@ -336,7 +324,7 @@ Model loadGltf(const std::filesystem::path& path) {
         texture.name = source.name != nullptr ? source.name : "텍스처";
         texture.srgb = srgbFlags[i];
         texture.sampler = toSamplerDesc(source.sampler);
-        if (source.image == nullptr || !loadTexturePixels(*source.image, baseDirectory, texture)) {
+        if (source.image == nullptr || !loadTextureSource(*source.image, baseDirectory, texture)) {
             spdlog::warn("텍스처를 해석하지 못했습니다: {} ({})", texture.name, model.name);
         }
         model.textures.push_back(std::move(texture));
@@ -378,23 +366,38 @@ Model loadGltf(const std::filesystem::path& path) {
     cgltf_free(data);
 
     size_t triangleCount = 0;
-    size_t meshletCount = 0;
-    size_t maxLodLevels = 0;
     for (const Mesh& mesh : model.meshes) {
-        triangleCount += mesh.lods.empty() ? mesh.indices.size() / 3 : mesh.lods.front().indexCount / 3;
-        meshletCount += mesh.meshlets.size();
-        maxLodLevels = std::max(maxLodLevels, mesh.lods.size());
+        triangleCount += mesh.indices.size() / 3;
     }
-    spdlog::info("glTF 적재: {} (메쉬 {}, 재질 {}, 텍스처 {}, 인스턴스 {}, 삼각형 {}, meshlet {}, LOD {}단계)",
+    spdlog::info("glTF 적재: {} (메쉬 {}, 재질 {}, 텍스처 {}, 인스턴스 {}, 삼각형 {})",
                  model.name,
                  model.meshes.size(),
                  model.materials.size(),
                  model.textures.size(),
                  model.instances.size(),
-                 triangleCount,
-                 meshletCount,
-                 maxLodLevels);
+                 triangleCount);
     return model;
+}
+
+void decodeTexture(Texture& texture) {
+    if (texture.encoded.empty()) {
+        return;
+    }
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_uc* decoded = stbi_load_from_memory(
+        texture.encoded.data(), static_cast<int>(texture.encoded.size()), &width, &height, &channels, 4);
+    texture.encoded.clear();
+    texture.encoded.shrink_to_fit();
+    if (decoded == nullptr) {
+        spdlog::warn("텍스처를 해석하지 못했습니다: {}", texture.name);
+        return;
+    }
+    texture.width = static_cast<uint32_t>(width);
+    texture.height = static_cast<uint32_t>(height);
+    texture.pixels.assign(decoded, decoded + static_cast<size_t>(width) * height * 4);
+    stbi_image_free(decoded);
 }
 
 } // namespace asset
