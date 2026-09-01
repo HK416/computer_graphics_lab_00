@@ -243,6 +243,10 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& 
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     VK_CHECK(vkCreateSampler(context.device, &samplerInfo, nullptr, &postSampler));
 
+    // NGX 는 초기화해 봐야 쓸 수 있는지 알 수 있다. 편집기가 항목을 켤 수 있으려면 고르기 전에
+    // 미리 띄워 둬야 한다.
+    startDlssRuntime(context);
+
     createRenderTargets();
     createFrames();
     createPresentSemaphores();
@@ -269,6 +273,8 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& 
 Renderer::~Renderer() {
     waitIdle();
     temporalUpscaler.reset();
+    // NGX 는 장치가 살아 있을 때 정리해야 한다.
+    shutdownDlssRuntime();
     vkDestroyPipeline(context.device, skyPipeline, nullptr);
     for (VkPipeline pipeline : upscalePipelines) {
         vkDestroyPipeline(context.device, pipeline, nullptr);
@@ -406,7 +412,8 @@ void Renderer::updateUpscaler() {
     temporalUpscaler = createUpscaler(upscaler, context, bindless);
     if (temporalUpscaler == nullptr) {
         // 편집기는 쓸 수 없는 방식을 고르지 못하게 하지만 실행 인자로는 들어올 수 있다.
-        spdlog::warn("{} 을(를) 쓸 수 없어 내장 공간 업스케일로 돌아갑니다", upscalerInfo(upscaler, context).reason);
+        UpscalerInfo info = upscalerInfo(upscaler, context);
+        spdlog::warn("{} 을(를) 쓸 수 없어 내장 공간 업스케일로 돌아갑니다: {}", info.name, info.reason);
         upscaler = Upscaler::SPATIAL;
         activeUpscaler = upscaler;
         return;

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include <glm/vec2.hpp>
 #include <vulkan/vulkan.h>
@@ -81,7 +82,20 @@ std::unique_ptr<TemporalUpscaler> createUpscaler(Upscaler kind, Context& context
 // 구현별 생성 함수와 사용 불가 사유. createUpscaler 와 upscalerInfo 가 골라 부른다.
 std::unique_ptr<TemporalUpscaler> createTaauUpscaler(Context& context, BindlessTextures& bindless);
 std::unique_ptr<TemporalUpscaler> createFsrUpscaler(Context& context, BindlessTextures& bindless);
+std::unique_ptr<TemporalUpscaler> createDlssUpscaler(Context& context, BindlessTextures& bindless);
 // 쓸 수 있으면 nullptr 을 돌려준다.
 const char* fsrUnavailableReason();
+const char* dlssUnavailableReason(const Context& context);
+
+// NGX 가 요구하는 인스턴스/장치 확장. 장치를 만들기 전에 불러야 한다. NGX 는 자기 셰이더를 직접
+// 올리느라 NVX 확장 몇 개가 있어야 하고, 그건 인스턴스/장치 생성 시점에만 켤 수 있다. DLSS 가
+// 빠진 빌드에서는 빈 목록이다.
+void dlssRequiredExtensions(std::vector<const char*>& instanceExtensions,
+                            std::vector<const char*>& deviceExtensions);
+// NGX 를 미리 띄워 편집기가 가용성을 물어볼 수 있게 한다. NVIDIA 장치가 아니면 아무것도 하지 않는다.
+void startDlssRuntime(Context& context);
+// NGX 가 잡은 자원을 푼다. 장치를 지우기 전에 불러야 한다. 정적 소멸자에 맡기면 이미 없어진
+// 장치를 붙들고 종료 중에 죽는다.
+void shutdownDlssRuntime();
 
 } // namespace gfx

@@ -3,10 +3,6 @@
 #include "gfx/context.h"
 
 namespace gfx {
-namespace {
-constexpr uint32_t NVIDIA_VENDOR_ID = 0x10DE;
-} // namespace
-
 UpscalerInfo upscalerInfo(Upscaler kind, const Context& context) {
     switch (kind) {
     case Upscaler::NONE:
@@ -19,11 +15,10 @@ UpscalerInfo upscalerInfo(Upscaler kind, const Context& context) {
         const char* reason = fsrUnavailableReason();
         return {kind, "FSR 3.1", reason == nullptr, reason == nullptr ? "" : reason};
     }
-    case Upscaler::DLSS:
-        return {kind,
-                "DLSS",
-                false,
-                context.properties.vendorID == NVIDIA_VENDOR_ID ? "NGX SDK 미포함" : "NVIDIA 장치 아님"};
+    case Upscaler::DLSS: {
+        const char* reason = dlssUnavailableReason(context);
+        return {kind, "DLSS", reason == nullptr, reason == nullptr ? "" : reason};
+    }
     }
     return {kind, "알 수 없음", false, "지원하지 않는 방식"};
 }
@@ -37,6 +32,9 @@ std::unique_ptr<TemporalUpscaler> createUpscaler(Upscaler kind, Context& context
     }
     if (kind == Upscaler::FSR) {
         return createFsrUpscaler(context, bindless);
+    }
+    if (kind == Upscaler::DLSS) {
+        return createDlssUpscaler(context, bindless);
     }
     return nullptr;
 }

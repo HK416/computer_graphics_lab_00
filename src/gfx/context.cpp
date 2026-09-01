@@ -12,12 +12,17 @@
 #include <spdlog/spdlog.h>
 
 #include "core/error.h"
+#include "gfx/upscaler.h"
 #include "gfx/vk_check.h"
 
 namespace gfx {
 namespace {
 
 constexpr const char* VALIDATION_LAYER = "VK_LAYER_KHRONOS_validation";
+
+// NGX 가 요구하는 확장. 인스턴스는 생성자에서, 장치는 후보를 고르는 곳에서 쓰므로 파일 범위에 둔다.
+std::vector<const char*> ngxInstanceExtensions;
+std::vector<const char*> ngxDeviceExtensions;
 
 #ifdef NDEBUG
 constexpr bool WANT_VALIDATION = false;
@@ -260,6 +265,8 @@ Capabilities queryCapabilities(const FeatureChain& f,
     caps.pipelineStatistics = f.features2.features.pipelineStatisticsQuery == VK_TRUE;
     caps.depthClamp = f.features2.features.depthClamp == VK_TRUE;
     caps.shaderFloat16 = f.v12.shaderFloat16 == VK_TRUE;
+    // FSR 셰이더가 SPIR-V Int16 능력을 선언한다. 켜 두지 않으면 셰이더 모듈 생성이 거부된다.
+    caps.shaderInt16 = f.features2.features.shaderInt16 == VK_TRUE && f.v11.storageBuffer16BitAccess == VK_TRUE;
     caps.shaderInt8 = f.v12.shaderInt8 == VK_TRUE;
     caps.subgroupSizeControl = f.v13.subgroupSizeControl == VK_TRUE;
     caps.textureCompressionBc = f.features2.features.textureCompressionBC == VK_TRUE;
@@ -353,6 +360,16 @@ DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
     if (contains(extensions, VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME)) {
         candidate.enabledExtensions.push_back(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
     }
+    for (const char* name : ngxDeviceExtensions) {
+        // bufferDeviceAddress 는 코어 1.2 기능으로 이미 켜 두었다. 승격 전 확장을 함께 켜는 것은
+        // 규격 위반이라 장치 생성이 거부된다.
+        if (std::string_view{name} == VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) {
+            continue;
+        }
+        if (contains(extensions, name)) {
+            candidate.enabledExtensions.push_back(name);
+        }
+    }
     if (candidate.caps.meshShader) {
         candidate.enabledExtensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
     }
@@ -438,6 +455,17 @@ Context::Context(SDL_Window* window) {
     if (contains(availableInstanceExtensions, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) {
         instanceExtensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
         instanceFlags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    }
+
+    // NGX 는 자기 셰이더를 직접 올리느라 확장 몇 개를 요구하고, 그건 인스턴스/장치를 만들 때만
+    // 켤 수 있다. 없는 확장은 조용히 건너뛰고, 그러면 DLSS 만 쓸 수 없게 된다.
+    ngxInstanceExtensions.clear();
+    ngxDeviceExtensions.clear();
+    dlssRequiredExtensions(ngxInstanceExtensions, ngxDeviceExtensions);
+    for (const char* name : ngxInstanceExtensions) {
+        if (contains(availableInstanceExtensions, name)) {
+            instanceExtensions.push_back(name);
+        }
     }
 
     bool useValidation = WANT_VALIDATION && validationLayerAvailable() &&
@@ -538,11 +566,13 @@ Context::Context(SDL_Window* window) {
     enabled.features2.features.fragmentStoresAndAtomics = VK_TRUE;
     enabled.features2.features.samplerAnisotropy = VK_TRUE;
     enabled.features2.features.shaderInt64 = VK_TRUE;
+    enabled.features2.features.shaderInt16 = caps.shaderInt16 ? VK_TRUE : VK_FALSE;
     enabled.features2.features.pipelineStatisticsQuery = caps.pipelineStatistics ? VK_TRUE : VK_FALSE;
     enabled.features2.features.depthClamp = caps.depthClamp ? VK_TRUE : VK_FALSE;
     enabled.features2.features.textureCompressionBC = caps.textureCompressionBc ? VK_TRUE : VK_FALSE;
     enabled.features2.features.textureCompressionASTC_LDR = caps.textureCompressionAstc ? VK_TRUE : VK_FALSE;
     enabled.v11.shaderDrawParameters = VK_TRUE;
+    enabled.v11.storageBuffer16BitAccess = caps.shaderInt16 ? VK_TRUE : VK_FALSE;
     enabled.v12.bufferDeviceAddress = VK_TRUE;
     enabled.v12.descriptorIndexing = VK_TRUE;
     enabled.v12.runtimeDescriptorArray = VK_TRUE;

@@ -24,6 +24,8 @@ struct Capabilities {
     bool samplerFilterMinmax = false;
     bool pipelineStatistics = false;
     bool shaderFloat16 = false;
+    // FSR 셰이더가 SPIR-V Int16 능력을 선언한다.
+    bool shaderInt16 = false;
     bool shaderInt8 = false;
     bool subgroupSizeControl = false;
     bool textureCompressionBc = false;

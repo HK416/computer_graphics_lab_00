@@ -179,6 +179,7 @@ add_executable(cg_lab
     src/gfx/texture.cpp
     src/gfx/swapchain.cpp
     src/gfx/upscaler.cpp
+    src/gfx/upscaler_dlss.cpp
     src/gfx/upscaler_fsr.cpp
     src/gfx/upscaler_math.cpp
     src/gfx/upscaler_taau.cpp
@@ -255,6 +256,45 @@ if(CG_LAB_FSR)
                 "${FIDELITYFX_DIR}/PrebuiltSignedDLL/amd_fidelityfx_vk.dll"
                 "$<TARGET_FILE_DIR:cg_lab>/amd_fidelityfx_vk.dll"
         COMMENT "amd_fidelityfx_vk.dll 복사")
+endif()
+
+# DLSS 는 SDK 를 자동으로 받지 않는다. 재배포 조건이 붙은 SDK 라, 받을지 말지는 쓰는 쪽이 정할
+# 일이다. https://github.com/NVIDIA/DLSS 를 받아 그 경로를 넘기면 켜진다.
+set(CG_LAB_DLSS_SDK "" CACHE PATH "NVIDIA DLSS(NGX) SDK 경로. 비우면 DLSS 를 빼고 빌드한다")
+
+if(CG_LAB_DLSS_SDK AND NOT WIN32)
+    message(STATUS "이 저장소의 DLSS 연결은 Windows 전용입니다")
+    set(CG_LAB_DLSS_SDK "")
+endif()
+
+if(CG_LAB_DLSS_SDK)
+    set(ngx_include "${CG_LAB_DLSS_SDK}/include")
+    set(ngx_lib_dir "${CG_LAB_DLSS_SDK}/lib/Windows_x86_64/x64")
+    # 디버그 빌드는 디버그 CRT 를 쓰는 변종을 링크해야 런타임이 갈리지 않는다. 가중치 DLL 은
+    # 라이브러리 변종과 무관하므로 양쪽 다 rel 을 쓴다. dev 쪽은 화면 한가운데에 배포 금지
+    # 워터마크를 그려서, 렌더 결과를 눈으로 보는 이 저장소에는 맞지 않는다. NGX 쪽을 진단할 일이
+    # 있으면 lib/Windows_x86_64/dev 의 DLL 로 바꿔 넣으면 된다.
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(ngx_lib "${ngx_lib_dir}/nvsdk_ngx_d_dbg.lib")
+    else()
+        set(ngx_lib "${ngx_lib_dir}/nvsdk_ngx_d.lib")
+    endif()
+    set(ngx_dll_dir "${CG_LAB_DLSS_SDK}/lib/Windows_x86_64/rel")
+
+    if(NOT EXISTS "${ngx_include}/nvsdk_ngx_vk.h" OR NOT EXISTS "${ngx_lib}")
+        message(WARNING "CG_LAB_DLSS_SDK 경로에서 NGX 를 찾지 못해 DLSS 를 뺍니다: ${CG_LAB_DLSS_SDK}")
+        set(CG_LAB_DLSS_SDK "")
+    else()
+        target_compile_definitions(cg_lab PRIVATE CG_LAB_DLSS)
+        target_include_directories(cg_lab PRIVATE "${ngx_include}")
+        target_link_libraries(cg_lab PRIVATE "${ngx_lib}")
+        # 가중치를 담은 DLL. NGX 는 실행 파일 옆이나 초기화 때 넘긴 경로에서 찾는다.
+        add_custom_command(TARGET cg_lab POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${ngx_dll_dir}/nvngx_dlss.dll"
+                    "$<TARGET_FILE_DIR:cg_lab>/nvngx_dlss.dll"
+            COMMENT "nvngx_dlss.dll 복사")
+    endif()
 endif()
 
 target_include_directories(cg_lab PRIVATE src "${CMAKE_BINARY_DIR}/compat")
