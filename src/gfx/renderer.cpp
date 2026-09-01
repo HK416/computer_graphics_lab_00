@@ -303,17 +303,11 @@ void Renderer::setDisplayExtent(VkExtent2D extent) {
 
 std::vector<UpscalerInfo> Renderer::upscalers() const {
     bool isNvidia = context.properties.vendorID == 0x10DE;
-#if defined(__APPLE__)
-    constexpr bool IS_APPLE = true;
-#else
-    constexpr bool IS_APPLE = false;
-#endif
     return {
         {Upscaler::NONE, "없음 (통과)", true, ""},
         {Upscaler::SPATIAL, "내장 공간 업스케일", true, ""},
         {Upscaler::FSR, "FSR", false, "FidelityFX SDK 미포함"},
         {Upscaler::DLSS, "DLSS", false, isNvidia ? "NGX SDK 미포함" : "NVIDIA 장치 아님"},
-        {Upscaler::METALFX, "MetalFX", false, IS_APPLE ? "Metal 상호운용 필요" : "Apple 플랫폼 아님"},
     };
 }
 

@@ -52,7 +52,6 @@ enum class Upscaler : uint32_t {
     SPATIAL = 1,
     FSR = 2,
     DLSS = 3,
-    METALFX = 4,
 };
 
 struct UpscalerInfo {
