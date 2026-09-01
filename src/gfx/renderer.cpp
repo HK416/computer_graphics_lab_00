@@ -37,6 +37,8 @@ constexpr VkFormat DEPTH_FORMAT = VK_FORMAT_D32_SFLOAT;
 constexpr VkFormat OIT_ACCUMULATION_FORMAT = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkFormat OIT_REVEALAGE_FORMAT = VK_FORMAT_R16_SFLOAT;
 constexpr VkFormat PRESENT_FORMAT = VK_FORMAT_R8G8B8A8_UNORM;
+// 모션 벡터. 화면 UV 단위라 절댓값이 1 을 넘지 않아 반정밀도로 충분하다.
+constexpr VkFormat VELOCITY_FORMAT = VK_FORMAT_R16G16_SFLOAT;
 constexpr uint32_t MINIMUM_INSTANCE_CAPACITY = 1024;
 // 그림자 시점의 근평면. 광원에 아주 가까운 물체는 그림자를 만들지 못한다.
 constexpr float SHADOW_NEAR_PLANE = 0.05F;
@@ -57,6 +59,8 @@ struct GpuCamera {
     glm::vec4 viewport;
     // 깊이에서 월드 위치를 되돌릴 때 쓴다.
     glm::mat4 inverseViewProjection;
+    // 지난 프레임의 시점 변환. 모션 벡터가 이전 위치를 되짚는다.
+    glm::mat4 previousViewProjection;
     // x: 조명 수, y: 그림자 아틀라스 슬롯, z: SSAO 슬롯, w: 아틀라스 한 변의 타일 수.
     // bindless 슬롯은 상위 8비트가 샘플러 번호라 float 로는 정확히 담기지 않는다.
     glm::uvec4 shading;
@@ -129,6 +133,7 @@ struct ScenePushConstants {
     VkDeviceAddress vertexMeshlets;
     VkDeviceAddress meshletGroups;
     VkDeviceAddress joints;
+    VkDeviceAddress previousJoints;
     VkDeviceAddress lights;
     VkDeviceAddress shadowMatrices;
     uint32_t meshletGroupBase;
@@ -297,6 +302,7 @@ Renderer::~Renderer() {
         destroyBuffer(context, frame.shadowDrawBuffer);
         destroyBuffer(context, frame.shadowMatrixBuffer);
         destroyBuffer(context, frame.lightBuffer);
+        destroyBuffer(context, frame.previousJointBuffer);
         destroyBuffer(context, frame.jointBuffer);
         destroyBuffer(context, frame.lodNetworkBuffer);
         destroyBuffer(context, frame.drawCountBuffer);
@@ -325,6 +331,7 @@ Renderer::~Renderer() {
     destroyImage(context, targets.present);
     destroyImage(context, targets.oitRevealage);
     destroyImage(context, targets.oitAccumulation);
+    destroyImage(context, targets.velocity);
     destroyImage(context, targets.depth);
     destroyImage(context, targets.color);
     vkDestroySampler(context.device, postSampler, nullptr);
@@ -384,6 +391,7 @@ std::vector<Renderer::TargetView> Renderer::targetViews() const {
                                   {"톤 매핑", targets.tonemapped.view, READ_ONLY},
                                   {"표시 (업스케일)", targets.present.view, READ_ONLY},
                                   {"깊이", targets.depth.view, READ_ONLY},
+                                  {"모션 벡터", targets.velocity.view, READ_ONLY},
                                   // HZB 는 컴퓨트가 쓰고 읽으므로 계속 GENERAL 이다.
                                   {"HZB", targets.hzb.view, VK_IMAGE_LAYOUT_GENERAL}};
     if (oitTargetsValid) {
@@ -406,6 +414,7 @@ void Renderer::createRenderTargets() {
     destroyImage(context, targets.present);
     destroyImage(context, targets.oitRevealage);
     destroyImage(context, targets.oitAccumulation);
+    destroyImage(context, targets.velocity);
     destroyImage(context, targets.depth);
     destroyImage(context, targets.color);
 
@@ -423,6 +432,12 @@ void Renderer::createRenderTargets() {
     depthDesc.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     depthDesc.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
     targets.depth = createImage(context, depthDesc, "깊이");
+
+    ImageDesc velocityDesc;
+    velocityDesc.extent = extent;
+    velocityDesc.format = VELOCITY_FORMAT;
+    velocityDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    targets.velocity = createImage(context, velocityDesc, "모션 벡터");
 
     ImageDesc accumulationDesc = colorDesc;
     accumulationDesc.format = OIT_ACCUMULATION_FORMAT;
@@ -522,6 +537,7 @@ void Renderer::createRenderTargets() {
         targets.revealageSlot = bindless.add(targets.oitRevealage.view, postSampler);
         targets.depthSlot = bindless.add(targets.depth.view, postSampler);
         targets.tonemappedSlot = bindless.add(targets.tonemapped.view, postSampler);
+        targets.velocitySlot = bindless.add(targets.velocity.view, postSampler);
         // HZB 는 컴퓨트가 쓰고 읽으므로 계속 GENERAL 레이아웃에 둔다.
         targets.hzbSampledSlot = bindless.add(targets.hzb.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
         targets.pathAccumulationStorageSlot = bindless.addStorageImageRgba(targets.pathAccumulation.view);
@@ -544,6 +560,7 @@ void Renderer::createRenderTargets() {
         bindless.update(targets.revealageSlot, targets.oitRevealage.view, postSampler);
         bindless.update(targets.depthSlot, targets.depth.view, postSampler);
         bindless.update(targets.tonemappedSlot, targets.tonemapped.view, postSampler);
+        bindless.update(targets.velocitySlot, targets.velocity.view, postSampler);
         bindless.update(targets.hzbSampledSlot, targets.hzb.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
         bindless.updateStorageImageRgba(targets.pathAccumulationStorageSlot, targets.pathAccumulation.view);
         bindless.update(
@@ -637,11 +654,12 @@ void Renderer::reserveJoints(Frame& frame, uint32_t jointCount) {
     }
     uint32_t capacity = std::max(needed, frame.jointCapacity * 2);
     destroyBuffer(context, frame.jointBuffer);
-    frame.jointBuffer = createBuffer(context,
-                                     static_cast<VkDeviceSize>(capacity) * sizeof(glm::mat4),
-                                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                     MemoryLocation::HOST_WRITE,
-                                     "조인트 행렬");
+    destroyBuffer(context, frame.previousJointBuffer);
+    VkDeviceSize bytes = static_cast<VkDeviceSize>(capacity) * sizeof(glm::mat4);
+    frame.jointBuffer =
+        createBuffer(context, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, MemoryLocation::HOST_WRITE, "조인트 행렬");
+    frame.previousJointBuffer = createBuffer(
+        context, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, MemoryLocation::HOST_WRITE, "이전 조인트 행렬");
     frame.jointCapacity = capacity;
 }
 
@@ -1297,11 +1315,14 @@ void Renderer::createMeshPipelines() {
 
     constexpr VkColorComponentFlags ALL_CHANNELS =
         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    constexpr VkColorComponentFlags VELOCITY_CHANNELS = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT;
     std::array<VkPipelineColorBlendAttachmentState, 2> blendAttachments{};
     blendAttachments[0].colorWriteMask = ALL_CHANNELS;
+    blendAttachments[1].colorWriteMask = VELOCITY_CHANNELS;
 
     VkPipelineColorBlendStateCreateInfo colorBlend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    colorBlend.attachmentCount = 1;
+    // 불투명 경로는 색상과 모션 벡터, 반투명 경로는 누적과 잔여 투과율로 둘 다 대상이 둘이다.
+    colorBlend.attachmentCount = 2;
     colorBlend.pAttachments = blendAttachments.data();
 
     // 양면 재질은 컬 모드만 다르므로 파이프라인을 늘리지 않고 동적 상태로 전환한다.
@@ -1310,9 +1331,9 @@ void Renderer::createMeshPipelines() {
     dynamicState.dynamicStateCount = 3;
     dynamicState.pDynamicStates = dynamicStates;
 
-    std::array<VkFormat, 2> colorFormats{COLOR_FORMAT, OIT_REVEALAGE_FORMAT};
+    std::array<VkFormat, 2> colorFormats{COLOR_FORMAT, VELOCITY_FORMAT};
     VkPipelineRenderingCreateInfo renderingInfo{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.colorAttachmentCount = 2;
     renderingInfo.pColorAttachmentFormats = colorFormats.data();
     renderingInfo.depthAttachmentFormat = DEPTH_FORMAT;
 
@@ -1335,21 +1356,19 @@ void Renderer::createMeshPipelines() {
         [&](VkShaderModule opaque, VkShaderModule oit, VkPipelineLayout layout, VkPipeline* target) {
             stages[1].module = opaque;
             depthStencil.depthWriteEnable = VK_TRUE;
-            renderingInfo.colorAttachmentCount = 1;
-            colorFormats[0] = COLOR_FORMAT;
-            colorBlend.attachmentCount = 1;
+            colorFormats = {COLOR_FORMAT, VELOCITY_FORMAT};
             blendAttachments = {};
             blendAttachments[0].colorWriteMask = ALL_CHANNELS;
+            blendAttachments[1].colorWriteMask = VELOCITY_CHANNELS;
             pipelineInfo.layout = layout;
             for (uint32_t variant = 0; variant < ALPHA_MODE_COUNT; ++variant) {
                 alphaVariant = variant;
                 if (variant == TRANSLUCENT_MODE) {
                     // 반투명은 누적과 잔여 투과율 두 대상에 기록하고 깊이는 읽기만 한다.
+                    // 모션 벡터는 불투명 표면만 남기므로 이 경로는 기록하지 않는다.
                     stages[1].module = oit;
                     depthStencil.depthWriteEnable = VK_FALSE;
-                    renderingInfo.colorAttachmentCount = 2;
-                    colorFormats[0] = OIT_ACCUMULATION_FORMAT;
-                    colorBlend.attachmentCount = 2;
+                    colorFormats = {OIT_ACCUMULATION_FORMAT, OIT_REVEALAGE_FORMAT};
 
                     blendAttachments[0].blendEnable = VK_TRUE;
                     blendAttachments[0].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
@@ -1383,10 +1402,10 @@ void Renderer::createMeshPipelines() {
     pipelineInfo.layout = meshPipelineLayout;
     stages[1].module = opaqueFragment;
     depthStencil.depthWriteEnable = VK_TRUE;
-    renderingInfo.colorAttachmentCount = 1;
-    colorFormats[0] = COLOR_FORMAT;
-    colorBlend.attachmentCount = 1;
+    colorFormats = {COLOR_FORMAT, VELOCITY_FORMAT};
     blendAttachments[0].blendEnable = VK_FALSE;
+    blendAttachments[1].blendEnable = VK_FALSE;
+    blendAttachments[1].colorWriteMask = VELOCITY_CHANNELS;
     rasterization.polygonMode = VK_POLYGON_MODE_LINE;
     VK_CHECK(vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &wireframePipeline));
 
@@ -1416,10 +1435,11 @@ void Renderer::createMeshPipelines() {
                     bool translucent = variant == static_cast<uint32_t>(asset::AlphaMode::TRANSLUCENT);
                     meshStages[2].module = translucent ? oit : opaque;
                     depthStencil.depthWriteEnable = translucent ? VK_FALSE : VK_TRUE;
-                    renderingInfo.colorAttachmentCount = translucent ? 2 : 1;
                     colorFormats[0] = translucent ? OIT_ACCUMULATION_FORMAT : COLOR_FORMAT;
-                    colorBlend.attachmentCount = translucent ? 2 : 1;
+                    colorFormats[1] = translucent ? OIT_REVEALAGE_FORMAT : VELOCITY_FORMAT;
                     blendAttachments[0].blendEnable = translucent ? VK_TRUE : VK_FALSE;
+                    blendAttachments[1].blendEnable = translucent ? VK_TRUE : VK_FALSE;
+                    blendAttachments[1].colorWriteMask = translucent ? VK_COLOR_COMPONENT_R_BIT : VELOCITY_CHANNELS;
                     VK_CHECK(vkCreateGraphicsPipelines(
                         context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &target[variant]));
                 }
@@ -1731,6 +1751,13 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     sceneChangedThisFrame = &scene != lastScene || scene.revision() != lastSceneRevision;
     lastScene = &scene;
     lastSceneRevision = scene.revision();
+    // 오브젝트 번호는 추가/삭제로 밀리므로 구성이 바뀐 프레임에는 지난 값을 버린다. 그 한 프레임만
+    // 변위가 0 이고 다음 프레임부터 다시 맞는다.
+    bool temporalReset =
+        scene.topologyRevision() != lastTopologyRevision || previousWorld.size() != scene.objects.size();
+    lastTopologyRevision = scene.topologyRevision();
+    previousWorld.resize(scene.objects.size());
+
     objectInstanceSlots.assign(scene.objects.size(), INVALID_INSTANCE_SLOT);
     objectSkinnedBlas.assign(scene.objects.size(), RayTracer::NO_SKINNED_BLAS);
     instanceBounds.assign(scene.objects.size(), glm::vec4{0.0F});
@@ -1796,14 +1823,21 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         }
     }
     reserveJoints(frame, totalJoints);
-    auto* joints = static_cast<glm::mat4*>(frame.jointBuffer.mapped);
+    jointMatrices.assign(totalJoints, glm::mat4{1.0F});
     for (size_t animator = 0; animator < skinOffsets.size(); ++animator) {
         for (size_t skin = 0; skin < skinOffsets[animator].size(); ++skin) {
             if (skinOffsets[animator][skin] != NO_JOINTS) {
-                std::ranges::copy(scene.animators[animator].jointMatrices[skin], joints + skinOffsets[animator][skin]);
+                std::ranges::copy(scene.animators[animator].jointMatrices[skin],
+                                  jointMatrices.begin() + skinOffsets[animator][skin]);
             }
         }
     }
+    // 지난 포즈는 조인트 배치가 그대로일 때만 뜻이 있다. 아니면 현재 포즈를 넣어 변위를 0 으로 만든다.
+    bool reusePreviousJoints = !temporalReset && previousJointMatrices.size() == jointMatrices.size();
+    std::ranges::copy(jointMatrices, static_cast<glm::mat4*>(frame.jointBuffer.mapped));
+    std::ranges::copy(reusePreviousJoints ? previousJointMatrices : jointMatrices,
+                      static_cast<glm::mat4*>(frame.previousJointBuffer.mapped));
+    previousJointMatrices.swap(jointMatrices);
     auto jointOffsetFor = [&skinOffsets](const scene::Object& object) {
         if (object.animator < 0 || object.skin < 0) {
             return NO_JOINTS;
@@ -1854,6 +1888,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         objectInstanceSlots[index] = slot;
 
         instances[slot].model = model;
+        instances[slot].previousModel = temporalReset ? model : previousWorld[index];
         instances[slot].normalMatrix = glm::mat4(glm::inverseTranspose(glm::mat3(model)));
         instanceBounds[slot] = transformBoundingSphere(model, mesh.boundingSphere);
         instances[slot].meshIndex = object.meshIndex;
@@ -1893,6 +1928,12 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
             groups[groupSlot].meshletCount = std::min(MESHLET_GROUP_SIZE, lod.meshletCount - first);
             groups[groupSlot].padding = 0;
         }
+    }
+
+    // 그리지 않은 오브젝트도 지난 변환을 갱신해 둔다. 숨겼다 다시 보인 오브젝트가 오래된 자리에서
+    // 날아오는 것처럼 보이지 않게 한다.
+    for (uint32_t index = 0; index < scene.objects.size(); ++index) {
+        previousWorld[index] = scene.world(index);
     }
 
     // 커질 때만 다시 잡는다. 지난 프레임이 아직 읽고 있을 수 있어 그때는 장치를 세운다. 스킨
@@ -1962,6 +2003,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                                  1.0F / static_cast<float>(currentRenderExtent.width),
                                  1.0F / static_cast<float>(currentRenderExtent.height)};
     camera->inverseViewProjection = glm::inverse(camera->viewProjection);
+    camera->previousViewProjection = temporalReset ? cameraViewProjection : previousViewProjection;
+    previousViewProjection = cameraViewProjection;
 
     // 카메라나 화면, 장면, 경로 추적 설정이 바뀌면 누적을 처음부터 다시 쌓는다. 설정 변경을 빼면
     // 수백 표본이 쌓인 뒤에는 새 표본이 1/N 밖에 못 섞여 화면이 멈춘 것처럼 보인다.
@@ -2425,6 +2468,15 @@ void Renderer::recordCommands(Frame& frame,
                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
     imageBarrier(commandBuffer,
+                 targets.velocity.handle,
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                 0,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    imageBarrier(commandBuffer,
                  targets.depth.handle,
                  VK_IMAGE_ASPECT_DEPTH_BIT,
                  VK_IMAGE_LAYOUT_UNDEFINED,
@@ -2458,6 +2510,7 @@ void Renderer::recordCommands(Frame& frame,
                                               geometry.vertexMeshletBuffer.address,
                                               frame.meshletGroupBuffer.address,
                                               frame.jointBuffer.address,
+                                              frame.previousJointBuffer.address,
                                               frame.lightBuffer.address,
                                               frame.shadowMatrixBuffer.address,
                                               0,
@@ -2483,8 +2536,11 @@ void Renderer::recordCommands(Frame& frame,
 
         // 1) 불투명과 컷오프 경로를 HDR 색상 대상에 그린다.
         uint32_t opaqueZone = frameProfiler.begin("불투명", commandBuffer);
-        VkRenderingAttachmentInfo opaqueColor =
-            colorAttachment(targets.color.view, VK_ATTACHMENT_LOAD_OP_CLEAR, {{0.05F, 0.05F, 0.07F, 1.0F}});
+        // 아무것도 그리지 않은 화소는 변위 0 이다. 하늘은 톤 매핑에서 채워 넣는 균일한 색이라
+        // 되짚을 세부가 없다.
+        std::array<VkRenderingAttachmentInfo, 2> opaqueColor{
+            colorAttachment(targets.color.view, VK_ATTACHMENT_LOAD_OP_CLEAR, {{0.05F, 0.05F, 0.07F, 1.0F}}),
+            colorAttachment(targets.velocity.view, VK_ATTACHMENT_LOAD_OP_CLEAR, {{0.0F, 0.0F, 0.0F, 0.0F}})};
 
         VkRenderingAttachmentInfo depthAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         depthAttachment.imageView = targets.depth.view;
@@ -2496,8 +2552,8 @@ void Renderer::recordCommands(Frame& frame,
         VkRenderingInfo opaquePass{VK_STRUCTURE_TYPE_RENDERING_INFO};
         opaquePass.renderArea.extent = currentRenderExtent;
         opaquePass.layerCount = 1;
-        opaquePass.colorAttachmentCount = 1;
-        opaquePass.pColorAttachments = &opaqueColor;
+        opaquePass.colorAttachmentCount = static_cast<uint32_t>(opaqueColor.size());
+        opaquePass.pColorAttachments = opaqueColor.data();
         opaquePass.pDepthAttachment = &depthAttachment;
 
         vkCmdBeginRendering(commandBuffer, &opaquePass);
@@ -2639,6 +2695,17 @@ void Renderer::recordCommands(Frame& frame,
 
     // 5) HDR 색상을 톤 매핑해 표시 이미지에 옮긴다. 편집기 뷰포트가 이 이미지를 그대로 보여준다.
     uint32_t tonemapZone = frameProfiler.begin("톤 매핑", commandBuffer);
+    // 경로 추적 프레임은 불투명 패스를 돌지 않아 모션 벡터가 그대로 남는다. 어느 경로든 읽기
+    // 좋은 레이아웃으로 맞춰야 디버그 뷰어가 파괴된 레이아웃을 참조하지 않는다.
+    imageBarrier(commandBuffer,
+                 targets.velocity.handle,
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     imageBarrier(commandBuffer,
                  targets.color.handle,
                  VK_IMAGE_ASPECT_COLOR_BIT,

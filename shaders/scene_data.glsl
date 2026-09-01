@@ -14,6 +14,8 @@ layout(push_constant) uniform PushConstants {
     VertexMeshletBuffer vertexMeshlets;
     MeshletGroupBuffer meshletGroups;
     JointBuffer joints;
+    // 지난 프레임의 조인트 행렬. 스킨 인스턴스의 이전 위치를 구하는 데만 쓴다.
+    JointBuffer previousJoints;
     LightBuffer lights;
     ShadowMatrixBuffer shadowMatrices;
     // 재질 경로마다 meshlet 그룹 구간이 달라 디스패치 직전에 갱신한다.
@@ -32,6 +34,16 @@ void skinVertex(Instance instance, Vertex vertex, inout vec3 position, inout vec
     mat3 rotation = mat3(skin);
     normal = rotation * normal;
     tangent = rotation * tangent;
+}
+
+// 모션 벡터에 쓸 이전 프레임 클립 좌표. 스킨은 지난 프레임 포즈로 다시 옮긴다.
+vec4 previousClipPosition(Instance instance, Vertex vertex) {
+    vec3 position = vertex.position;
+    if (instance.jointOffset != NO_JOINTS) {
+        mat4 skin = skinMatrix(pushConstants.previousJoints, instance.jointOffset, vertex.joints, vertex.weights);
+        position = (skin * vec4(position, 1.0)).xyz;
+    }
+    return pushConstants.camera.item.previousViewProjection * (instance.previousModel * vec4(position, 1.0));
 }
 
 #endif

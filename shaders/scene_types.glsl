@@ -82,6 +82,9 @@ struct Material {
 
 struct Instance {
     mat4 model;
+    // 지난 프레임의 세계 변환. 모션 벡터가 이 행렬로 이전 위치를 되짚는다. 새로 생긴 인스턴스나
+    // 장면 구성이 바뀐 프레임에는 model 과 같은 값이 들어와 변위가 0 이 된다.
+    mat4 previousModel;
     mat4 normalMatrix;
     uint meshIndex;
     uint bucket;
@@ -111,6 +114,8 @@ struct Camera {
     vec4 viewport;
     // 깊이에서 월드 위치를 되돌릴 때 쓴다.
     mat4 inverseViewProjection;
+    // 지난 프레임의 시점 변환. 지터는 빠져 있어 두 프레임의 차가 실제 화면 이동만 남는다.
+    mat4 previousViewProjection;
     // x: 조명 수, y: 그림자 배열 슬롯(없으면 INVALID_TEXTURE), z: SSAO 슬롯, w: 환경 큐브 슬롯.
     // bindless 슬롯은 상위 8비트에 샘플러 번호가 들어가 float 로는 정확히 담기지 않으므로 정수로 둔다.
     uvec4 shading;
@@ -152,6 +157,7 @@ struct DrawCommand {
 #define DEBUG_MODE_LOD 5u
 #define DEBUG_MODE_CASCADE 6u
 #define DEBUG_MODE_SHADOW 7u
+#define DEBUG_MODE_VELOCITY 8u
 
 layout(buffer_reference, scalar) readonly buffer VertexBuffer {
     Vertex items[];

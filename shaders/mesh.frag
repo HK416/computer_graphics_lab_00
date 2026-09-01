@@ -2,6 +2,8 @@
 #include "mesh_shading.glsl"
 
 layout(location = 0) out vec4 outColor;
+// 화면 UV 단위 모션 벡터. 업스케일러가 해상도에 맞춰 다시 잰다.
+layout(location = 1) out vec2 outVelocity;
 
 // 디버그 모드는 셰이딩 대신 중간 값을 그대로 보여준다.
 vec4 debugColor() {
@@ -38,6 +40,11 @@ vec4 debugColor() {
         }
         return vec4(1.0, 0.0, 1.0, 1.0);
     }
+    case DEBUG_MODE_VELOCITY: {
+        // 픽셀 단위 변위를 8 픽셀에서 포화시켜 본다. 정지 화면은 회색이다.
+        vec2 pixels = motionVector() * pushConstants.camera.item.viewport.xy / 8.0;
+        return vec4(clamp(pixels * 0.5 + 0.5, 0.0, 1.0), 0.5, 1.0);
+    }
     case DEBUG_MODE_UV:
         return vec4(fract(inUv), 0.0, 1.0);
     case DEBUG_MODE_DEPTH: {
@@ -51,6 +58,7 @@ vec4 debugColor() {
 }
 
 void main() {
+    outVelocity = motionVector();
     if (pushConstants.debugMode != DEBUG_MODE_SHADED) {
         outColor = debugColor();
         return;

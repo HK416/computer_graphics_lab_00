@@ -15,6 +15,8 @@ layout(location = 2) out vec4 outTangent[];
 layout(location = 3) out vec2 outUv[];
 layout(location = 4) flat out uint outMaterialIndex[];
 layout(location = 5) flat out uint outMeshletIndex[];
+layout(location = 6) out vec4 outCurrentClip[];
+layout(location = 7) out vec4 outPreviousClip[];
 
 void main() {
     uint meshletIndex = payload.meshletIndices[gl_WorkGroupID.x];
@@ -33,7 +35,11 @@ void main() {
         skinVertex(instance, vertex, position, normal, tangent);
         vec4 worldPosition = instance.model * vec4(position, 1.0);
 
-        gl_MeshVerticesEXT[i].gl_Position = pushConstants.camera.item.viewProjection * worldPosition;
+        // mesh shader 는 출력 변수를 되읽을 수 없어 클립 좌표를 지역 변수에 먼저 담는다.
+        vec4 clipPosition = pushConstants.camera.item.viewProjection * worldPosition;
+        gl_MeshVerticesEXT[i].gl_Position = clipPosition;
+        outCurrentClip[i] = clipPosition;
+        outPreviousClip[i] = previousClipPosition(instance, vertex);
         outWorldPosition[i] = worldPosition.xyz;
         outNormal[i] = normalMatrix * normal;
         outTangent[i] = vec4(normalMatrix * tangent, vertex.tangent.w);

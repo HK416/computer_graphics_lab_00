@@ -79,6 +79,8 @@ inline constexpr uint32_t NO_SKINNED_VERTICES = 0xFFFFFFFFU;
 
 struct GpuInstance {
     glm::mat4 model;
+    // 지난 프레임의 세계 변환. 모션 벡터 전용이며, 이전 값이 없으면 model 과 같은 값이 들어간다.
+    glm::mat4 previousModel;
     glm::mat4 normalMatrix;
     uint32_t meshIndex;
     // 재질 경로와 면 방향 조합. 컬링 컴퓨트가 이 값으로 그리기 명령 구간을 고른다.

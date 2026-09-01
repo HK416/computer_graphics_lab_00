@@ -113,6 +113,8 @@ struct RenderTargets {
     Image depth;
     Image oitAccumulation;
     Image oitRevealage;
+    // 화면 UV 단위 모션 벡터. 불투명 패스가 함께 기록한다.
+    Image velocity;
     Image tonemapped; // 렌더 해상도의 톤 매핑 결과. 업스케일 입력이다.
     Image present;    // 표시 해상도. 편집기 뷰포트가 그대로 보여준다.
     // 이전 프레임 깊이로 만든 계층적 Z 버퍼. 오클루전 컬링이 읽는다.
@@ -141,6 +143,7 @@ struct RenderTargets {
     uint32_t depthSlot = 0;
     uint32_t colorSlot = 0;
     uint32_t tonemappedSlot = 0;
+    uint32_t velocitySlot = 0;
     uint32_t accumulationSlot = 0;
     uint32_t revealageSlot = 0;
     bool slotsAllocated = false;
@@ -286,6 +289,8 @@ private:
         Buffer lodNetworkBuffer;
         // 스킨 인스턴스의 조인트 행렬을 이어 붙인다. 인스턴스마다 jointOffset 으로 자기 구간을 찾는다.
         Buffer jointBuffer;
+        // 같은 배치의 지난 프레임 조인트 행렬. 스킨 인스턴스의 모션 벡터가 읽는다.
+        Buffer previousJointBuffer;
         uint32_t jointCapacity = 0;
         // 장면의 조명과 그림자 시점 행렬. 둘 다 매 프레임 다시 채운다.
         Buffer lightBuffer;
@@ -443,6 +448,13 @@ private:
     // 첫 방향광의 진행 방향. 하늘의 태양을 그림자와 맞추는 데 쓴다.
     glm::vec3 sunDirection{0.0F, -1.0F, 0.0F};
     glm::mat4 lastViewProjection{0.0F};
+    // 모션 벡터용 지난 프레임 상태. 장면 구성이 바뀌면 현재 값으로 덮어 변위를 0 으로 만든다.
+    glm::mat4 previousViewProjection{1.0F};
+    std::vector<glm::mat4> previousWorld;
+    // 조인트는 CPU 사본을 두고 거기서 두 버퍼로 올린다. 매핑된 버퍼를 되읽는 것보다 싸다.
+    std::vector<glm::mat4> jointMatrices;
+    std::vector<glm::mat4> previousJointMatrices;
+    uint64_t lastTopologyRevision = 0;
     uint32_t pathSampleCount = 0;
 
     bool hzbNeedsClear = true;

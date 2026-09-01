@@ -12,6 +12,16 @@ layout(location = 2) in vec4 inTangent;
 layout(location = 3) in vec2 inUv;
 layout(location = 4) flat in uint inMaterialIndex;
 layout(location = 5) flat in uint inMeshletIndex;
+layout(location = 6) in vec4 inCurrentClip;
+layout(location = 7) in vec4 inPreviousClip;
+
+// 이 화소가 지난 프레임에 있던 자리로 가는 UV 변위. 업스케일러가 히스토리를 되짚는 데 쓴다.
+// NDC 는 두 항이 같은 부호 규약이라 Y 뒤집기가 상쇄되고, 0.5 배는 NDC 폭 2 를 UV 폭 1 로 줄인다.
+vec2 motionVector() {
+    vec2 current = inCurrentClip.xy / inCurrentClip.w;
+    vec2 previous = inPreviousClip.xy / inPreviousClip.w;
+    return (previous - current) * 0.5;
+}
 
 // 재질 경로별로 파이프라인을 나누어, 불투명 경로에서는 discard 자체가 컴파일에서 사라지게 한다.
 layout(constant_id = 0) const uint ALPHA_MODE_VARIANT = 0;

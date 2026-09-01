@@ -955,7 +955,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     }
 
     static constexpr const char* DEBUG_MODE_NAMES[] = {
-        "셰이딩", "meshlet", "노멀", "UV", "깊이", "LOD", "캐스케이드", "그림자"};
+        "셰이딩", "meshlet", "노멀", "UV", "깊이", "LOD", "캐스케이드", "그림자", "모션 벡터"};
     int debugMode = static_cast<int>(renderer.debugMode);
     if (ImGui::Combo("디버그 뷰", &debugMode, DEBUG_MODE_NAMES, IM_ARRAYSIZE(DEBUG_MODE_NAMES))) {
         renderer.debugMode = static_cast<uint32_t>(debugMode);

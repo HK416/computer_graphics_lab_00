@@ -7,6 +7,8 @@ layout(location = 2) out vec4 outTangent;
 layout(location = 3) out vec2 outUv;
 layout(location = 4) flat out uint outMaterialIndex;
 layout(location = 5) flat out uint outMeshletIndex;
+layout(location = 6) out vec4 outCurrentClip;
+layout(location = 7) out vec4 outPreviousClip;
 
 void main() {
     Instance instance = pushConstants.instances.items[gl_InstanceIndex];
@@ -20,6 +22,8 @@ void main() {
 
     vec4 worldPosition = instance.model * vec4(position, 1.0);
     gl_Position = pushConstants.camera.item.viewProjection * worldPosition;
+    outCurrentClip = gl_Position;
+    outPreviousClip = previousClipPosition(instance, vertex);
 
     mat3 normalMatrix = mat3(instance.normalMatrix);
     outWorldPosition = worldPosition.xyz;
