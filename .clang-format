@@ -1,0 +1,46 @@
+---
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++20
+
+# 들여쓰기
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+NamespaceIndentation: None
+
+# 줄 길이 / 줄바꿈
+ColumnLimit: 120
+BinPackArguments: false
+BinPackParameters: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+BreakBeforeBraces: Attach
+
+# 포인터/참조 정렬: `int* p`
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# include 정렬 및 재그룹핑 — DECISIONS.md #18 의 순서를 강제한다.
+# 그룹: (0) 짝꿍 헤더 → (1) C/C++ 표준 → (2) 외부 서드파티 → (3) 내부 프로젝트. 그룹 내 A-Z.
+# 짝꿍 헤더(소스와 동명인 헤더)는 IncludeIsMainRegex 로 자동 감지되어 최상단(priority 0) 그룹이 된다.
+SortIncludes: CaseInsensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  # 테스트 프레임워크 헤더(Catch2): 짝꿍 헤더에 준해 최상단 그룹. 테스트 파일 관용.
+  - Regex: '^<catch2/'
+    Priority: 1
+  # C/C++ 표준 헤더: 슬래시도 확장자도 없는 angle include (<vector>, <cstdint>).
+  - Regex: '^<[^/.]+>$'
+    Priority: 2
+  # 외부 서드파티: 슬래시 또는 확장자를 가진 angle include (<glm/vec3.hpp>, <stb_image_write.h>).
+  - Regex: '^<.*>$'
+    Priority: 3
+  # 내부 프로젝트: quoted include ("pc/octree.h").
+  - Regex: '^".*"$'
+    Priority: 4
+
+# 기타
+FixNamespaceComments: true

@@ -1,0 +1,25 @@
+{
+  "name": "cg-lab",
+  "version": "0.1.0",
+  "dependencies": [
+    "cgltf",
+    "glm",
+    "imguizmo",
+    "meshoptimizer",
+    "spdlog",
+    "stb",
+    "vulkan-memory-allocator",
+    {
+      "name": "imgui",
+      "features": ["docking-experimental", "freetype", "sdl3-binding", "vulkan-binding"]
+    },
+    {
+      "name": "ktx",
+      "features": ["vulkan"]
+    },
+    {
+      "name": "sdl3",
+      "features": ["vulkan"]
+    }
+  ]
+}
