@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -33,12 +34,22 @@ constexpr VkFormat OIT_REVEALAGE_FORMAT = VK_FORMAT_R16_SFLOAT;
 constexpr VkFormat PRESENT_FORMAT = VK_FORMAT_R8G8B8A8_UNORM;
 constexpr uint32_t MINIMUM_INSTANCE_CAPACITY = 1024;
 constexpr size_t TRANSLUCENT_MODE = 2;
+// shaders/meshlet_task.glsl 의 MESHLET_GROUP_SIZE 와 같아야 한다.
+constexpr uint32_t MESHLET_GROUP_SIZE = 32;
 
 // shaders/scene_data.glsl 의 CameraBuffer 와 배치가 같아야 한다.
 struct GpuCamera {
     glm::mat4 viewProjection;
     glm::vec4 position;
     glm::vec4 parameters; // x: 근평면
+};
+
+// shaders/scene_data.glsl 의 MeshletGroup 과 배치가 같아야 한다.
+struct GpuMeshletGroup {
+    uint32_t instanceIndex;
+    uint32_t firstMeshlet;
+    uint32_t meshletCount;
+    uint32_t padding;
 };
 
 struct ScenePushConstants {
@@ -50,6 +61,8 @@ struct ScenePushConstants {
     VkDeviceAddress meshlets;
     VkDeviceAddress meshletTriangles;
     VkDeviceAddress vertexMeshlets;
+    VkDeviceAddress meshletGroups;
+    uint32_t meshletGroupBase;
     uint32_t debugMode;
 };
 
@@ -155,6 +168,9 @@ Renderer::~Renderer() {
     vkDestroyPipeline(context.device, tonemapPipeline, nullptr);
     vkDestroyPipeline(context.device, compositePipeline, nullptr);
     vkDestroyPipelineLayout(context.device, postPipelineLayout, nullptr);
+    for (VkPipeline pipeline : meshShaderPipelines) {
+        vkDestroyPipeline(context.device, pipeline, nullptr);
+    }
     vkDestroyPipeline(context.device, wireframePipeline, nullptr);
     for (VkPipeline pipeline : meshPipelines) {
         vkDestroyPipeline(context.device, pipeline, nullptr);
@@ -163,6 +179,8 @@ Renderer::~Renderer() {
     vkDestroySemaphore(context.device, frameTimeline, nullptr);
     destroyPresentSemaphores();
     for (Frame& frame : frames) {
+        destroyBuffer(context, frame.meshTaskIndirectBuffer);
+        destroyBuffer(context, frame.meshletGroupBuffer);
         destroyBuffer(context, frame.drawBuffer);
         destroyBuffer(context, frame.instanceBuffer);
         destroyBuffer(context, frame.cameraBuffer);
@@ -287,6 +305,7 @@ void Renderer::createFrames() {
         frame.cameraBuffer = createBuffer(
             context, sizeof(GpuCamera), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, MemoryLocation::HOST_WRITE, "카메라");
         reserveInstances(frame, MINIMUM_INSTANCE_CAPACITY);
+        reserveMeshletGroups(frame, MINIMUM_INSTANCE_CAPACITY);
     }
 }
 
@@ -310,6 +329,28 @@ void Renderer::reserveInstances(Frame& frame, uint32_t instanceCount) {
     frame.instanceCapacity = capacity;
 }
 
+void Renderer::reserveMeshletGroups(Frame& frame, uint32_t groupCount) {
+    if (frame.meshTaskIndirectBuffer.handle == VK_NULL_HANDLE) {
+        frame.meshTaskIndirectBuffer =
+            createBuffer(context,
+                         sizeof(VkDrawMeshTasksIndirectCommandEXT) * ALPHA_MODE_COUNT * 2,
+                         VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                         MemoryLocation::HOST_WRITE,
+                         "mesh task 간접 명령");
+    }
+    if (groupCount <= frame.groupCapacity) {
+        return;
+    }
+    uint32_t capacity = std::max(groupCount, std::max(frame.groupCapacity * 2, MINIMUM_INSTANCE_CAPACITY));
+    destroyBuffer(context, frame.meshletGroupBuffer);
+    frame.meshletGroupBuffer = createBuffer(context,
+                                            static_cast<VkDeviceSize>(capacity) * sizeof(GpuMeshletGroup),
+                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                            MemoryLocation::HOST_WRITE,
+                                            "meshlet 그룹");
+    frame.groupCapacity = capacity;
+}
+
 void Renderer::createPresentSemaphores() {
     destroyPresentSemaphores();
     presentReady.resize(swapchain->images.size());
@@ -327,8 +368,13 @@ void Renderer::destroyPresentSemaphores() {
 }
 
 void Renderer::createMeshPipelines() {
+    scenePushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    if (context.caps.meshShader) {
+        scenePushStages |= VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT;
+    }
+
     VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushConstantRange.stageFlags = scenePushStages;
     pushConstantRange.size = sizeof(ScenePushConstants);
 
     VkDescriptorSetLayout bindlessLayout = bindless.layout();
@@ -456,6 +502,48 @@ void Renderer::createMeshPipelines() {
     rasterization.polygonMode = VK_POLYGON_MODE_LINE;
     VK_CHECK(vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &wireframePipeline));
 
+    if (context.caps.meshShader) {
+        // 태스크와 메쉬 셰이더 경로는 정점 입력과 입력 조립 상태를 쓰지 않는다.
+        VkShaderModule taskModule = createShaderModule(context.device, "mesh.task.spv");
+        VkShaderModule meshModule = createShaderModule(context.device, "mesh.mesh.spv");
+
+        std::array<VkPipelineShaderStageCreateInfo, 3> meshStages{
+            shaderStage(VK_SHADER_STAGE_TASK_BIT_EXT, taskModule),
+            shaderStage(VK_SHADER_STAGE_MESH_BIT_EXT, meshModule),
+            shaderStage(VK_SHADER_STAGE_FRAGMENT_BIT, opaqueFragment)};
+        meshStages[2].pSpecializationInfo = &specialization;
+
+        pipelineInfo.stageCount = static_cast<uint32_t>(meshStages.size());
+        pipelineInfo.pStages = meshStages.data();
+        pipelineInfo.pVertexInputState = nullptr;
+        pipelineInfo.pInputAssemblyState = nullptr;
+        rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+
+        for (uint32_t variant = 0; variant < ALPHA_MODE_COUNT; ++variant) {
+            alphaVariant = variant;
+            bool translucent = variant == static_cast<uint32_t>(asset::AlphaMode::TRANSLUCENT);
+            meshStages[2].module = translucent ? oitFragment : opaqueFragment;
+            depthStencil.depthWriteEnable = translucent ? VK_FALSE : VK_TRUE;
+            renderingInfo.colorAttachmentCount = translucent ? 2 : 1;
+            colorFormats[0] = translucent ? OIT_ACCUMULATION_FORMAT : COLOR_FORMAT;
+            colorBlend.attachmentCount = translucent ? 2 : 1;
+            blendAttachments[0].blendEnable = translucent ? VK_TRUE : VK_FALSE;
+            VK_CHECK(vkCreateGraphicsPipelines(
+                context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &meshShaderPipelines[variant]));
+        }
+
+        vkDestroyShaderModule(context.device, meshModule, nullptr);
+        vkDestroyShaderModule(context.device, taskModule, nullptr);
+
+        drawMeshTasksIndirect = reinterpret_cast<PFN_vkCmdDrawMeshTasksIndirectEXT>(
+            vkGetDeviceProcAddr(context.device, "vkCmdDrawMeshTasksIndirectEXT"));
+        if (drawMeshTasksIndirect == nullptr) {
+            core::fatal("vkCmdDrawMeshTasksIndirectEXT 를 찾을 수 없습니다");
+        }
+        useMeshShader = true;
+        spdlog::info("mesh shader 경로 사용 가능");
+    }
+
     vkDestroyShaderModule(context.device, oitFragment, nullptr);
     vkDestroyShaderModule(context.device, opaqueFragment, nullptr);
     vkDestroyShaderModule(context.device, vertexModule, nullptr);
@@ -560,48 +648,65 @@ void Renderer::recreateSwapchain() {
     resizeRequested = false;
 }
 
-DrawBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene) {
+FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene) {
     reserveInstances(frame, static_cast<uint32_t>(scene.objects.size()));
 
-    auto* instances = static_cast<GpuInstance*>(frame.instanceBuffer.mapped);
-    auto* draws = static_cast<VkDrawIndexedIndirectCommand*>(frame.drawBuffer.mapped);
-
-    // 재질 경로와 면 방향 조합마다 간접 명령이 연속 구간을 이루도록 두 번 순회한다.
+    // 재질 경로와 면 방향 조합마다 명령이 연속 구간을 이루도록 두 번 순회한다.
     auto bucketOf = [this](const scene::Object& object) {
         const asset::Material& material = geometry.material(geometry.mesh(object.meshIndex).materialIndex);
         return std::pair<size_t, size_t>{static_cast<size_t>(material.alphaMode), material.doubleSided ? 1U : 0U};
     };
+    auto groupsFor = [this](const scene::Object& object) {
+        return (geometry.mesh(object.meshIndex).meshletCount + MESHLET_GROUP_SIZE - 1) / MESHLET_GROUP_SIZE;
+    };
+    auto drawable = [this](const scene::Object& object) {
+        return object.visible && object.meshIndex < geometry.meshCount();
+    };
 
-    DrawBatches batches{};
+    FrameBatches batches{};
+    uint32_t totalGroups = 0;
     for (const scene::Object& object : scene.objects) {
-        if (!object.visible || object.meshIndex >= geometry.meshCount()) {
+        if (!drawable(object)) {
             continue;
         }
         auto [mode, sided] = bucketOf(object);
-        ++batches[mode][sided].count;
+        ++batches.draws[mode][sided].count;
+        uint32_t groups = groupsFor(object);
+        batches.groups[mode][sided].count += groups;
+        totalGroups += groups;
     }
+    reserveMeshletGroups(frame, totalGroups);
 
-    uint32_t offset = 0;
-    for (auto& modeBatches : batches) {
-        for (DrawBatch& batch : modeBatches) {
-            batch.first = offset;
-            offset += batch.count;
-        }
-    }
-
-    std::array<std::array<uint32_t, 2>, ALPHA_MODE_COUNT> cursors{};
+    uint32_t drawOffset = 0;
+    uint32_t groupOffset = 0;
     for (size_t mode = 0; mode < ALPHA_MODE_COUNT; ++mode) {
         for (size_t sided = 0; sided < 2; ++sided) {
-            cursors[mode][sided] = batches[mode][sided].first;
+            batches.draws[mode][sided].first = drawOffset;
+            drawOffset += batches.draws[mode][sided].count;
+            batches.groups[mode][sided].first = groupOffset;
+            groupOffset += batches.groups[mode][sided].count;
+        }
+    }
+
+    auto* instances = static_cast<GpuInstance*>(frame.instanceBuffer.mapped);
+    auto* draws = static_cast<VkDrawIndexedIndirectCommand*>(frame.drawBuffer.mapped);
+    auto* groups = static_cast<GpuMeshletGroup*>(frame.meshletGroupBuffer.mapped);
+
+    std::array<std::array<uint32_t, 2>, ALPHA_MODE_COUNT> drawCursors{};
+    std::array<std::array<uint32_t, 2>, ALPHA_MODE_COUNT> groupCursors{};
+    for (size_t mode = 0; mode < ALPHA_MODE_COUNT; ++mode) {
+        for (size_t sided = 0; sided < 2; ++sided) {
+            drawCursors[mode][sided] = batches.draws[mode][sided].first;
+            groupCursors[mode][sided] = batches.groups[mode][sided].first;
         }
     }
 
     for (const scene::Object& object : scene.objects) {
-        if (!object.visible || object.meshIndex >= geometry.meshCount()) {
+        if (!drawable(object)) {
             continue;
         }
         auto [mode, sided] = bucketOf(object);
-        uint32_t slot = cursors[mode][sided]++;
+        uint32_t slot = drawCursors[mode][sided]++;
 
         const GpuMesh& mesh = geometry.mesh(object.meshIndex);
         glm::mat4 model = object.transform.matrix();
@@ -616,6 +721,25 @@ DrawBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene)
         draws[slot].vertexOffset = mesh.vertexOffset;
         // 셰이더는 gl_InstanceIndex 로 인스턴스 배열을 참조한다.
         draws[slot].firstInstance = slot;
+
+        for (uint32_t group = 0; group < groupsFor(object); ++group) {
+            uint32_t groupSlot = groupCursors[mode][sided]++;
+            uint32_t first = group * MESHLET_GROUP_SIZE;
+            groups[groupSlot].instanceIndex = slot;
+            groups[groupSlot].firstMeshlet = mesh.meshletOffset + first;
+            groups[groupSlot].meshletCount = std::min(MESHLET_GROUP_SIZE, mesh.meshletCount - first);
+            groups[groupSlot].padding = 0;
+        }
+    }
+
+    auto* meshTasks = static_cast<VkDrawMeshTasksIndirectCommandEXT*>(frame.meshTaskIndirectBuffer.mapped);
+    for (size_t mode = 0; mode < ALPHA_MODE_COUNT; ++mode) {
+        for (size_t sided = 0; sided < 2; ++sided) {
+            size_t bucket = mode * 2 + sided;
+            meshTasks[bucket].groupCountX = batches.groups[mode][sided].count;
+            meshTasks[bucket].groupCountY = 1;
+            meshTasks[bucket].groupCountZ = 1;
+        }
     }
 
     auto* camera = static_cast<GpuCamera*>(frame.cameraBuffer.mapped);
@@ -627,29 +751,54 @@ DrawBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene)
     return batches;
 }
 
-void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer, const DrawBatches& batches, bool translucentPass) {
+void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer, const FrameBatches& batches, bool translucentPass) {
     constexpr VkDeviceSize DRAW_STRIDE = sizeof(VkDrawIndexedIndirectCommand);
+    constexpr VkDeviceSize TASK_STRIDE = sizeof(VkDrawMeshTasksIndirectCommandEXT);
+
+    Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];
+    // 와이어프레임 디버그 뷰는 고전 경로에만 있으므로 그때는 mesh shader 경로를 쓰지 않는다.
+    bool meshPath = useMeshShader && meshShaderAvailable() && !wireframe;
+
     size_t firstMode = translucentPass ? TRANSLUCENT_MODE : 0;
     size_t lastMode = translucentPass ? TRANSLUCENT_MODE + 1 : TRANSLUCENT_MODE;
 
     for (size_t mode = firstMode; mode < lastMode; ++mode) {
         bool bound = false;
         for (size_t sided = 0; sided < 2; ++sided) {
-            const DrawBatch& batch = batches[mode][sided];
+            const DrawBatch& batch = meshPath ? batches.groups[mode][sided] : batches.draws[mode][sided];
             if (batch.count == 0) {
                 continue;
             }
             if (!bound) {
-                VkPipeline pipeline = wireframe && !translucentPass ? wireframePipeline : meshPipelines[mode];
+                VkPipeline pipeline = meshShaderPipelines[mode];
+                if (!meshPath) {
+                    pipeline = wireframe && !translucentPass ? wireframePipeline : meshPipelines[mode];
+                }
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
                 bound = true;
             }
             vkCmdSetCullMode(commandBuffer, sided == 1 ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT);
-            vkCmdDrawIndexedIndirect(commandBuffer,
-                                     frames[frameIndex % FRAMES_IN_FLIGHT].drawBuffer.handle,
-                                     batch.first * DRAW_STRIDE,
-                                     batch.count,
-                                     static_cast<uint32_t>(DRAW_STRIDE));
+
+            if (meshPath) {
+                // 태스크 셰이더는 gl_WorkGroupID 가 0 부터 시작하므로 구간 시작을 따로 알려 준다.
+                vkCmdPushConstants(commandBuffer,
+                                   meshPipelineLayout,
+                                   scenePushStages,
+                                   offsetof(ScenePushConstants, meshletGroupBase),
+                                   sizeof(uint32_t),
+                                   &batch.first);
+                drawMeshTasksIndirect(commandBuffer,
+                                      frame.meshTaskIndirectBuffer.handle,
+                                      (mode * 2 + sided) * TASK_STRIDE,
+                                      1,
+                                      static_cast<uint32_t>(TASK_STRIDE));
+            } else {
+                vkCmdDrawIndexedIndirect(commandBuffer,
+                                         frame.drawBuffer.handle,
+                                         batch.first * DRAW_STRIDE,
+                                         batch.count,
+                                         static_cast<uint32_t>(DRAW_STRIDE));
+            }
         }
     }
 }
@@ -671,13 +820,13 @@ void Renderer::recordUiPass(VkCommandBuffer commandBuffer, uint32_t imageIndex) 
     vkCmdEndRendering(commandBuffer);
 }
 
-void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, const DrawBatches& batches) {
+void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, const FrameBatches& batches) {
     VkCommandBuffer commandBuffer = frame.commandBuffer;
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
 
-    bool hasTranslucent = batches[TRANSLUCENT_MODE][0].count + batches[TRANSLUCENT_MODE][1].count > 0;
+    bool hasTranslucent = batches.draws[TRANSLUCENT_MODE][0].count + batches.draws[TRANSLUCENT_MODE][1].count > 0;
     oitTargetsValid = hasTranslucent;
 
     imageBarrier(commandBuffer,
@@ -707,16 +856,14 @@ void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, const DrawBatch
                                           geometry.meshletBuffer.address,
                                           geometry.meshletTriangleBuffer.address,
                                           geometry.vertexMeshletBuffer.address,
+                                          frame.meshletGroupBuffer.address,
+                                          0,
                                           debugMode};
     VkDescriptorSet bindlessSet = bindless.set();
     vkCmdBindDescriptorSets(
         commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
-    vkCmdPushConstants(commandBuffer,
-                       meshPipelineLayout,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0,
-                       sizeof(scenePushConstants),
-                       &scenePushConstants);
+    vkCmdPushConstants(
+        commandBuffer, meshPipelineLayout, scenePushStages, 0, sizeof(scenePushConstants), &scenePushConstants);
     vkCmdBindIndexBuffer(commandBuffer, geometry.indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
 
     // 1) 불투명과 컷오프 경로를 HDR 색상 대상에 그린다.
@@ -1018,7 +1165,7 @@ void Renderer::drawFrame(const scene::Scene& scene) {
         core::fatal("스왑체인 이미지 획득에 실패했습니다: {}", toString(acquireResult));
     }
 
-    DrawBatches batches = buildDrawCommands(frame, scene);
+    FrameBatches batches = buildDrawCommands(frame, scene);
 
     if (!capturePath.empty()) {
         VkDeviceSize required = static_cast<VkDeviceSize>(swapchain->extent.width) * swapchain->extent.height * 4;

@@ -443,6 +443,14 @@ void Editor::buildRenderSettings(float deltaSeconds) {
     ImGui::SliderFloat("노출", &renderer.exposure, 0.05F, 8.0F, "%.2f");
     ImGui::Checkbox("와이어프레임", &renderer.wireframe);
 
+    ImGui::BeginDisabled(!renderer.meshShaderAvailable());
+    ImGui::Checkbox("mesh shader 경로", &renderer.useMeshShader);
+    ImGui::EndDisabled();
+    if (!renderer.meshShaderAvailable()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(미지원)");
+    }
+
     static constexpr const char* DEBUG_MODE_NAMES[] = {"셰이딩", "meshlet", "노멀", "UV", "깊이"};
     int debugMode = static_cast<int>(renderer.debugMode);
     if (ImGui::Combo("디버그 뷰", &debugMode, DEBUG_MODE_NAMES, IM_ARRAYSIZE(DEBUG_MODE_NAMES))) {

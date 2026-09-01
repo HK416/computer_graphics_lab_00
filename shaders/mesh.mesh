@@ -1,0 +1,47 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+
+#include "meshlet_task.glsl"
+#include "scene_data.glsl"
+
+layout(local_size_x = MESHLET_GROUP_SIZE) in;
+layout(triangles, max_vertices = 64, max_primitives = 124) out;
+
+taskPayloadSharedEXT TaskPayload payload;
+
+layout(location = 0) out vec3 outWorldPosition[];
+layout(location = 1) out vec3 outNormal[];
+layout(location = 2) out vec4 outTangent[];
+layout(location = 3) out vec2 outUv[];
+layout(location = 4) flat out uint outMaterialIndex[];
+layout(location = 5) flat out uint outMeshletIndex[];
+
+void main() {
+    uint meshletIndex = payload.meshletIndices[gl_WorkGroupID.x];
+    Meshlet meshlet = pushConstants.meshlets.items[meshletIndex];
+    Instance instance = pushConstants.instances.items[payload.instanceIndex];
+    Mesh mesh = pushConstants.meshes.items[instance.meshIndex];
+
+    SetMeshOutputsEXT(meshlet.vertexCount, meshlet.triangleCount);
+
+    mat3 normalMatrix = mat3(instance.normalMatrix);
+    for (uint i = gl_LocalInvocationIndex; i < meshlet.vertexCount; i += MESHLET_GROUP_SIZE) {
+        Vertex vertex = pushConstants.vertices.items[meshlet.vertexOffset + i];
+        vec4 worldPosition = instance.model * vec4(vertex.position, 1.0);
+
+        gl_MeshVerticesEXT[i].gl_Position = pushConstants.camera.item.viewProjection * worldPosition;
+        outWorldPosition[i] = worldPosition.xyz;
+        outNormal[i] = normalMatrix * vertex.normal;
+        outTangent[i] = vec4(normalMatrix * vertex.tangent.xyz, vertex.tangent.w);
+        outUv[i] = vertex.uv;
+        outMaterialIndex[i] = mesh.materialIndex;
+        outMeshletIndex[i] = meshletIndex;
+    }
+
+    for (uint i = gl_LocalInvocationIndex; i < meshlet.triangleCount; i += MESHLET_GROUP_SIZE) {
+        uint base = meshlet.triangleOffset + i * 3;
+        gl_PrimitiveTriangleIndicesEXT[i] = uvec3(pushConstants.meshletTriangles.items[base],
+                                                  pushConstants.meshletTriangles.items[base + 1],
+                                                  pushConstants.meshletTriangles.items[base + 2]);
+    }
+}

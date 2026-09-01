@@ -67,6 +67,14 @@ struct Instance {
     uint padding2;
 };
 
+// 태스크 셰이더 워크그룹 하나가 처리할 meshlet 구간.
+struct MeshletGroup {
+    uint instanceIndex;
+    uint firstMeshlet;
+    uint meshletCount;
+    uint padding;
+};
+
 struct Camera {
     mat4 viewProjection;
     vec4 position;
@@ -87,6 +95,7 @@ layout(buffer_reference, scalar) readonly buffer CameraBuffer { Camera item; };
 layout(buffer_reference, scalar) readonly buffer MeshletBuffer { Meshlet items[]; };
 layout(buffer_reference, scalar) readonly buffer MeshletTriangleBuffer { uint items[]; };
 layout(buffer_reference, scalar) readonly buffer VertexMeshletBuffer { uint items[]; };
+layout(buffer_reference, scalar) readonly buffer MeshletGroupBuffer { MeshletGroup items[]; };
 
 layout(push_constant) uniform PushConstants {
     VertexBuffer vertices;
@@ -97,6 +106,9 @@ layout(push_constant) uniform PushConstants {
     MeshletBuffer meshlets;
     MeshletTriangleBuffer meshletTriangles;
     VertexMeshletBuffer vertexMeshlets;
+    MeshletGroupBuffer meshletGroups;
+    // 재질 경로마다 meshlet 그룹 구간이 달라 디스패치 직전에 갱신한다.
+    uint meshletGroupBase;
     uint debugMode;
 } pushConstants;
 

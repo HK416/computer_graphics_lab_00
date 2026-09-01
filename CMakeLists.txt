@@ -78,7 +78,9 @@ set(shader_sources
     shaders/mesh_oit.frag
     shaders/fullscreen.vert
     shaders/oit_composite.frag
-    shaders/tonemap.frag)
+    shaders/tonemap.frag
+    shaders/mesh.task
+    shaders/mesh.mesh)
 
 set(shader_binaries)
 foreach(shader IN LISTS shader_sources)

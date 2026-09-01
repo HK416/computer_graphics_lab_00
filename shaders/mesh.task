@@ -1,0 +1,45 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+
+#include "culling.glsl"
+#include "meshlet_task.glsl"
+#include "scene_data.glsl"
+
+layout(local_size_x = MESHLET_GROUP_SIZE) in;
+
+taskPayloadSharedEXT TaskPayload payload;
+shared uint visibleCount;
+
+void main() {
+    MeshletGroup group = pushConstants.meshletGroups.items[pushConstants.meshletGroupBase + gl_WorkGroupID.x];
+
+    if (gl_LocalInvocationIndex == 0) {
+        visibleCount = 0;
+        payload.instanceIndex = group.instanceIndex;
+    }
+    barrier();
+
+    uint local = gl_LocalInvocationIndex;
+    if (local < group.meshletCount) {
+        uint meshletIndex = group.firstMeshlet + local;
+        Instance instance = pushConstants.instances.items[group.instanceIndex];
+        Meshlet meshlet = pushConstants.meshlets.items[meshletIndex];
+
+        vec4 sphere = transformBoundingSphere(instance.model, meshlet.boundingSphere);
+        vec3 coneAxis = normalize(mat3(instance.normalMatrix) * meshlet.cone.xyz);
+
+        vec4 planes[5];
+        extractFrustumPlanes(pushConstants.camera.item.viewProjection, planes);
+
+        bool visible = sphereInFrustum(planes, sphere.xyz, sphere.w) &&
+                       coneVisible(sphere.xyz, sphere.w, coneAxis, meshlet.cone.w,
+                                   pushConstants.camera.item.position.xyz);
+        if (visible) {
+            payload.meshletIndices[atomicAdd(visibleCount, 1)] = meshletIndex;
+        }
+    }
+    barrier();
+
+    // EmitMeshTasksEXT 는 워크그룹 전체가 균일하게 한 번만 호출해야 한다.
+    EmitMeshTasksEXT(visibleCount, 1, 1);
+}
