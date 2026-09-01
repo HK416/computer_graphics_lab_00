@@ -186,3 +186,10 @@ else()
 endif()
 add_test(NAME lod_network COMMAND cg_lab_tests)
 add_test(NAME concurrency COMMAND cg_lab_concurrency_tests)
+
+# cmake --build --preset debug --target run 으로 빌드한 뒤 바로 실행한다.
+add_custom_target(run
+    COMMAND cg_lab
+    DEPENDS cg_lab
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    USES_TERMINAL)

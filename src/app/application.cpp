@@ -239,6 +239,8 @@ void Application::run() {
         }
 
         scenes.active().camera.update(deltaSeconds);
+        // 밀린 크기 변경은 UI 가 렌더 타겟을 참조하기 전에 끝내야 한다.
+        renderer->prepareFrame();
         renderer->setDisplayExtent(editorUi->desiredRenderExtent());
         editorUi->build(scenes, *geometry, deltaSeconds);
         renderer->drawFrame(scenes.active());

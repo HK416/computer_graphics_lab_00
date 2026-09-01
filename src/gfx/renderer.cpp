@@ -1769,12 +1769,15 @@ void Renderer::writeCapture() {
     capturePath.clear();
 }
 
+void Renderer::prepareFrame() {
+    if (resizeRequested) {
+        recreateSwapchain();
+    }
+}
+
 void Renderer::drawFrame(const scene::Scene& scene) {
     if (swapchain->extent.width == 0 || swapchain->extent.height == 0) {
         return;
-    }
-    if (resizeRequested) {
-        recreateSwapchain();
     }
 
     Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];

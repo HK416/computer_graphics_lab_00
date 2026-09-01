@@ -13,10 +13,13 @@ vcpkg 는 최초 CMake 구성 시 `external/vcpkg` 에 고정 태그로 자동 �
 ## 빌드
 
 ```sh
-cmake --preset debug     # 최초 구성 시 vcpkg 의존성 빌드로 수 분 소요
-cmake --build --preset debug
-./build/debug/cg_lab
+cmake --preset debug                        # 최초 구성 시 vcpkg 의존성 빌드로 수 분 소요
+cmake --build --preset debug                # 빌드
+cmake --build --preset debug --target run   # 빌드 후 바로 실행
 ```
+
+구성, 빌드, 테스트를 한 번에 하려면 `cmake --workflow --preset debug` 를 쓴다.
+빌드된 실행 파일은 `build/debug/cg_lab` 에 있으므로 인자를 줄 때는 직접 실행한다.
 
 `release` 프리셋은 RelWithDebInfo 로 구성된다. `ctest --test-dir build/debug` 로 자체 점검을 돌린다.
 
