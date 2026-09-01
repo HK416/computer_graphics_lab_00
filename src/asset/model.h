@@ -49,10 +49,27 @@ struct Vertex {
     glm::vec2 uv;
 };
 
+// meshoptimizer 로 나눈 meshlet 하나. mesh shader 경로와 클러스터 컬링에 함께 쓴다.
+struct Meshlet {
+    glm::vec4 boundingSphere{0.0F}; // xyz 중심, w 반지름
+    glm::vec4 cone{0.0F};           // xyz 법선 원뿔 축, w 컷오프
+    uint32_t vertexOffset = 0;      // Mesh::meshletVertices 기준
+    uint32_t triangleOffset = 0;    // Mesh::meshletTriangles 기준
+    uint32_t vertexCount = 0;
+    uint32_t triangleCount = 0;
+};
+
 struct Mesh {
     std::string name;
     std::vector<Vertex> vertices;
+    // meshlet 단위로 삼각형이 연속되도록 재배열된다.
     std::vector<uint32_t> indices;
+
+    std::vector<Meshlet> meshlets;
+    std::vector<uint32_t> meshletVertices;
+    std::vector<uint8_t> meshletTriangles;
+    // 삼각형마다 속한 meshlet 번호. 고전 경로의 meshlet 시각화에 쓴다.
+    std::vector<uint32_t> triangleMeshlets;
     glm::vec3 boundsCenter{0.0F};
     float boundsRadius = 0.0F;
     uint32_t materialIndex = 0;
@@ -93,5 +110,8 @@ struct Model {
 };
 
 Model loadGltf(const std::filesystem::path& path);
+
+// 정점 캐시와 오버드로를 최적화한 뒤 meshlet 으로 나눈다. 인덱스 버퍼도 meshlet 순서로 재배열된다.
+void buildMeshlets(Mesh& mesh);
 
 } // namespace asset

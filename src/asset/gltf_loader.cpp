@@ -273,6 +273,7 @@ void appendPrimitive(Model& model, const cgltf_data& data, const cgltf_primitive
         generateTangents(mesh.vertices, mesh.indices);
     }
     computeBounds(mesh);
+    buildMeshlets(mesh);
 
     mesh.materialIndex = static_cast<uint32_t>(model.materials.size() - 1);
     if (primitive.material != nullptr) {
@@ -377,16 +378,19 @@ Model loadGltf(const std::filesystem::path& path) {
     cgltf_free(data);
 
     size_t triangleCount = 0;
+    size_t meshletCount = 0;
     for (const Mesh& mesh : model.meshes) {
         triangleCount += mesh.indices.size() / 3;
+        meshletCount += mesh.meshlets.size();
     }
-    spdlog::info("glTF 적재: {} (메쉬 {}, 재질 {}, 텍스처 {}, 인스턴스 {}, 삼각형 {})",
+    spdlog::info("glTF 적재: {} (메쉬 {}, 재질 {}, 텍스처 {}, 인스턴스 {}, 삼각형 {}, meshlet {})",
                  model.name,
                  model.meshes.size(),
                  model.materials.size(),
                  model.textures.size(),
                  model.instances.size(),
-                 triangleCount);
+                 triangleCount,
+                 meshletCount);
     return model;
 }
 
