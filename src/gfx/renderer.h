@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -39,6 +40,7 @@ struct RenderTargets {
     Image depth;
     Image oitAccumulation;
     Image oitRevealage;
+    Image present; // 톤 매핑 결과. 편집기 뷰포트에 그대로 표시한다.
     uint32_t colorSlot = 0;
     uint32_t accumulationSlot = 0;
     uint32_t revealageSlot = 0;
@@ -54,11 +56,33 @@ public:
 
     void drawFrame(const scene::Scene& scene);
     void requestResize() { resizeRequested = true; }
+
+    // 장면을 그릴 해상도. 편집기 뷰포트 크기에 맞춰 바뀐다.
+    void setRenderExtent(VkExtent2D extent);
+    VkExtent2D renderExtent() const { return currentRenderExtent; }
+    // 스왑체인에 UI 를 기록할 콜백. 편집기가 채운다.
+    void setUiCallback(std::function<void(VkCommandBuffer)> callback) { uiCallback = std::move(callback); }
+
+    // 디버그 뷰어가 보여줄 오프스크린 대상.
+    struct TargetView {
+        const char* name;
+        VkImageView view;
+    };
+    std::vector<TargetView> targetViews() const;
+    VkImageView presentView() const { return targets.present.view; }
+    // 대상이 다시 만들어질 때마다 증가한다. 편집기가 디스크립터를 다시 잡는 기준이다.
+    uint64_t targetsGeneration() const { return generation; }
+    VkFormat swapchainFormat() const;
+    uint32_t swapchainImageCount() const;
     // 다음 프레임의 색상 버퍼를 PNG 로 저장한다. 렌더 결과 검증에 쓴다.
     void requestCapture(std::filesystem::path path) { capturePath = std::move(path); }
     void waitIdle();
 
     float exposure = 1.0F;
+    bool wireframe = false;
+
+    bool vsyncEnabled() const { return vsync; }
+    void setVsync(bool enabled);
 
 private:
     struct Frame {
@@ -83,6 +107,7 @@ private:
     DrawBatches buildDrawCommands(Frame& frame, const scene::Scene& scene);
     void recordCommands(Frame& frame, uint32_t imageIndex, const DrawBatches& batches);
     void recordGeometryPass(VkCommandBuffer commandBuffer, const DrawBatches& batches, bool translucentPass);
+    void recordUiPass(VkCommandBuffer commandBuffer, uint32_t imageIndex);
     void writeCapture();
 
     Context& context;
@@ -91,6 +116,10 @@ private:
     std::unique_ptr<Swapchain> swapchain;
     RenderTargets targets;
     VkSampler postSampler = VK_NULL_HANDLE;
+    VkExtent2D currentRenderExtent{};
+    uint64_t generation = 0;
+    bool oitTargetsValid = false;
+    std::function<void(VkCommandBuffer)> uiCallback;
 
     std::array<Frame, FRAMES_IN_FLIGHT> frames{};
     // 표시 완료 세마포어는 재사용 충돌을 피하려고 스왑체인 이미지마다 하나씩 둔다.
@@ -100,6 +129,7 @@ private:
 
     VkPipelineLayout meshPipelineLayout = VK_NULL_HANDLE;
     std::array<VkPipeline, ALPHA_MODE_COUNT> meshPipelines{};
+    VkPipeline wireframePipeline = VK_NULL_HANDLE;
     VkPipelineLayout postPipelineLayout = VK_NULL_HANDLE;
     VkPipeline compositePipeline = VK_NULL_HANDLE;
     VkPipeline tonemapPipeline = VK_NULL_HANDLE;

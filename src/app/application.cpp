@@ -66,10 +66,13 @@ Application::Application(const Options& options) : options(options) {
     geometry = std::make_unique<gfx::GeometryStore>(*context);
     loadScenes();
     renderer = std::make_unique<gfx::Renderer>(*context, *geometry, *bindless, window);
+    editorUi = std::make_unique<editor::Editor>(*context, *renderer, window);
+    renderer->setUiCallback([this](VkCommandBuffer commandBuffer) { editorUi->record(commandBuffer); });
 }
 
 Application::~Application() {
     // 렌더러가 쓰는 서피스는 윈도우보다 먼저 파괴되어야 한다.
+    editorUi.reset();
     renderer.reset();
     geometry.reset();
     textures.reset();
@@ -153,7 +156,11 @@ void Application::run() {
             default:
                 break;
             }
-            scenes.active().camera.handleEvent(event);
+            editorUi->processEvent(event);
+            // 카메라 조작은 장면 뷰 위에서 시작한 경우에만 받는다.
+            if (editorUi->viewportHovered() || scenes.active().camera.isLooking()) {
+                scenes.active().camera.handleEvent(event);
+            }
         }
 
         uint64_t currentTicks = SDL_GetTicksNS();
@@ -166,6 +173,8 @@ void Application::run() {
         }
 
         scenes.active().camera.update(deltaSeconds);
+        renderer->setRenderExtent(editorUi->desiredRenderExtent());
+        editorUi->build(scenes, *geometry, deltaSeconds);
         renderer->drawFrame(scenes.active());
         ++frameCount;
 

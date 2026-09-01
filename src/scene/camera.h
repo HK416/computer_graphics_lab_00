@@ -15,6 +15,7 @@ public:
     // 무한 원거리 reverse-Z 투영. 깊이 비교는 GREATER 를 쓰고 깊이 버퍼는 0 으로 지운다.
     glm::mat4 projectionMatrix(float aspect) const;
     glm::vec3 forward() const;
+    bool isLooking() const { return looking; }
 
     glm::vec3 position{0.0F, 0.5F, 2.5F};
     float yawDegrees = -90.0F;

@@ -27,7 +27,8 @@ cmake --build --preset debug
 | `--scene <n>` | 시작할 장면 번호 |
 | `--screenshot <경로>` | 몇 프레임 뒤 화면을 PNG 로 저장하고 종료한다. 렌더 결과 검증용 |
 
-실행 중에는 숫자 키로 장면을 전환하고, 마우스 오른쪽 버튼을 누른 채 WASD/QE 로 카메라를 움직인다.
+장면 뷰 위에서 마우스 오른쪽 버튼을 누른 채 WASD/QE 로 카메라를 움직인다. 장면 전환은 계층 패널의
+드롭다운이나 숫자 키로 한다.
 
 ## 하드웨어 기능 게이트
 
@@ -41,6 +42,7 @@ cmake --build --preset debug
 | --- | --- |
 | `src/app` | 애플리케이션 수명 주기, 윈도우, 입력 |
 | `src/asset` | glTF 적재와 CPU 측 모델 표현 |
+| `src/editor` | ImGui 기반 편집기 GUI |
 | `src/gfx` | Vulkan 컨텍스트, 리소스, 렌더 경로 |
 | `src/scene` | 장면 그래프와 카메라 |
 | `shaders` | GLSL 셰이더 |

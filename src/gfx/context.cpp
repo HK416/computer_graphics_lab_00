@@ -323,6 +323,10 @@ DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
     candidate.caps = queryCapabilities(candidate.features, extensions, subgroup);
 
     candidate.enabledExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    // 코어 1.3 로도 쓸 수 있지만 ImGui Vulkan 백엔드가 확장 활성화를 요구한다.
+    if (contains(extensions, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)) {
+        candidate.enabledExtensions.push_back(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+    }
     if (contains(extensions, "VK_KHR_portability_subset")) {
         candidate.enabledExtensions.push_back("VK_KHR_portability_subset");
     }

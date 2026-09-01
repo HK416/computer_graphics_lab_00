@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <memory>
 
+#include "editor/editor.h"
 #include "gfx/bindless.h"
 #include "gfx/context.h"
 #include "gfx/geometry.h"
@@ -38,6 +39,7 @@ private:
     std::unique_ptr<gfx::TextureCache> textures;
     std::unique_ptr<gfx::GeometryStore> geometry;
     std::unique_ptr<gfx::Renderer> renderer;
+    std::unique_ptr<editor::Editor> editorUi;
     scene::SceneManager scenes;
     Options options;
 };
