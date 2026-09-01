@@ -17,6 +17,8 @@ constexpr uint32_t MAX_BINDLESS_SAMPLERS = 64;
 
 constexpr uint32_t IMAGE_BINDING = 0;
 constexpr uint32_t SAMPLER_BINDING = 1;
+constexpr uint32_t STORAGE_IMAGE_BINDING = 2;
+constexpr uint32_t MAX_BINDLESS_STORAGE_IMAGES = 256;
 } // namespace
 
 BindlessTextures::BindlessTextures(Context& context) : context(context) {
@@ -35,7 +37,11 @@ BindlessTextures::BindlessTextures(Context& context) : context(context) {
         core::fatal("bindless 텍스처 배열을 만들 수 없습니다");
     }
 
-    std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+    storageCapacity = std::min({properties12.maxDescriptorSetUpdateAfterBindStorageImages,
+                                properties12.maxPerStageDescriptorUpdateAfterBindStorageImages,
+                                MAX_BINDLESS_STORAGE_IMAGES});
+
+    std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
     bindings[0].binding = IMAGE_BINDING;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     bindings[0].descriptorCount = imageCapacity;
@@ -44,11 +50,15 @@ BindlessTextures::BindlessTextures(Context& context) : context(context) {
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     bindings[1].descriptorCount = samplerCapacity;
     bindings[1].stageFlags = VK_SHADER_STAGE_ALL;
+    bindings[2].binding = STORAGE_IMAGE_BINDING;
+    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[2].descriptorCount = storageCapacity;
+    bindings[2].stageFlags = VK_SHADER_STAGE_ALL;
 
     VkDescriptorBindingFlags commonFlags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
                                            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
                                            VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
-    std::array<VkDescriptorBindingFlags, 2> bindingFlags{commonFlags, commonFlags};
+    std::array<VkDescriptorBindingFlags, 3> bindingFlags{commonFlags, commonFlags, commonFlags};
     VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
     flagsInfo.bindingCount = static_cast<uint32_t>(bindingFlags.size());
@@ -61,8 +71,10 @@ BindlessTextures::BindlessTextures(Context& context) : context(context) {
     layoutInfo.pBindings = bindings.data();
     VK_CHECK(vkCreateDescriptorSetLayout(context.device, &layoutInfo, nullptr, &descriptorSetLayout));
 
-    std::array<VkDescriptorPoolSize, 2> poolSizes{VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, imageCapacity},
-                                                  VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, samplerCapacity}};
+    std::array<VkDescriptorPoolSize, 3> poolSizes{
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, imageCapacity},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, samplerCapacity},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, storageCapacity}};
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     poolInfo.maxSets = 1;
@@ -76,7 +88,8 @@ BindlessTextures::BindlessTextures(Context& context) : context(context) {
     allocateInfo.pSetLayouts = &descriptorSetLayout;
     VK_CHECK(vkAllocateDescriptorSets(context.device, &allocateInfo, &descriptorSet));
 
-    spdlog::info("bindless 슬롯: 이미지 {}, 샘플러 {}", imageCapacity, samplerCapacity);
+    spdlog::info(
+        "bindless 슬롯: 이미지 {}, 샘플러 {}, 스토리지 이미지 {}", imageCapacity, samplerCapacity, storageCapacity);
 }
 
 BindlessTextures::~BindlessTextures() {
@@ -110,7 +123,7 @@ uint32_t BindlessTextures::addSampler(VkSampler sampler) {
     return index;
 }
 
-void BindlessTextures::update(uint32_t slot, VkImageView view, VkSampler sampler) {
+void BindlessTextures::update(uint32_t slot, VkImageView view, VkSampler sampler, VkImageLayout layout) {
     uint32_t imageIndex = slot & TEXTURE_IMAGE_MASK;
     if (imageIndex >= imageCount) {
         core::fatal("등록되지 않은 bindless 슬롯을 갱신할 수 없습니다: {}", slot);
@@ -118,7 +131,7 @@ void BindlessTextures::update(uint32_t slot, VkImageView view, VkSampler sampler
 
     VkDescriptorImageInfo imageInfo{};
     imageInfo.imageView = view;
-    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imageInfo.imageLayout = layout;
 
     VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     write.dstSet = descriptorSet;
@@ -131,7 +144,31 @@ void BindlessTextures::update(uint32_t slot, VkImageView view, VkSampler sampler
     addSampler(sampler);
 }
 
-uint32_t BindlessTextures::add(VkImageView view, VkSampler sampler) {
+void BindlessTextures::updateStorageImage(uint32_t slot, VkImageView view) {
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageView = view;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = descriptorSet;
+    write.dstBinding = STORAGE_IMAGE_BINDING;
+    write.dstArrayElement = slot;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(context.device, 1, &write, 0, nullptr);
+}
+
+uint32_t BindlessTextures::addStorageImage(VkImageView view) {
+    if (storageCount >= storageCapacity) {
+        core::fatal("bindless 스토리지 이미지 슬롯이 부족합니다 (한계 {})", storageCapacity);
+    }
+    uint32_t slot = storageCount++;
+    updateStorageImage(slot, view);
+    return slot;
+}
+
+uint32_t BindlessTextures::add(VkImageView view, VkSampler sampler, VkImageLayout layout) {
     if (imageCount >= imageCapacity) {
         core::fatal("bindless 이미지 슬롯이 부족합니다 (한계 {})", imageCapacity);
     }
@@ -139,7 +176,7 @@ uint32_t BindlessTextures::add(VkImageView view, VkSampler sampler) {
 
     VkDescriptorImageInfo imageInfo{};
     imageInfo.imageView = view;
-    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imageInfo.imageLayout = layout;
 
     VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     write.dstSet = descriptorSet;

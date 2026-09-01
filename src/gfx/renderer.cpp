@@ -54,6 +54,15 @@ struct GpuMeshletGroup {
     uint32_t padding;
 };
 
+struct HzbPushConstants {
+    uint32_t sourceTexture;
+    uint32_t destinationStorage;
+    int32_t sourceSize[2];
+    int32_t destinationSize[2];
+};
+
+constexpr VkFormat HZB_FORMAT = VK_FORMAT_R32_SFLOAT;
+
 struct CullPushConstants {
     VkDeviceAddress instances;
     VkDeviceAddress meshes;
@@ -63,10 +72,14 @@ struct CullPushConstants {
     VkDeviceAddress drawCounts;
     uint32_t instanceCount;
     uint32_t flags;
+    uint32_t hzbTexture;
+    float hzbMaxLevel;
+    float hzbSize[2];
 };
 
 constexpr uint32_t CULL_FLAG_FRUSTUM = 1;
 constexpr uint32_t CULL_FLAG_CONE = 2;
+constexpr uint32_t CULL_FLAG_OCCLUSION = 4;
 constexpr uint32_t BUCKET_COUNT = ALPHA_MODE_COUNT * 2;
 
 struct ScenePushConstants {
@@ -193,6 +206,8 @@ Renderer::~Renderer() {
     for (VkPipeline pipeline : meshPipelines) {
         vkDestroyPipeline(context.device, pipeline, nullptr);
     }
+    vkDestroyPipeline(context.device, hzbPipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, hzbPipelineLayout, nullptr);
     vkDestroyPipeline(context.device, cullPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, cullPipelineLayout, nullptr);
     vkDestroyPipelineLayout(context.device, meshPipelineLayout, nullptr);
@@ -210,6 +225,10 @@ Renderer::~Renderer() {
         vkDestroyCommandPool(context.device, frame.commandPool, nullptr);
     }
     destroyBuffer(context, captureBuffer);
+    for (VkImageView view : targets.hzbMipViews) {
+        vkDestroyImageView(context.device, view, nullptr);
+    }
+    destroyImage(context, targets.hzb);
     destroyImage(context, targets.present);
     destroyImage(context, targets.oitRevealage);
     destroyImage(context, targets.oitAccumulation);
@@ -243,11 +262,15 @@ void Renderer::setRenderExtent(VkExtent2D extent) {
 }
 
 std::vector<Renderer::TargetView> Renderer::targetViews() const {
-    std::vector<TargetView> views{
-        {"색상 (HDR)", targets.color.view}, {"표시 (톤 매핑)", targets.present.view}, {"깊이", targets.depth.view}};
+    constexpr VkImageLayout READ_ONLY = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    std::vector<TargetView> views{{"색상 (HDR)", targets.color.view, READ_ONLY},
+                                  {"표시 (톤 매핑)", targets.present.view, READ_ONLY},
+                                  {"깊이", targets.depth.view, READ_ONLY},
+                                  // HZB 는 컴퓨트가 쓰고 읽으므로 계속 GENERAL 이다.
+                                  {"HZB", targets.hzb.view, VK_IMAGE_LAYOUT_GENERAL}};
     if (oitTargetsValid) {
-        views.push_back({"OIT 누적", targets.oitAccumulation.view});
-        views.push_back({"OIT 잔여 투과율", targets.oitRevealage.view});
+        views.push_back({"OIT 누적", targets.oitAccumulation.view, READ_ONLY});
+        views.push_back({"OIT 잔여 투과율", targets.oitRevealage.view, READ_ONLY});
     }
     return views;
 }
@@ -294,18 +317,63 @@ void Renderer::createRenderTargets() {
     presentDesc.format = PRESENT_FORMAT;
     targets.present = createImage(context, presentDesc, "표시");
 
+    for (VkImageView view : targets.hzbMipViews) {
+        vkDestroyImageView(context.device, view, nullptr);
+    }
+    targets.hzbMipViews.clear();
+    destroyImage(context, targets.hzb);
+
+    targets.hzbExtent = {std::max(currentRenderExtent.width / 2, 1U), std::max(currentRenderExtent.height / 2, 1U)};
+    uint32_t hzbLevels =
+        1U + static_cast<uint32_t>(std::floor(std::log2(std::max(targets.hzbExtent.width, targets.hzbExtent.height))));
+
+    ImageDesc hzbDesc;
+    hzbDesc.extent = {targets.hzbExtent.width, targets.hzbExtent.height, 1};
+    hzbDesc.format = HZB_FORMAT;
+    hzbDesc.mipLevels = hzbLevels;
+    hzbDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    targets.hzb = createImage(context, hzbDesc, "HZB");
+
+    targets.hzbMipViews.resize(hzbLevels);
+    for (uint32_t level = 0; level < hzbLevels; ++level) {
+        VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        viewInfo.image = targets.hzb.handle;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = HZB_FORMAT;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = level;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.layerCount = 1;
+        VK_CHECK(vkCreateImageView(context.device, &viewInfo, nullptr, &targets.hzbMipViews[level]));
+    }
+
     ++generation;
 
     if (!targets.slotsAllocated) {
         targets.colorSlot = bindless.add(targets.color.view, postSampler);
         targets.accumulationSlot = bindless.add(targets.oitAccumulation.view, postSampler);
         targets.revealageSlot = bindless.add(targets.oitRevealage.view, postSampler);
+        targets.depthSlot = bindless.add(targets.depth.view, postSampler);
+        // HZB 는 컴퓨트가 쓰고 읽으므로 계속 GENERAL 레이아웃에 둔다.
+        targets.hzbSampledSlot = bindless.add(targets.hzb.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        targets.hzbStorageSlots.resize(targets.hzbMipViews.size());
+        for (size_t level = 0; level < targets.hzbMipViews.size(); ++level) {
+            targets.hzbStorageSlots[level] = bindless.addStorageImage(targets.hzbMipViews[level]);
+        }
         targets.slotsAllocated = true;
     } else {
         bindless.update(targets.colorSlot, targets.color.view, postSampler);
         bindless.update(targets.accumulationSlot, targets.oitAccumulation.view, postSampler);
         bindless.update(targets.revealageSlot, targets.oitRevealage.view, postSampler);
+        bindless.update(targets.depthSlot, targets.depth.view, postSampler);
+        bindless.update(targets.hzbSampledSlot, targets.hzb.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        // 밉 수가 줄어들면 남는 슬롯은 마지막 뷰로 채워 유효한 상태를 유지한다.
+        for (size_t level = 0; level < targets.hzbStorageSlots.size(); ++level) {
+            size_t source = std::min(level, targets.hzbMipViews.size() - 1);
+            bindless.updateStorageImage(targets.hzbStorageSlots[level], targets.hzbMipViews[source]);
+        }
     }
+    hzbNeedsClear = true;
 }
 
 void Renderer::createFrames() {
@@ -402,7 +470,10 @@ void Renderer::createCullPipeline() {
     pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     pushConstantRange.size = sizeof(CullPushConstants);
 
+    VkDescriptorSetLayout cullBindlessLayout = bindless.layout();
     VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &cullBindlessLayout;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushConstantRange;
     VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &cullPipelineLayout));
@@ -418,7 +489,66 @@ void Renderer::createCullPipeline() {
         drawIndexedIndirectCount = reinterpret_cast<PFN_vkCmdDrawIndexedIndirectCount>(
             vkGetDeviceProcAddr(context.device, "vkCmdDrawIndexedIndirectCount"));
     }
+    VkPushConstantRange hzbRange{};
+    hzbRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    hzbRange.size = sizeof(HzbPushConstants);
+
+    VkDescriptorSetLayout bindlessLayout = bindless.layout();
+    VkPipelineLayoutCreateInfo hzbLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    hzbLayoutInfo.setLayoutCount = 1;
+    hzbLayoutInfo.pSetLayouts = &bindlessLayout;
+    hzbLayoutInfo.pushConstantRangeCount = 1;
+    hzbLayoutInfo.pPushConstantRanges = &hzbRange;
+    VK_CHECK(vkCreatePipelineLayout(context.device, &hzbLayoutInfo, nullptr, &hzbPipelineLayout));
+
+    VkShaderModule hzbModule = createShaderModule(context.device, "hzb_reduce.comp.spv");
+    VkComputePipelineCreateInfo hzbPipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    hzbPipelineInfo.stage = shaderStage(VK_SHADER_STAGE_COMPUTE_BIT, hzbModule);
+    hzbPipelineInfo.layout = hzbPipelineLayout;
+    VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &hzbPipelineInfo, nullptr, &hzbPipeline));
+    vkDestroyShaderModule(context.device, hzbModule, nullptr);
+
     spdlog::info("컴퓨트 컬링 준비 완료 (압축 간접 그리기: {})", drawIndexedIndirectCount != nullptr);
+}
+
+void Renderer::recordHzbPass(VkCommandBuffer commandBuffer) {
+    VkDescriptorSet bindlessSet = bindless.set();
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, hzbPipeline);
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, hzbPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+
+    VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+
+    uint32_t sourceWidth = currentRenderExtent.width;
+    uint32_t sourceHeight = currentRenderExtent.height;
+    for (size_t level = 0; level < targets.hzbStorageSlots.size(); ++level) {
+        uint32_t destinationWidth = std::max(targets.hzbExtent.width >> level, 1U);
+        uint32_t destinationHeight = std::max(targets.hzbExtent.height >> level, 1U);
+
+        HzbPushConstants pushConstants{};
+        // 0단계는 깊이 버퍼에서, 나머지는 바로 위 단계에서 줄인다.
+        pushConstants.sourceTexture = level == 0 ? targets.depthSlot : targets.hzbSampledSlot;
+        pushConstants.destinationStorage = targets.hzbStorageSlots[level];
+        pushConstants.sourceSize[0] = static_cast<int32_t>(sourceWidth);
+        pushConstants.sourceSize[1] = static_cast<int32_t>(sourceHeight);
+        pushConstants.destinationSize[0] = static_cast<int32_t>(destinationWidth);
+        pushConstants.destinationSize[1] = static_cast<int32_t>(destinationHeight);
+
+        vkCmdPushConstants(
+            commandBuffer, hzbPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(commandBuffer, (destinationWidth + 7) / 8, (destinationHeight + 7) / 8, 1);
+        vkCmdPipelineBarrier2(commandBuffer, &dependency);
+
+        sourceWidth = destinationWidth;
+        sourceHeight = destinationHeight;
+    }
 }
 
 void Renderer::createPresentSemaphores() {
@@ -938,15 +1068,24 @@ void Renderer::recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches&
     clearDependency.pMemoryBarriers = &clearBarrier;
     vkCmdPipelineBarrier2(commandBuffer, &clearDependency);
 
-    CullPushConstants pushConstants{frame.instanceBuffer.address,
-                                    geometry.meshBuffer.address,
-                                    geometry.meshletBuffer.address,
-                                    frame.cameraBuffer.address,
-                                    frame.meshletDrawBuffer.address,
-                                    frame.drawCountBuffer.address,
-                                    batches.instanceCount,
-                                    (frustumCulling ? CULL_FLAG_FRUSTUM : 0U) | (coneCulling ? CULL_FLAG_CONE : 0U)};
+    CullPushConstants pushConstants{};
+    pushConstants.instances = frame.instanceBuffer.address;
+    pushConstants.meshes = geometry.meshBuffer.address;
+    pushConstants.meshlets = geometry.meshletBuffer.address;
+    pushConstants.camera = frame.cameraBuffer.address;
+    pushConstants.drawCommands = frame.meshletDrawBuffer.address;
+    pushConstants.drawCounts = frame.drawCountBuffer.address;
+    pushConstants.instanceCount = batches.instanceCount;
+    pushConstants.flags = (frustumCulling ? CULL_FLAG_FRUSTUM : 0U) | (coneCulling ? CULL_FLAG_CONE : 0U) |
+                          (occlusionCulling ? CULL_FLAG_OCCLUSION : 0U);
+    pushConstants.hzbTexture = targets.hzbSampledSlot;
+    pushConstants.hzbMaxLevel = static_cast<float>(targets.hzbStorageSlots.size() - 1);
+    pushConstants.hzbSize[0] = static_cast<float>(targets.hzbExtent.width);
+    pushConstants.hzbSize[1] = static_cast<float>(targets.hzbExtent.height);
 
+    VkDescriptorSet cullBindlessSet = bindless.set();
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, cullPipelineLayout, 0, 1, &cullBindlessSet, 0, nullptr);
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, cullPipeline);
     vkCmdPushConstants(
         commandBuffer, cullPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
@@ -988,6 +1127,37 @@ void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, const FrameBatc
 
     bool hasTranslucent = batches.draws[TRANSLUCENT_MODE][0].count + batches.draws[TRANSLUCENT_MODE][1].count > 0;
     oitTargetsValid = hasTranslucent;
+
+    if (hzbNeedsClear) {
+        // 첫 프레임에는 이전 깊이가 없으므로 아무것도 가리지 않도록 가장 먼 값으로 채운다.
+        imageBarrier(commandBuffer,
+                     targets.hzb.handle,
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_IMAGE_LAYOUT_GENERAL,
+                     VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                     0,
+                     VK_PIPELINE_STAGE_2_CLEAR_BIT,
+                     VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+        VkClearColorValue clear{};
+        VkImageSubresourceRange range{};
+        range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        range.levelCount = VK_REMAINING_MIP_LEVELS;
+        range.layerCount = VK_REMAINING_ARRAY_LAYERS;
+        vkCmdClearColorImage(commandBuffer, targets.hzb.handle, VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &range);
+
+        VkMemoryBarrier2 clearBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        clearBarrier.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+        clearBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        clearBarrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        clearBarrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+        VkDependencyInfo clearDependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        clearDependency.memoryBarrierCount = 1;
+        clearDependency.pMemoryBarriers = &clearBarrier;
+        vkCmdPipelineBarrier2(commandBuffer, &clearDependency);
+        hzbNeedsClear = false;
+    }
 
     imageBarrier(commandBuffer,
                  targets.color.handle,
@@ -1155,7 +1325,19 @@ void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, const FrameBatc
         vkCmdEndRendering(commandBuffer);
     }
 
-    // 4) HDR 색상을 톤 매핑해 표시 이미지에 옮긴다. 편집기 뷰포트가 이 이미지를 그대로 보여준다.
+    // 4) 이번 프레임 깊이로 HZB 를 만들어 다음 프레임 컬링에 쓴다.
+    imageBarrier(commandBuffer,
+                 targets.depth.handle,
+                 VK_IMAGE_ASPECT_DEPTH_BIT,
+                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    recordHzbPass(commandBuffer);
+
+    // 5) HDR 색상을 톤 매핑해 표시 이미지에 옮긴다. 편집기 뷰포트가 이 이미지를 그대로 보여준다.
     imageBarrier(commandBuffer,
                  targets.color.handle,
                  VK_IMAGE_ASPECT_COLOR_BIT,
@@ -1197,7 +1379,7 @@ void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, const FrameBatc
     vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     vkCmdEndRendering(commandBuffer);
 
-    // 5) 편집기 UI 를 스왑체인에 그린다. 오프스크린 대상들은 UI 가 샘플링할 수 있는 레이아웃으로 옮긴다.
+    // 6) 편집기 UI 를 스왑체인에 그린다. 오프스크린 대상들은 UI 가 샘플링할 수 있는 레이아웃으로 옮긴다.
     imageBarrier(commandBuffer,
                  targets.present.handle,
                  VK_IMAGE_ASPECT_COLOR_BIT,
@@ -1205,15 +1387,6 @@ void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, const FrameBatc
                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-    imageBarrier(commandBuffer,
-                 targets.depth.handle,
-                 VK_IMAGE_ASPECT_DEPTH_BIT,
-                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     imageBarrier(commandBuffer,

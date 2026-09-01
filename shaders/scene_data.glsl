@@ -16,6 +16,7 @@ layout(push_constant) uniform PushConstants {
     // 재질 경로마다 meshlet 그룹 구간이 달라 디스패치 직전에 갱신한다.
     uint meshletGroupBase;
     uint debugMode;
-} pushConstants;
+}
+pushConstants;
 
 #endif

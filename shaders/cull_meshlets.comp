@@ -16,11 +16,15 @@ layout(push_constant) uniform CullPushConstants {
     DrawCommandBuffer drawCommands;
     CounterBuffer drawCounts;
     uint instanceCount;
-    uint flags; // bit 0: 절두체 컬링, bit 1: 법선 원뿔 컬링
+    uint flags; // bit 0: 절두체, bit 1: 법선 원뿔, bit 2: HZB 오클루전
+    uint hzbTexture;
+    float hzbMaxLevel;
+    vec2 hzbSize;
 } cull;
 
 #define CULL_FLAG_FRUSTUM 1u
 #define CULL_FLAG_CONE 2u
+#define CULL_FLAG_OCCLUSION 4u
 
 void main() {
     uint instanceIndex = gl_WorkGroupID.x;
@@ -53,6 +57,11 @@ void main() {
             if (!coneVisible(sphere.xyz, sphere.w, coneAxis, meshlet.cone.w, camera.position.xyz)) {
                 continue;
             }
+        }
+
+        if ((cull.flags & CULL_FLAG_OCCLUSION) != 0u &&
+            occludedByHzb(camera.viewProjection, sphere, cull.hzbTexture, cull.hzbSize, cull.hzbMaxLevel)) {
+            continue;
         }
 
         uint slot = atomicAdd(cull.drawCounts.items[instance.bucket], 1);

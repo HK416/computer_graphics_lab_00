@@ -105,17 +105,39 @@ struct DrawCommand {
 #define DEBUG_MODE_DEPTH 4u
 #define DEBUG_MODE_LOD 5u
 
-layout(buffer_reference, scalar) readonly buffer VertexBuffer { Vertex items[]; };
-layout(buffer_reference, scalar) readonly buffer MeshBuffer { Mesh items[]; };
-layout(buffer_reference, scalar) readonly buffer InstanceBuffer { Instance items[]; };
-layout(buffer_reference, scalar) readonly buffer MaterialBuffer { Material items[]; };
-layout(buffer_reference, scalar) readonly buffer CameraBuffer { Camera item; };
-layout(buffer_reference, scalar) readonly buffer MeshletBuffer { Meshlet items[]; };
-layout(buffer_reference, scalar) readonly buffer MeshletTriangleBuffer { uint items[]; };
-layout(buffer_reference, scalar) readonly buffer VertexMeshletBuffer { uint items[]; };
-layout(buffer_reference, scalar) readonly buffer MeshletGroupBuffer { MeshletGroup items[]; };
-layout(buffer_reference, scalar) buffer DrawCommandBuffer { DrawCommand items[]; };
-layout(buffer_reference, scalar) buffer CounterBuffer { uint items[]; };
+layout(buffer_reference, scalar) readonly buffer VertexBuffer {
+    Vertex items[];
+};
+layout(buffer_reference, scalar) readonly buffer MeshBuffer {
+    Mesh items[];
+};
+layout(buffer_reference, scalar) readonly buffer InstanceBuffer {
+    Instance items[];
+};
+layout(buffer_reference, scalar) readonly buffer MaterialBuffer {
+    Material items[];
+};
+layout(buffer_reference, scalar) readonly buffer CameraBuffer {
+    Camera item;
+};
+layout(buffer_reference, scalar) readonly buffer MeshletBuffer {
+    Meshlet items[];
+};
+layout(buffer_reference, scalar) readonly buffer MeshletTriangleBuffer {
+    uint items[];
+};
+layout(buffer_reference, scalar) readonly buffer VertexMeshletBuffer {
+    uint items[];
+};
+layout(buffer_reference, scalar) readonly buffer MeshletGroupBuffer {
+    MeshletGroup items[];
+};
+layout(buffer_reference, scalar) buffer DrawCommandBuffer {
+    DrawCommand items[];
+};
+layout(buffer_reference, scalar) buffer CounterBuffer {
+    uint items[];
+};
 
 // 값을 색상환에 흩어 meshlet 이나 LOD 를 구분한다. 채도를 유지해야 인접 값이 잘 구별된다.
 vec3 debugPalette(uint value) {
@@ -123,6 +145,5 @@ vec3 debugPalette(uint value) {
     float hue = float(hashed >> 8) / 16777215.0;
     return clamp(abs(mod(hue * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
 }
-
 
 #endif

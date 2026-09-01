@@ -50,6 +50,13 @@ struct RenderTargets {
     Image oitAccumulation;
     Image oitRevealage;
     Image present; // 톤 매핑 결과. 편집기 뷰포트에 그대로 표시한다.
+    // 이전 프레임 깊이로 만든 계층적 Z 버퍼. 오클루전 컬링이 읽는다.
+    Image hzb;
+    std::vector<VkImageView> hzbMipViews;
+    std::vector<uint32_t> hzbStorageSlots;
+    VkExtent2D hzbExtent{};
+    uint32_t hzbSampledSlot = 0;
+    uint32_t depthSlot = 0;
     uint32_t colorSlot = 0;
     uint32_t accumulationSlot = 0;
     uint32_t revealageSlot = 0;
@@ -76,6 +83,7 @@ public:
     struct TargetView {
         const char* name;
         VkImageView view;
+        VkImageLayout layout;
     };
     std::vector<TargetView> targetViews() const;
     VkImageView presentView() const { return targets.present.view; }
@@ -101,6 +109,7 @@ public:
     bool useComputeCulling = true;
     bool frustumCulling = true;
     bool coneCulling = true;
+    bool occlusionCulling = true;
     // mesh shader 미지원 장치에서는 켤 수 없다.
     bool useMeshShader = false;
     bool meshShaderAvailable() const { return meshShaderPipelines[0] != VK_NULL_HANDLE; }
@@ -138,6 +147,7 @@ private:
     void reserveMeshletDraws(Frame& frame, uint32_t drawCount);
     void createCullPipeline();
     void recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches& batches);
+    void recordHzbPass(VkCommandBuffer commandBuffer);
     // 장면을 순회하며 인스턴스와 간접 그리기 명령을 재질 경로별 구간으로 채운다.
     FrameBatches buildDrawCommands(Frame& frame, const scene::Scene& scene);
     void recordCommands(Frame& frame, uint32_t imageIndex, const FrameBatches& batches);
@@ -170,6 +180,8 @@ private:
     VkShaderStageFlags scenePushStages = 0;
     VkPipelineLayout cullPipelineLayout = VK_NULL_HANDLE;
     VkPipeline cullPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout hzbPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline hzbPipeline = VK_NULL_HANDLE;
     PFN_vkCmdDrawIndexedIndirectCount drawIndexedIndirectCount = nullptr;
     VkPipelineLayout postPipelineLayout = VK_NULL_HANDLE;
     VkPipeline compositePipeline = VK_NULL_HANDLE;
@@ -178,6 +190,7 @@ private:
     std::filesystem::path capturePath;
     Buffer captureBuffer;
 
+    bool hzbNeedsClear = true;
     bool resizeRequested = false;
     bool vsync = true;
 };

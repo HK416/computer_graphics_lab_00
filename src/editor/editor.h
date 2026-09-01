@@ -47,7 +47,7 @@ private:
     void buildRenderSettings(float deltaSeconds);
     void buildRenderTargets();
     void buildConsole();
-    VkDescriptorSet textureFor(VkImageView view);
+    VkDescriptorSet textureFor(VkImageView view, VkImageLayout layout);
 
     gfx::Context& context;
     gfx::Renderer& renderer;

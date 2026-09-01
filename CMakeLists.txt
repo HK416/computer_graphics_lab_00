@@ -81,7 +81,8 @@ set(shader_sources
     shaders/tonemap.frag
     shaders/mesh.task
     shaders/mesh.mesh
-    shaders/cull_meshlets.comp)
+    shaders/cull_meshlets.comp
+    shaders/hzb_reduce.comp)
 
 set(shader_binaries)
 foreach(shader IN LISTS shader_sources)

@@ -150,7 +150,7 @@ void Editor::processEvent(const SDL_Event& event) {
     ImGui_ImplSDL3_ProcessEvent(&event);
 }
 
-VkDescriptorSet Editor::textureFor(VkImageView view) {
+VkDescriptorSet Editor::textureFor(VkImageView view, VkImageLayout layout) {
     // 렌더 대상이 다시 만들어졌으면 이전 디스크립터는 모두 버린다.
     if (cachedGeneration != renderer.targetsGeneration()) {
         for (auto& entry : textures) {
@@ -164,7 +164,7 @@ VkDescriptorSet Editor::textureFor(VkImageView view) {
     if (found != textures.end()) {
         return found->second;
     }
-    VkDescriptorSet set = ImGui_ImplVulkan_AddTexture(view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    VkDescriptorSet set = ImGui_ImplVulkan_AddTexture(view, layout);
     textures.emplace(view, set);
     return set;
 }
@@ -351,9 +351,9 @@ void Editor::buildSceneView(scene::Scene& active) {
         viewportExtent = {static_cast<uint32_t>(available.x * scale.x), static_cast<uint32_t>(available.y * scale.y)};
     }
 
-    ImGui::Image(
-        ImTextureRef{static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(textureFor(renderer.presentView())))},
-        available);
+    ImGui::Image(ImTextureRef{static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
+                     textureFor(renderer.presentView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)))},
+                 available);
     sceneHovered = ImGui::IsItemHovered();
 
     ImVec2 imagePosition = ImGui::GetItemRectMin();
@@ -449,6 +449,7 @@ void Editor::buildRenderSettings(float deltaSeconds) {
     ImGui::Checkbox("절두체 컬링", &renderer.frustumCulling);
     ImGui::SameLine();
     ImGui::Checkbox("법선 원뿔 컬링", &renderer.coneCulling);
+    ImGui::Checkbox("HZB 오클루전 컬링", &renderer.occlusionCulling);
     ImGui::EndDisabled();
 
     ImGui::Checkbox("자동 LOD 선정", &renderer.automaticLod);
@@ -520,9 +521,10 @@ void Editor::buildRenderTargets() {
         VkExtent2D extent = renderer.renderExtent();
         float aspect = static_cast<float>(extent.width) / static_cast<float>(extent.height);
         float height = std::min(available.y - 4.0F, available.x / aspect);
-        ImGui::Image(ImTextureRef{static_cast<ImTextureID>(
-                         reinterpret_cast<uintptr_t>(textureFor(views[static_cast<size_t>(selectedTarget)].view)))},
-                     ImVec2{height * aspect, height});
+        ImGui::Image(
+            ImTextureRef{static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(textureFor(
+                views[static_cast<size_t>(selectedTarget)].view, views[static_cast<size_t>(selectedTarget)].layout)))},
+            ImVec2{height * aspect, height});
     }
     ImGui::End();
 }

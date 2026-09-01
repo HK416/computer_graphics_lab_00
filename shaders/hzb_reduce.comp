@@ -1,0 +1,46 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+
+#include "bindless.glsl"
+
+// HZB 한 단계를 만든다. 원본 2x2 의 최솟값을 취하고, 원본 크기가 홀수면 한 줄을 더 본다.
+// reverse-Z 라 최솟값이 가장 먼 깊이이므로, 이 값보다 더 먼 물체는 확실히 가려져 있다.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(push_constant) uniform ReducePushConstants {
+    uint sourceTexture;      // 샘플링용 슬롯
+    uint destinationStorage; // 쓰기용 스토리지 이미지 슬롯
+    ivec2 sourceSize;
+    ivec2 destinationSize;
+} pushConstants;
+
+float fetchSource(ivec2 coordinate) {
+    ivec2 clamped = clamp(coordinate, ivec2(0), pushConstants.sourceSize - 1);
+    vec2 uv = (vec2(clamped) + 0.5) / vec2(pushConstants.sourceSize);
+    return fetchBindlessLod(pushConstants.sourceTexture, uv, 0.0).r;
+}
+
+void main() {
+    ivec2 destination = ivec2(gl_GlobalInvocationID.xy);
+    if (destination.x >= pushConstants.destinationSize.x || destination.y >= pushConstants.destinationSize.y) {
+        return;
+    }
+
+    ivec2 base = destination * 2;
+    float depth = fetchSource(base);
+    depth = min(depth, fetchSource(base + ivec2(1, 0)));
+    depth = min(depth, fetchSource(base + ivec2(0, 1)));
+    depth = min(depth, fetchSource(base + ivec2(1, 1)));
+
+    // 홀수 크기에서 잘려 나가는 줄까지 포함해야 보수적인 결과가 된다.
+    if ((pushConstants.sourceSize.x & 1) != 0 && destination.x == pushConstants.destinationSize.x - 1) {
+        depth = min(depth, fetchSource(base + ivec2(2, 0)));
+        depth = min(depth, fetchSource(base + ivec2(2, 1)));
+    }
+    if ((pushConstants.sourceSize.y & 1) != 0 && destination.y == pushConstants.destinationSize.y - 1) {
+        depth = min(depth, fetchSource(base + ivec2(0, 2)));
+        depth = min(depth, fetchSource(base + ivec2(1, 2)));
+    }
+
+    imageStore(bindlessStorageImages[nonuniformEXT(pushConstants.destinationStorage)], destination, vec4(depth));
+}

@@ -156,11 +156,13 @@ std::vector<const char*> missingRequiredFeatures(const FeatureChain& f) {
     require(f.v12.runtimeDescriptorArray, "runtimeDescriptorArray");
     require(f.v12.shaderSampledImageArrayNonUniformIndexing, "shaderSampledImageArrayNonUniformIndexing");
     require(f.v12.shaderStorageBufferArrayNonUniformIndexing, "shaderStorageBufferArrayNonUniformIndexing");
+    require(f.v12.shaderStorageImageArrayNonUniformIndexing, "shaderStorageImageArrayNonUniformIndexing");
     require(f.v12.descriptorBindingPartiallyBound, "descriptorBindingPartiallyBound");
     require(f.v12.descriptorBindingUpdateUnusedWhilePending, "descriptorBindingUpdateUnusedWhilePending");
     require(f.v12.descriptorBindingVariableDescriptorCount, "descriptorBindingVariableDescriptorCount");
     require(f.v12.descriptorBindingSampledImageUpdateAfterBind, "descriptorBindingSampledImageUpdateAfterBind");
     require(f.v12.descriptorBindingStorageBufferUpdateAfterBind, "descriptorBindingStorageBufferUpdateAfterBind");
+    require(f.v12.descriptorBindingStorageImageUpdateAfterBind, "descriptorBindingStorageImageUpdateAfterBind");
     require(f.v12.timelineSemaphore, "timelineSemaphore");
     require(f.v12.scalarBlockLayout, "scalarBlockLayout");
     require(f.v12.hostQueryReset, "hostQueryReset");
@@ -520,11 +522,13 @@ Context::Context(SDL_Window* window) {
     enabled.v12.runtimeDescriptorArray = VK_TRUE;
     enabled.v12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
     enabled.v12.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
+    enabled.v12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
     enabled.v12.descriptorBindingPartiallyBound = VK_TRUE;
     enabled.v12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
     enabled.v12.descriptorBindingVariableDescriptorCount = VK_TRUE;
     enabled.v12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     enabled.v12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+    enabled.v12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
     enabled.v12.timelineSemaphore = VK_TRUE;
     enabled.v12.scalarBlockLayout = VK_TRUE;
     enabled.v12.hostQueryReset = VK_TRUE;

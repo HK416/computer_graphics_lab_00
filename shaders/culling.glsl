@@ -44,8 +44,8 @@ bool coneVisible(vec3 center, float radius, vec3 coneAxis, float coneCutoff, vec
 // 인스턴스 변환을 반영한 월드 공간 바운딩 스피어. 비균등 스케일은 최대 성분으로 보수적으로 잡는다.
 vec4 transformBoundingSphere(mat4 model, vec4 sphere) {
     vec3 center = (model * vec4(sphere.xyz, 1.0)).xyz;
-    float scale = sqrt(max(max(dot(model[0].xyz, model[0].xyz), dot(model[1].xyz, model[1].xyz)),
-                           dot(model[2].xyz, model[2].xyz)));
+    float scale = sqrt(
+        max(max(dot(model[0].xyz, model[0].xyz), dot(model[1].xyz, model[1].xyz)), dot(model[2].xyz, model[2].xyz)));
     return vec4(center, sphere.w * scale);
 }
 
@@ -60,12 +60,8 @@ float projectedError(vec3 cameraPosition, float projectionScale, vec4 sphere, fl
 
 // 자신의 오차는 허용되고 부모의 오차는 허용되지 않는 meshlet 만 그린다. 같은 그룹은 같은 판정을
 // 받으므로 서로 다른 단계가 맞닿아도 틈이 생기지 않는다.
-bool selectLod(Meshlet meshlet,
-               mat4 model,
-               vec3 cameraPosition,
-               float projectionScale,
-               float threshold,
-               float forcedLevel) {
+bool selectLod(
+    Meshlet meshlet, mat4 model, vec3 cameraPosition, float projectionScale, float threshold, float forcedLevel) {
     if (forcedLevel >= 0.0) {
         return float(meshlet.level) == forcedLevel;
     }
@@ -74,6 +70,44 @@ bool selectLod(Meshlet meshlet,
     float own = projectedError(cameraPosition, projectionScale, ownSphere, meshlet.error);
     float parent = projectedError(cameraPosition, projectionScale, parentSphere, meshlet.parentError);
     return own <= threshold && parent > threshold;
+}
+
+// 이전 프레임 HZB 로 가림 여부를 판정한다. 바운딩 상자의 여덟 꼭짓점을 투영해 화면 사각형을 잡고,
+// 그 크기에 맞는 밉 단계에서 가장 먼 깊이를 읽어 비교한다.
+//
+// ponytail: 이전 프레임 깊이만 쓰는 한 패스 방식이라 카메라가 빠르게 움직이면 한 프레임 늦게 나타난다.
+// 완전히 없애려면 이 프레임 깊이로 다시 판정하는 두 패스 방식으로 올려야 한다.
+bool occludedByHzb(mat4 viewProjection, vec4 sphere, uint hzbTexture, vec2 hzbSize, float hzbMaxLevel) {
+    vec2 minUv = vec2(1.0e9);
+    vec2 maxUv = vec2(-1.0e9);
+    float nearestDepth = 0.0;
+
+    for (int i = 0; i < 8; ++i) {
+        vec3 offset = vec3((i & 1) != 0 ? 1.0 : -1.0, (i & 2) != 0 ? 1.0 : -1.0, (i & 4) != 0 ? 1.0 : -1.0);
+        vec4 clip = viewProjection * vec4(sphere.xyz + offset * sphere.w, 1.0);
+        if (clip.w <= 0.0) {
+            // 근평면을 물고 있으면 화면 사각형을 신뢰할 수 없으므로 가림 판정을 건너뛴다.
+            return false;
+        }
+        vec3 ndc = clip.xyz / clip.w;
+        vec2 uv = ndc.xy * 0.5 + 0.5;
+        minUv = min(minUv, uv);
+        maxUv = max(maxUv, uv);
+        nearestDepth = max(nearestDepth, ndc.z);
+    }
+
+    minUv = clamp(minUv, vec2(0.0), vec2(1.0));
+    maxUv = clamp(maxUv, vec2(0.0), vec2(1.0));
+
+    vec2 sizeInTexels = (maxUv - minUv) * hzbSize;
+    float level = clamp(ceil(log2(max(max(sizeInTexels.x, sizeInTexels.y), 1.0))), 0.0, hzbMaxLevel);
+
+    float farthest = fetchBindlessLod(hzbTexture, vec2(minUv.x, minUv.y), level).r;
+    farthest = min(farthest, fetchBindlessLod(hzbTexture, vec2(maxUv.x, minUv.y), level).r);
+    farthest = min(farthest, fetchBindlessLod(hzbTexture, vec2(minUv.x, maxUv.y), level).r);
+    farthest = min(farthest, fetchBindlessLod(hzbTexture, vec2(maxUv.x, maxUv.y), level).r);
+
+    return nearestDepth < farthest;
 }
 
 #endif
