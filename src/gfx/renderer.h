@@ -15,6 +15,7 @@
 #include "gfx/profiler.h"
 #include "gfx/raytracing.h"
 #include "gfx/resources.h"
+#include "gfx/shadow_math.h"
 
 struct SDL_Window;
 
@@ -40,6 +41,15 @@ struct GpuLight {
     glm::vec4 coneSize;           // xy 원뿔 cos(안/바깥), zw 영역광 반크기
     glm::vec4 rightShadow;        // xyz 가로축, w 그림자 아틀라스 첫 타일(-1 이면 없음)
     glm::vec4 up;                 // xyz 세로축
+};
+
+// 그림자 시점 하나. 컬링에 쓸 정보까지 함께 담는다.
+struct ShadowView {
+    glm::mat4 viewProjection{1.0F};
+    // 그림자가 뻗어 나가는 방향. 방향광은 고정이고, 점광/스폿광은 캐스터마다 다시 구한다.
+    glm::vec3 sweepDirection{0.0F};
+    glm::vec3 origin{0.0F};
+    bool directional = false;
 };
 
 // 그림자 아틀라스 한 변의 픽셀 수. shaders/shadow.glsl 의 SHADOW_ATLAS_SIZE 와 같아야 한다.
@@ -175,6 +185,11 @@ public:
 
     // 그림자. 방향광과 스폿광은 시점 하나, 점광은 여섯 면을 아틀라스 타일에 담는다.
     bool shadowsEnabled = true;
+    // 시점별 절두체 컬링과, 그림자가 화면에 닿을 수 없는 캐스터를 버리는 스윕 컬링.
+    bool shadowViewCulling = true;
+    bool shadowCasterCulling = true;
+    uint32_t shadowDrawCount() const { return shadowDrawsIssued; }
+    uint32_t shadowDrawCandidates() const { return shadowDrawsTotal; }
 
     // 화면 공간 주변광 차폐.
     bool useSsao = true;
@@ -236,6 +251,9 @@ private:
         // 장면의 조명과 그림자 시점 행렬. 둘 다 매 프레임 다시 채운다.
         Buffer lightBuffer;
         Buffer shadowMatrixBuffer;
+        // 시점별로 컬링해 압축한 그림자 그리기 명령. 시점 하나가 알파 경로 둘을 쓴다.
+        Buffer shadowDrawBuffer;
+        uint32_t shadowDrawCapacity = 0;
         uint32_t lightCapacity = 0;
         uint32_t instanceCapacity = 0;
         uint32_t groupCapacity = 0;
@@ -255,12 +273,18 @@ private:
     void reserveMeshletDraws(Frame& frame, uint32_t drawCount);
     void reserveJoints(Frame& frame, uint32_t jointCount);
     void reserveLights(Frame& frame, uint32_t lightCount);
+    void reserveShadowDraws(Frame& frame, uint32_t drawCount);
+    // 그림자 시점마다 절두체와 캐스터 스윕으로 걸러 압축한 그리기 명령을 만든다.
+    void buildShadowDraws(Frame& frame,
+                          const scene::Scene& scene,
+                          const FrameBatches& batches,
+                          const glm::mat4& cameraViewProjection);
     // 장면의 조명을 GPU 배치로 옮기고 그림자 시점을 정한다.
     void buildLights(Frame& frame, const scene::Scene& scene);
     void createCullPipeline();
     void createShadowPipeline();
     void createSsaoPipelines();
-    void recordShadowPass(VkCommandBuffer commandBuffer, const FrameBatches& batches);
+    void recordShadowPass(VkCommandBuffer commandBuffer);
     void recordSsaoPass(VkCommandBuffer commandBuffer, const Frame& frame);
     void recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches& batches);
     void recordHzbPass(VkCommandBuffer commandBuffer);
@@ -295,7 +319,14 @@ private:
 
     // buildLights 가 채운다. 그림자 패스와 푸시 상수가 함께 쓴다.
     std::vector<GpuLight> frameLights;
-    std::vector<glm::mat4> shadowViews;
+    std::vector<ShadowView> shadowViews;
+    // 시점 × 알파 경로마다의 그리기 구간. shadowDrawBuffer 기준이다.
+    std::vector<DrawBatch> shadowBatches;
+    // 인스턴스 슬롯별 세계 경계 구. 시점 컬링이 쓴다.
+    std::vector<glm::vec4> instanceBounds;
+    // 컬링 전후 그리기 수. 편집기에 보여준다.
+    uint32_t shadowDrawsIssued = 0;
+    uint32_t shadowDrawsTotal = 0;
 
     GpuProfiler frameProfiler;
 

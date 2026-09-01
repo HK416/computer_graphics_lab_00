@@ -733,6 +733,12 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     ImGui::ColorEdit3("환경광", glm::value_ptr(active.ambientColor));
     ImGui::SliderFloat("환경광 세기", &active.ambientIntensity, 0.0F, 4.0F, "%.2f");
     ImGui::Checkbox("그림자", &renderer.shadowsEnabled);
+    ImGui::BeginDisabled(!renderer.shadowsEnabled);
+    ImGui::Checkbox("시점 절두체 컬링", &renderer.shadowViewCulling);
+    ImGui::SameLine();
+    ImGui::Checkbox("캐스터 컬링", &renderer.shadowCasterCulling);
+    ImGui::Text("그림자 드로우 %u / %u", renderer.shadowDrawCount(), renderer.shadowDrawCandidates());
+    ImGui::EndDisabled();
     ImGui::TextDisabled("그림자 시점 %u개까지 (방향광/스폿광 1, 점광 6)", gfx::MAX_SHADOW_VIEWS);
 
     ImGui::SeparatorText("SSAO");

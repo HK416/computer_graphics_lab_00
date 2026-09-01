@@ -645,6 +645,96 @@ void Renderer::reserveLights(Frame& frame, uint32_t lightCount) {
     frame.lightCapacity = capacity;
 }
 
+void Renderer::reserveShadowDraws(Frame& frame, uint32_t drawCount) {
+    uint32_t needed = std::max(drawCount, 1U);
+    if (needed <= frame.shadowDrawCapacity) {
+        return;
+    }
+    uint32_t capacity = std::max(needed, frame.shadowDrawCapacity * 2);
+    destroyBuffer(context, frame.shadowDrawBuffer);
+    frame.shadowDrawBuffer = createBuffer(context,
+                                          static_cast<VkDeviceSize>(capacity) * sizeof(VkDrawIndexedIndirectCommand),
+                                          VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+                                          MemoryLocation::HOST_WRITE,
+                                          "그림자 그리기 명령");
+    frame.shadowDrawCapacity = capacity;
+}
+
+// 시점마다 캐스터를 걸러 압축한 그리기 명령을 만든다.
+//
+// GPU 컬링이 아니라 CPU 인 이유: 이 저장소의 컴퓨트 컬링은 meshlet 단위로 명령을 뱉는데, 압축
+// 간접 그리기(drawIndirectCount)가 없는 장치에서는 상한만큼 발행해야 해서 시점 하나에 수백 개의
+// 무효 드로우가 생긴다. 그림자는 오브젝트 단위 드로우가 훨씬 싸고, 편집기 규모에서 시점 × 오브젝트
+// 순회는 무시할 수준이다.
+//
+// ponytail: 압축 간접 그리기가 있는 장치라면 시점을 컬 컴퓨트의 두 번째 디스패치 축으로 넘겨
+// meshlet 단위까지 걸러 내는 편이 낫다.
+void Renderer::buildShadowDraws(Frame& frame,
+                                const scene::Scene& scene,
+                                const FrameBatches& batches,
+                                const glm::mat4& cameraViewProjection) {
+    shadowBatches.assign(shadowViews.size() * TRANSLUCENT_MODE, DrawBatch{});
+    shadowDrawsIssued = 0;
+    shadowDrawsTotal = 0;
+    if (shadowViews.empty()) {
+        return;
+    }
+
+    uint32_t casterCount = 0;
+    for (size_t mode = 0; mode < TRANSLUCENT_MODE; ++mode) {
+        casterCount += batches.draws[mode][0].count + batches.draws[mode][1].count;
+    }
+    shadowDrawsTotal = casterCount * static_cast<uint32_t>(shadowViews.size());
+    reserveShadowDraws(frame, shadowDrawsTotal);
+    if (casterCount == 0) {
+        return;
+    }
+
+    // 카메라 절두체는 무한 원거리라 원평면이 없다. 스윕 길이는 장면을 가로지르면 충분하다.
+    std::array<glm::vec4, MAX_FRUSTUM_PLANES> cameraPlanes{};
+    uint32_t cameraPlaneCount = extractFrustumPlanes(cameraViewProjection, cameraPlanes, false);
+    float sweep = 2.0F * sceneRadius;
+
+    const auto* source = static_cast<const VkDrawIndexedIndirectCommand*>(frame.drawBuffer.mapped);
+    auto* destination = static_cast<VkDrawIndexedIndirectCommand*>(frame.shadowDrawBuffer.mapped);
+    uint32_t cursor = 0;
+
+    for (size_t view = 0; view < shadowViews.size(); ++view) {
+        const ShadowView& shadowView = shadowViews[view];
+        std::array<glm::vec4, MAX_FRUSTUM_PLANES> planes{};
+        uint32_t planeCount = extractFrustumPlanes(shadowView.viewProjection, planes, true);
+
+        for (size_t mode = 0; mode < TRANSLUCENT_MODE; ++mode) {
+            DrawBatch& batch = shadowBatches[view * TRANSLUCENT_MODE + mode];
+            batch.first = cursor;
+            uint32_t first = batches.draws[mode][0].first;
+            uint32_t count = batches.draws[mode][0].count + batches.draws[mode][1].count;
+
+            for (uint32_t i = 0; i < count; ++i) {
+                uint32_t slot = first + i;
+                const glm::vec4& sphere = instanceBounds[slot];
+                // 광원 절두체 밖이면 이 시점에 아무것도 남기지 않는다.
+                if (shadowViewCulling && !sphereInFrustum(planes, planeCount, glm::vec3(sphere), sphere.w)) {
+                    continue;
+                }
+                // 그림자가 뻗어 나갈 범위까지 부풀려도 카메라에 닿지 않으면 화면에 나올 수 없다.
+                if (shadowCasterCulling) {
+                    glm::vec3 direction = shadowView.directional
+                                              ? shadowView.sweepDirection
+                                              : glm::normalize(glm::vec3(sphere) - shadowView.origin);
+                    if (!sweptSphereInFrustum(
+                            cameraPlanes, cameraPlaneCount, glm::vec3(sphere), sphere.w, direction, sweep)) {
+                        continue;
+                    }
+                }
+                destination[cursor++] = source[slot];
+            }
+            batch.count = cursor - batch.first;
+        }
+    }
+    shadowDrawsIssued = cursor;
+}
+
 void Renderer::reserveMeshletDraws(Frame& frame, uint32_t drawCount) {
     if (frame.lodNetworkBuffer.handle == VK_NULL_HANDLE) {
         frame.lodNetworkBuffer = createBuffer(context,
@@ -842,25 +932,12 @@ void Renderer::createCullPipeline() {
     spdlog::info("컴퓨트 컬링 준비 완료 (압축 간접 그리기: {})", drawIndexedIndirectCount != nullptr);
 }
 
-void Renderer::recordShadowPass(VkCommandBuffer commandBuffer, const FrameBatches& batches) {
+void Renderer::recordShadowPass(VkCommandBuffer commandBuffer) {
     constexpr VkDeviceSize DRAW_STRIDE = sizeof(VkDrawIndexedIndirectCommand);
     Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];
 
-    // 불투명과 컷오프만 그림자를 만든다. 알파 경로마다 파이프라인이 달라 구간을 나눠 그린다.
-    // 같은 알파 경로의 단면/양면은 그리기 버퍼에서 연속이다.
-    struct CasterRange {
-        VkPipeline pipeline;
-        uint32_t first;
-        uint32_t count;
-    };
-    std::array<CasterRange, TRANSLUCENT_MODE> casters{};
-    uint32_t drawCount = 0;
-    for (size_t mode = 0; mode < TRANSLUCENT_MODE; ++mode) {
-        casters[mode].pipeline = mode == 0 ? shadowPipeline : shadowCutoffPipeline;
-        casters[mode].first = batches.draws[mode][0].first;
-        casters[mode].count = batches.draws[mode][0].count + batches.draws[mode][1].count;
-        drawCount += casters[mode].count;
-    }
+    // 시점마다 압축된 그리기 명령을 쓴다. buildShadowDraws 가 절두체와 캐스터 스윕으로 걸러 둔 것이다.
+    std::array<VkPipeline, TRANSLUCENT_MODE> casterPipelines{shadowPipeline, shadowCutoffPipeline};
 
     imageBarrier(commandBuffer,
                  targets.shadowAtlas.handle,
@@ -885,7 +962,7 @@ void Renderer::recordShadowPass(VkCommandBuffer commandBuffer, const FrameBatche
     rendering.pDepthAttachment = &depthAttachment;
     vkCmdBeginRendering(commandBuffer, &rendering);
 
-    if (drawCount > 0) {
+    if (shadowDrawsIssued > 0) {
         VkDescriptorSet bindlessSet = bindless.set();
         vkCmdBindDescriptorSets(
             commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, depthPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
@@ -914,22 +991,24 @@ void Renderer::recordShadowPass(VkCommandBuffer commandBuffer, const FrameBatche
             vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
             vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-            pushConstants.viewProjection = shadowViews[view];
+            pushConstants.viewProjection = shadowViews[view].viewProjection;
             vkCmdPushConstants(commandBuffer,
                                depthPipelineLayout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                0,
                                sizeof(pushConstants),
                                &pushConstants);
-            for (const CasterRange& caster : casters) {
-                if (caster.count == 0) {
+
+            for (size_t mode = 0; mode < TRANSLUCENT_MODE; ++mode) {
+                const DrawBatch& batch = shadowBatches[view * TRANSLUCENT_MODE + mode];
+                if (batch.count == 0) {
                     continue;
                 }
-                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, caster.pipeline);
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, casterPipelines[mode]);
                 vkCmdDrawIndexedIndirect(commandBuffer,
-                                         frame.drawBuffer.handle,
-                                         caster.first * DRAW_STRIDE,
-                                         caster.count,
+                                         frame.shadowDrawBuffer.handle,
+                                         batch.first * DRAW_STRIDE,
+                                         batch.count,
                                          static_cast<uint32_t>(DRAW_STRIDE));
             }
         }
@@ -1430,20 +1509,26 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
         }
         if (viewsNeeded > 0 && shadowViews.size() + viewsNeeded <= MAX_SHADOW_VIEWS) {
             light.rightShadow.w = static_cast<float>(shadowViews.size());
+            ShadowView view{};
+            view.origin = position;
+            view.sweepDirection = direction;
             if (source.type == scene::LightType::DIRECTIONAL) {
-                glm::mat4 view = lookAlong(sceneCenter - direction * sceneRadius, direction);
-                shadowViews.push_back(
+                view.directional = true;
+                view.viewProjection =
                     glm::orthoRH_ZO(-sceneRadius, sceneRadius, -sceneRadius, sceneRadius, 0.0F, 2.0F * sceneRadius) *
-                    view);
+                    lookAlong(sceneCenter - direction * sceneRadius, direction);
+                shadowViews.push_back(view);
             } else if (source.type == scene::LightType::SPOT) {
                 float fov = std::min(glm::radians(source.outerConeDegrees) * 2.0F, glm::radians(170.0F));
-                shadowViews.push_back(glm::perspectiveRH_ZO(fov, 1.0F, SHADOW_NEAR_PLANE, source.range) *
-                                      lookAlong(position, direction));
+                view.viewProjection =
+                    glm::perspectiveRH_ZO(fov, 1.0F, SHADOW_NEAR_PLANE, source.range) * lookAlong(position, direction);
+                shadowViews.push_back(view);
             } else {
                 glm::mat4 projection =
                     glm::perspectiveRH_ZO(glm::radians(90.0F), 1.0F, SHADOW_NEAR_PLANE, source.range);
                 for (const glm::vec3& face : CUBE_FACE_DIRECTIONS) {
-                    shadowViews.push_back(projection * lookAlong(position, face));
+                    view.viewProjection = projection * lookAlong(position, face);
+                    shadowViews.push_back(view);
                 }
             }
         }
@@ -1454,8 +1539,9 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
     if (!frameLights.empty()) {
         std::ranges::copy(frameLights, static_cast<GpuLight*>(frame.lightBuffer.mapped));
     }
-    if (!shadowViews.empty()) {
-        std::ranges::copy(shadowViews, static_cast<glm::mat4*>(frame.shadowMatrixBuffer.mapped));
+    auto* shadowMatrices = static_cast<glm::mat4*>(frame.shadowMatrixBuffer.mapped);
+    for (size_t view = 0; view < shadowViews.size(); ++view) {
+        shadowMatrices[view] = shadowViews[view].viewProjection;
     }
 }
 
@@ -1467,6 +1553,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     lastScene = &scene;
     lastSceneRevision = scene.revision();
     objectInstanceSlots.assign(scene.objects.size(), INVALID_INSTANCE_SLOT);
+    instanceBounds.assign(scene.objects.size(), glm::vec4{0.0F});
 
     // 재질 경로와 면 방향 조합마다 명령이 연속 구간을 이루도록 두 번 순회한다.
     auto bucketOf = [this](const scene::Object& object) {
@@ -1581,6 +1668,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
 
         instances[slot].model = model;
         instances[slot].normalMatrix = glm::mat4(glm::inverseTranspose(glm::mat3(model)));
+        instanceBounds[slot] = transformBoundingSphere(model, mesh.boundingSphere);
         instances[slot].meshIndex = object.meshIndex;
         instances[slot].bucket = static_cast<uint32_t>(mode * 2 + sided);
         instances[slot].bucketBase = batches.meshletDraws[mode][sided].first;
@@ -1613,11 +1701,15 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         }
     }
 
+    // 카메라 변환을 먼저 구한다. 그림자 캐스터 컬링이 이번 프레임의 카메라 절두체를 봐야 한다.
+    float aspect = static_cast<float>(currentRenderExtent.width) / static_cast<float>(currentRenderExtent.height);
+    glm::mat4 cameraViewProjection = scene.camera.projectionMatrix(aspect) * scene.camera.viewMatrix();
+
     buildLights(frame, scene);
+    buildShadowDraws(frame, scene, batches, cameraViewProjection);
 
     auto* camera = static_cast<GpuCamera*>(frame.cameraBuffer.mapped);
-    float aspect = static_cast<float>(currentRenderExtent.width) / static_cast<float>(currentRenderExtent.height);
-    camera->viewProjection = scene.camera.projectionMatrix(aspect) * scene.camera.viewMatrix();
+    camera->viewProjection = cameraViewProjection;
     camera->position = glm::vec4{scene.camera.position, 1.0F};
     // 화면 공간 오차 = 월드 오차 * projectionScale / 거리.
     float projectionScale = static_cast<float>(currentRenderExtent.height) /
@@ -2002,7 +2094,7 @@ void Renderer::recordCommands(Frame& frame,
     // 그림자 아틀라스는 장면 패스보다 먼저 채워야 한다. 경로 추적은 아틀라스를 읽지 않으므로 건너뛴다.
     if (!pathTracing && !shadowViews.empty()) {
         uint32_t shadowZone = frameProfiler.begin("그림자", commandBuffer);
-        recordShadowPass(commandBuffer, batches);
+        recordShadowPass(commandBuffer);
         frameProfiler.end(shadowZone, commandBuffer);
     }
 
