@@ -57,6 +57,7 @@ uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<ui
         mesh.vertexOffset = static_cast<int32_t>(vertices.size());
         mesh.materialIndex = materialBase + source.materialIndex;
         meshes.push_back(mesh);
+        meshNames.push_back(source.name);
 
         vertices.insert(vertices.end(), source.vertices.begin(), source.vertices.end());
         indices.insert(indices.end(), source.indices.begin(), source.indices.end());

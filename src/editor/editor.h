@@ -37,13 +37,13 @@ public:
     void record(VkCommandBuffer commandBuffer);
 
     VkExtent2D desiredRenderExtent() const { return viewportExtent; }
-    bool viewportHovered() const { return sceneHovered; }
+    bool viewportHovered() const { return sceneHovered && !gizmoUsing; }
 
 private:
     void buildDockspace();
-    void buildHierarchy(scene::SceneManager& scenes);
+    void buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStore& geometry);
     void buildInspector(scene::Scene& scene, const gfx::GeometryStore& geometry);
-    void buildSceneView();
+    void buildSceneView(scene::Scene& active);
     void buildRenderSettings(float deltaSeconds);
     void buildRenderTargets();
     void buildConsole();
@@ -61,6 +61,10 @@ private:
     bool layoutBuilt = false;
     int selectedObject = -1;
     int selectedTarget = 0;
+    // ImGuizmo::OPERATION 과 MODE 값. 헤더에서 ImGuizmo 를 끌어오지 않으려고 정수로 둔다.
+    int gizmoOperation = 7;
+    int gizmoMode = 1;
+    bool gizmoUsing = false;
     float frameTimeMilliseconds = 0.0F;
 };
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include <glm/mat4x4.hpp>
@@ -62,6 +63,7 @@ public:
 
     const GpuMesh& mesh(uint32_t index) const { return meshes[index]; }
     const asset::Material& material(uint32_t index) const { return sourceMaterials[index]; }
+    const std::string& meshName(uint32_t index) const { return meshNames[index]; }
     uint32_t meshCount() const { return static_cast<uint32_t>(meshes.size()); }
 
     Buffer vertexBuffer;
@@ -76,6 +78,7 @@ private:
     std::vector<GpuMesh> meshes;
     std::vector<GpuMaterial> materials;
     std::vector<asset::Material> sourceMaterials;
+    std::vector<std::string> meshNames;
 };
 
 } // namespace gfx

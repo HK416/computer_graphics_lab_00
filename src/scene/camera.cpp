@@ -67,4 +67,10 @@ glm::mat4 Camera::projectionMatrix(float aspect) const {
     return projection;
 }
 
+glm::mat4 Camera::gizmoProjectionMatrix(float aspect) const {
+    glm::mat4 projection = projectionMatrix(aspect);
+    projection[1][1] = -projection[1][1];
+    return projection;
+}
+
 } // namespace scene

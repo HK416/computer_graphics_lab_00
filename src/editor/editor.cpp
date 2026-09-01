@@ -5,10 +5,12 @@
 #include <string>
 
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtx/quaternion.hpp>
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_vulkan.h>
 #include <imgui_internal.h>
+#include <ImGuizmo.h>
 #include <SDL3/SDL.h>
 #include <spdlog/spdlog.h>
 
@@ -217,7 +219,7 @@ void Editor::buildDockspace() {
     ImGui::End();
 }
 
-void Editor::buildHierarchy(scene::SceneManager& scenes) {
+void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStore& geometry) {
     if (!ImGui::Begin(WINDOW_HIERARCHY)) {
         ImGui::End();
         return;
@@ -236,6 +238,45 @@ void Editor::buildHierarchy(scene::SceneManager& scenes) {
     ImGui::Separator();
 
     scene::Scene& active = scenes.active();
+
+    if (ImGui::Button("추가")) {
+        ImGui::OpenPopup("메쉬 선택");
+    }
+    ImGui::SameLine();
+    bool hasSelection = selectedObject >= 0 && selectedObject < static_cast<int>(active.objects.size());
+    ImGui::BeginDisabled(!hasSelection);
+    if (ImGui::Button("복제")) {
+        scene::Object copy = active.objects[static_cast<size_t>(selectedObject)];
+        copy.name += " (복사)";
+        active.objects.push_back(std::move(copy));
+        selectedObject = static_cast<int>(active.objects.size()) - 1;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("삭제") || (hasSelection && ImGui::IsKeyPressed(ImGuiKey_Delete))) {
+        active.objects.erase(active.objects.begin() + selectedObject);
+        selectedObject = -1;
+    }
+    ImGui::EndDisabled();
+
+    if (ImGui::BeginPopup("메쉬 선택")) {
+        for (uint32_t meshIndex = 0; meshIndex < geometry.meshCount(); ++meshIndex) {
+            const asset::Material& material = geometry.material(geometry.mesh(meshIndex).materialIndex);
+            std::string label = std::to_string(meshIndex) + ": " + geometry.meshName(meshIndex) + " / " + material.name;
+            if (ImGui::Selectable(label.c_str())) {
+                // 새 오브젝트는 카메라 앞쪽, 바운딩 반지름을 고려한 거리에 놓는다.
+                float radius = std::max(geometry.mesh(meshIndex).boundingSphere.w, 0.1F);
+                scene::Object object;
+                object.name = geometry.meshName(meshIndex);
+                object.meshIndex = meshIndex;
+                object.transform.position = active.camera.position + active.camera.forward() * (radius * 3.0F);
+                active.objects.push_back(std::move(object));
+                selectedObject = static_cast<int>(active.objects.size()) - 1;
+            }
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::Separator();
+
     for (int i = 0; i < static_cast<int>(active.objects.size()); ++i) {
         scene::Object& object = active.objects[static_cast<size_t>(i)];
         ImGui::PushID(i);
@@ -293,7 +334,7 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
     ImGui::End();
 }
 
-void Editor::buildSceneView() {
+void Editor::buildSceneView(scene::Scene& active) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0.0F, 0.0F});
     bool open = ImGui::Begin(WINDOW_SCENE);
     ImGui::PopStyleVar();
@@ -314,6 +355,75 @@ void Editor::buildSceneView() {
         ImTextureRef{static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(textureFor(renderer.presentView())))},
         available);
     sceneHovered = ImGui::IsItemHovered();
+
+    ImVec2 imagePosition = ImGui::GetItemRectMin();
+    ImVec2 imageSize = ImGui::GetItemRectSize();
+
+    gizmoUsing = false;
+    bool hasSelection = selectedObject >= 0 && selectedObject < static_cast<int>(active.objects.size());
+    if (hasSelection && imageSize.x > 1.0F && imageSize.y > 1.0F) {
+        if (!active.camera.isLooking()) {
+            if (ImGui::IsKeyPressed(ImGuiKey_W)) {
+                gizmoOperation = ImGuizmo::TRANSLATE;
+            } else if (ImGui::IsKeyPressed(ImGuiKey_E)) {
+                gizmoOperation = ImGuizmo::ROTATE;
+            } else if (ImGui::IsKeyPressed(ImGuiKey_R)) {
+                gizmoOperation = ImGuizmo::SCALE;
+            }
+        }
+
+        ImGuizmo::SetOrthographic(false);
+        ImGuizmo::SetDrawlist();
+        ImGuizmo::SetRect(imagePosition.x, imagePosition.y, imageSize.x, imageSize.y);
+
+        float aspect = imageSize.x / imageSize.y;
+        glm::mat4 view = active.camera.viewMatrix();
+        glm::mat4 projection = active.camera.gizmoProjectionMatrix(aspect);
+
+        scene::Object& object = active.objects[static_cast<size_t>(selectedObject)];
+        glm::mat4 model = object.transform.matrix();
+
+        // Ctrl 을 누르면 스냅을 건다. 조작 종류마다 단위가 다르다.
+        glm::vec3 snapValue{0.25F};
+        if (gizmoOperation == ImGuizmo::ROTATE) {
+            snapValue = glm::vec3{15.0F};
+        } else if (gizmoOperation == ImGuizmo::SCALE) {
+            snapValue = glm::vec3{0.1F};
+        }
+        const float* snap = ImGui::GetIO().KeyCtrl ? glm::value_ptr(snapValue) : nullptr;
+
+        if (ImGuizmo::Manipulate(glm::value_ptr(view),
+                                 glm::value_ptr(projection),
+                                 static_cast<ImGuizmo::OPERATION>(gizmoOperation),
+                                 static_cast<ImGuizmo::MODE>(gizmoMode),
+                                 glm::value_ptr(model),
+                                 nullptr,
+                                 snap)) {
+            object.transform = scene::Transform::fromMatrix(model);
+        }
+        gizmoUsing = ImGuizmo::IsUsing();
+    }
+
+    // 조작 도구 선택은 장면 뷰 위에 겹쳐 둔다.
+    ImGui::SetCursorScreenPos(ImVec2{imagePosition.x + 8.0F, imagePosition.y + 8.0F});
+    ImGui::BeginGroup();
+    if (ImGui::RadioButton("이동", gizmoOperation == ImGuizmo::TRANSLATE)) {
+        gizmoOperation = ImGuizmo::TRANSLATE;
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("회전", gizmoOperation == ImGuizmo::ROTATE)) {
+        gizmoOperation = ImGuizmo::ROTATE;
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("크기", gizmoOperation == ImGuizmo::SCALE)) {
+        gizmoOperation = ImGuizmo::SCALE;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(gizmoMode == ImGuizmo::LOCAL ? "로컬" : "월드")) {
+        gizmoMode = gizmoMode == ImGuizmo::LOCAL ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
+    }
+    ImGui::EndGroup();
+
     ImGui::End();
 }
 
@@ -406,11 +516,12 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
+    ImGuizmo::BeginFrame();
 
     buildDockspace();
-    buildHierarchy(scenes);
+    buildHierarchy(scenes, geometry);
     buildInspector(scenes.active(), geometry);
-    buildSceneView();
+    buildSceneView(scenes.active());
     buildRenderSettings(deltaSeconds);
     buildRenderTargets();
     buildConsole();

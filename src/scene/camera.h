@@ -14,6 +14,8 @@ public:
     glm::mat4 viewMatrix() const;
     // 무한 원거리 reverse-Z 투영. 깊이 비교는 GREATER 를 쓰고 깊이 버퍼는 0 으로 지운다.
     glm::mat4 projectionMatrix(float aspect) const;
+    // ImGuizmo 는 OpenGL 규약(NDC +Y 위)을 가정하므로 Y 뒤집기를 되돌린 투영을 따로 준다.
+    glm::mat4 gizmoProjectionMatrix(float aspect) const;
     glm::vec3 forward() const;
     bool isLooking() const { return looking; }
 
