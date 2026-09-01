@@ -110,6 +110,27 @@ uint32_t BindlessTextures::addSampler(VkSampler sampler) {
     return index;
 }
 
+void BindlessTextures::update(uint32_t slot, VkImageView view, VkSampler sampler) {
+    uint32_t imageIndex = slot & TEXTURE_IMAGE_MASK;
+    if (imageIndex >= imageCount) {
+        core::fatal("등록되지 않은 bindless 슬롯을 갱신할 수 없습니다: {}", slot);
+    }
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageView = view;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = descriptorSet;
+    write.dstBinding = IMAGE_BINDING;
+    write.dstArrayElement = imageIndex;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(context.device, 1, &write, 0, nullptr);
+    addSampler(sampler);
+}
+
 uint32_t BindlessTextures::add(VkImageView view, VkSampler sampler) {
     if (imageCount >= imageCapacity) {
         core::fatal("bindless 이미지 슬롯이 부족합니다 (한계 {})", imageCapacity);

@@ -22,6 +22,8 @@ public:
 
     // 이미지와 샘플러를 등록하고 셰이더가 쓰는 묶음 슬롯을 돌려준다.
     uint32_t add(VkImageView view, VkSampler sampler);
+    // 이미 발급된 슬롯의 이미지를 바꾼다. 크기 변경으로 렌더 타겟을 다시 만들 때 쓴다.
+    void update(uint32_t slot, VkImageView view, VkSampler sampler);
 
     VkDescriptorSetLayout layout() const { return descriptorSetLayout; }
     VkDescriptorSet set() const { return descriptorSet; }

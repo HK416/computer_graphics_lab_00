@@ -40,5 +40,9 @@ cmake --build --preset debug
 | 경로 | 설명 |
 | --- | --- |
 | `src/app` | 애플리케이션 수명 주기, 윈도우, 입력 |
+| `src/asset` | glTF 적재와 CPU 측 모델 표현 |
+| `src/gfx` | Vulkan 컨텍스트, 리소스, 렌더 경로 |
+| `src/scene` | 장면 그래프와 카메라 |
+| `shaders` | GLSL 셰이더 |
 | `src/core` | 로깅, 오류 처리 등 공통 유틸리티 |
 | `public` | 폰트와 샘플 에셋 |

@@ -33,6 +33,18 @@ struct DrawBatch {
 };
 using DrawBatches = std::array<std::array<DrawBatch, 2>, ALPHA_MODE_COUNT>;
 
+// 화면 크기에 맞춰 다시 만들어지는 오프스크린 대상들. 셰이더에서 읽으려고 bindless 슬롯도 함께 잡는다.
+struct RenderTargets {
+    Image color; // 선형 HDR
+    Image depth;
+    Image oitAccumulation;
+    Image oitRevealage;
+    uint32_t colorSlot = 0;
+    uint32_t accumulationSlot = 0;
+    uint32_t revealageSlot = 0;
+    bool slotsAllocated = false;
+};
+
 class Renderer {
 public:
     Renderer(Context& context, GeometryStore& geometry, BindlessTextures& bindless, SDL_Window* window);
@@ -45,6 +57,8 @@ public:
     // 다음 프레임의 색상 버퍼를 PNG 로 저장한다. 렌더 결과 검증에 쓴다.
     void requestCapture(std::filesystem::path path) { capturePath = std::move(path); }
     void waitIdle();
+
+    float exposure = 1.0F;
 
 private:
     struct Frame {
@@ -60,20 +74,23 @@ private:
     void createFrames();
     void createPresentSemaphores();
     void destroyPresentSemaphores();
-    void createDepthImage();
+    void createRenderTargets();
     void createMeshPipelines();
+    void createPostPipelines();
     void recreateSwapchain();
     void reserveInstances(Frame& frame, uint32_t instanceCount);
     // 장면을 순회하며 인스턴스와 간접 그리기 명령을 재질 경로별 구간으로 채운다.
     DrawBatches buildDrawCommands(Frame& frame, const scene::Scene& scene);
     void recordCommands(Frame& frame, uint32_t imageIndex, const DrawBatches& batches);
+    void recordGeometryPass(VkCommandBuffer commandBuffer, const DrawBatches& batches, bool translucentPass);
     void writeCapture();
 
     Context& context;
     GeometryStore& geometry;
     BindlessTextures& bindless;
     std::unique_ptr<Swapchain> swapchain;
-    Image depthImage;
+    RenderTargets targets;
+    VkSampler postSampler = VK_NULL_HANDLE;
 
     std::array<Frame, FRAMES_IN_FLIGHT> frames{};
     // 표시 완료 세마포어는 재사용 충돌을 피하려고 스왑체인 이미지마다 하나씩 둔다.
@@ -83,6 +100,9 @@ private:
 
     VkPipelineLayout meshPipelineLayout = VK_NULL_HANDLE;
     std::array<VkPipeline, ALPHA_MODE_COUNT> meshPipelines{};
+    VkPipelineLayout postPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline compositePipeline = VK_NULL_HANDLE;
+    VkPipeline tonemapPipeline = VK_NULL_HANDLE;
 
     std::filesystem::path capturePath;
     Buffer captureBuffer;

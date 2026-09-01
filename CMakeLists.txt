@@ -71,7 +71,11 @@ endif()
 set(shader_output_dir "${CMAKE_BINARY_DIR}/shaders")
 set(shader_sources
     shaders/mesh.vert
-    shaders/mesh.frag)
+    shaders/mesh.frag
+    shaders/mesh_oit.frag
+    shaders/fullscreen.vert
+    shaders/oit_composite.frag
+    shaders/tonemap.frag)
 
 set(shader_binaries)
 foreach(shader IN LISTS shader_sources)

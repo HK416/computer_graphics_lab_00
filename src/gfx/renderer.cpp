@@ -26,8 +26,12 @@
 namespace gfx {
 namespace {
 
+constexpr VkFormat COLOR_FORMAT = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkFormat DEPTH_FORMAT = VK_FORMAT_D32_SFLOAT;
+constexpr VkFormat OIT_ACCUMULATION_FORMAT = VK_FORMAT_R16G16B16A16_SFLOAT;
+constexpr VkFormat OIT_REVEALAGE_FORMAT = VK_FORMAT_R16_SFLOAT;
 constexpr uint32_t MINIMUM_INSTANCE_CAPACITY = 1024;
+constexpr size_t TRANSLUCENT_MODE = 2;
 
 // shaders/scene_data.glsl 의 CameraBuffer 와 배치가 같아야 한다.
 struct GpuCamera {
@@ -41,6 +45,16 @@ struct ScenePushConstants {
     VkDeviceAddress instances;
     VkDeviceAddress materials;
     VkDeviceAddress camera;
+};
+
+struct CompositePushConstants {
+    uint32_t accumulationTexture;
+    uint32_t revealageTexture;
+};
+
+struct TonemapPushConstants {
+    uint32_t colorTexture;
+    float exposure;
 };
 
 std::vector<uint32_t> readSpirv(const std::string& name) {
@@ -70,15 +84,57 @@ VkShaderModule createShaderModule(VkDevice device, const std::string& name) {
     return module;
 }
 
+VkPipelineShaderStageCreateInfo shaderStage(VkShaderStageFlagBits stage, VkShaderModule module) {
+    VkPipelineShaderStageCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    info.stage = stage;
+    info.module = module;
+    info.pName = "main";
+    return info;
+}
+
+VkRenderingAttachmentInfo colorAttachment(VkImageView view, VkAttachmentLoadOp loadOp, VkClearColorValue clear) {
+    VkRenderingAttachmentInfo info{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    info.imageView = view;
+    info.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    info.loadOp = loadOp;
+    info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    info.clearValue.color = clear;
+    return info;
+}
+
+void setFullViewport(VkCommandBuffer commandBuffer, VkExtent2D extent) {
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(extent.width);
+    viewport.height = static_cast<float>(extent.height);
+    viewport.maxDepth = 1.0F;
+    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.extent = extent;
+    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+}
+
 } // namespace
 
 Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& bindless, SDL_Window* window)
     : context(context), geometry(geometry), bindless(bindless) {
     swapchain = std::make_unique<Swapchain>(context, window, vsync);
-    createDepthImage();
+
+    // 오프스크린 대상을 셰이더에서 읽을 때 쓰는 샘플러. 화면 해상도 그대로 읽으므로 보간이 필요 없다.
+    VkSamplerCreateInfo samplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    samplerInfo.magFilter = VK_FILTER_NEAREST;
+    samplerInfo.minFilter = VK_FILTER_NEAREST;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    VK_CHECK(vkCreateSampler(context.device, &samplerInfo, nullptr, &postSampler));
+
+    createRenderTargets();
     createFrames();
     createPresentSemaphores();
     createMeshPipelines();
+    createPostPipelines();
 
     VkSemaphoreTypeCreateInfo timelineInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
     timelineInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -89,6 +145,9 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& 
 
 Renderer::~Renderer() {
     waitIdle();
+    vkDestroyPipeline(context.device, tonemapPipeline, nullptr);
+    vkDestroyPipeline(context.device, compositePipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, postPipelineLayout, nullptr);
     for (VkPipeline pipeline : meshPipelines) {
         vkDestroyPipeline(context.device, pipeline, nullptr);
     }
@@ -103,7 +162,11 @@ Renderer::~Renderer() {
         vkDestroyCommandPool(context.device, frame.commandPool, nullptr);
     }
     destroyBuffer(context, captureBuffer);
-    destroyImage(context, depthImage);
+    destroyImage(context, targets.oitRevealage);
+    destroyImage(context, targets.oitAccumulation);
+    destroyImage(context, targets.depth);
+    destroyImage(context, targets.color);
+    vkDestroySampler(context.device, postSampler, nullptr);
     swapchain.reset();
 }
 
@@ -111,14 +174,45 @@ void Renderer::waitIdle() {
     VK_CHECK(vkDeviceWaitIdle(context.device));
 }
 
-void Renderer::createDepthImage() {
-    destroyImage(context, depthImage);
-    ImageDesc desc;
-    desc.extent = {swapchain->extent.width, swapchain->extent.height, 1};
-    desc.format = DEPTH_FORMAT;
-    desc.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    desc.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
-    depthImage = createImage(context, desc, "깊이");
+void Renderer::createRenderTargets() {
+    destroyImage(context, targets.oitRevealage);
+    destroyImage(context, targets.oitAccumulation);
+    destroyImage(context, targets.depth);
+    destroyImage(context, targets.color);
+
+    VkExtent3D extent{swapchain->extent.width, swapchain->extent.height, 1};
+
+    ImageDesc colorDesc;
+    colorDesc.extent = extent;
+    colorDesc.format = COLOR_FORMAT;
+    colorDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    targets.color = createImage(context, colorDesc, "HDR 색상");
+
+    ImageDesc depthDesc;
+    depthDesc.extent = extent;
+    depthDesc.format = DEPTH_FORMAT;
+    depthDesc.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    depthDesc.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+    targets.depth = createImage(context, depthDesc, "깊이");
+
+    ImageDesc accumulationDesc = colorDesc;
+    accumulationDesc.format = OIT_ACCUMULATION_FORMAT;
+    targets.oitAccumulation = createImage(context, accumulationDesc, "OIT 누적");
+
+    ImageDesc revealageDesc = colorDesc;
+    revealageDesc.format = OIT_REVEALAGE_FORMAT;
+    targets.oitRevealage = createImage(context, revealageDesc, "OIT 잔여 투과율");
+
+    if (!targets.slotsAllocated) {
+        targets.colorSlot = bindless.add(targets.color.view, postSampler);
+        targets.accumulationSlot = bindless.add(targets.oitAccumulation.view, postSampler);
+        targets.revealageSlot = bindless.add(targets.oitRevealage.view, postSampler);
+        targets.slotsAllocated = true;
+    } else {
+        bindless.update(targets.colorSlot, targets.color.view, postSampler);
+        bindless.update(targets.accumulationSlot, targets.oitAccumulation.view, postSampler);
+        bindless.update(targets.revealageSlot, targets.oitRevealage.view, postSampler);
+    }
 }
 
 void Renderer::createFrames() {
@@ -193,7 +287,8 @@ void Renderer::createMeshPipelines() {
     VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &meshPipelineLayout));
 
     VkShaderModule vertexModule = createShaderModule(context.device, "mesh.vert.spv");
-    VkShaderModule fragmentModule = createShaderModule(context.device, "mesh.frag.spv");
+    VkShaderModule opaqueFragment = createShaderModule(context.device, "mesh.frag.spv");
+    VkShaderModule oitFragment = createShaderModule(context.device, "mesh_oit.frag.spv");
 
     // 프래그먼트 셰이더의 알파 경로를 특수화 상수로 고정해, 불투명 경로에서는 discard 가 사라진다.
     uint32_t alphaVariant = 0;
@@ -204,15 +299,8 @@ void Renderer::createMeshPipelines() {
     specialization.dataSize = sizeof(alphaVariant);
     specialization.pData = &alphaVariant;
 
-    VkPipelineShaderStageCreateInfo stages[2]{};
-    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = vertexModule;
-    stages[0].pName = "main";
-    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = fragmentModule;
-    stages[1].pName = "main";
+    std::array<VkPipelineShaderStageCreateInfo, 2> stages{shaderStage(VK_SHADER_STAGE_VERTEX_BIT, vertexModule),
+                                                          shaderStage(VK_SHADER_STAGE_FRAGMENT_BIT, opaqueFragment)};
     stages[1].pSpecializationInfo = &specialization;
 
     VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
@@ -238,12 +326,14 @@ void Renderer::createMeshPipelines() {
     depthStencil.depthWriteEnable = VK_TRUE;
     depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
 
-    VkPipelineColorBlendAttachmentState blendAttachment{};
-    blendAttachment.colorWriteMask =
+    constexpr VkColorComponentFlags ALL_CHANNELS =
         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    std::array<VkPipelineColorBlendAttachmentState, 2> blendAttachments{};
+    blendAttachments[0].colorWriteMask = ALL_CHANNELS;
+
     VkPipelineColorBlendStateCreateInfo colorBlend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
     colorBlend.attachmentCount = 1;
-    colorBlend.pAttachments = &blendAttachment;
+    colorBlend.pAttachments = blendAttachments.data();
 
     // 양면 재질은 컬 모드만 다르므로 파이프라인을 늘리지 않고 동적 상태로 전환한다.
     VkDynamicState dynamicStates[]{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_CULL_MODE};
@@ -251,15 +341,16 @@ void Renderer::createMeshPipelines() {
     dynamicState.dynamicStateCount = 3;
     dynamicState.pDynamicStates = dynamicStates;
 
+    std::array<VkFormat, 2> colorFormats{COLOR_FORMAT, OIT_REVEALAGE_FORMAT};
     VkPipelineRenderingCreateInfo renderingInfo{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     renderingInfo.colorAttachmentCount = 1;
-    renderingInfo.pColorAttachmentFormats = &swapchain->format;
+    renderingInfo.pColorAttachmentFormats = colorFormats.data();
     renderingInfo.depthAttachmentFormat = DEPTH_FORMAT;
 
     VkGraphicsPipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     pipelineInfo.pNext = &renderingInfo;
-    pipelineInfo.stageCount = 2;
-    pipelineInfo.pStages = stages;
+    pipelineInfo.stageCount = static_cast<uint32_t>(stages.size());
+    pipelineInfo.pStages = stages.data();
     pipelineInfo.pVertexInputState = &vertexInput;
     pipelineInfo.pInputAssemblyState = &inputAssembly;
     pipelineInfo.pViewportState = &viewportState;
@@ -272,28 +363,134 @@ void Renderer::createMeshPipelines() {
 
     for (uint32_t variant = 0; variant < ALPHA_MODE_COUNT; ++variant) {
         alphaVariant = variant;
-        bool translucent = variant == static_cast<uint32_t>(asset::AlphaMode::TRANSLUCENT);
-        // 반투명은 깊이를 쓰지 않고 알파 블렌딩한다. 순서 독립 처리는 다음 단계에서 대체한다.
-        depthStencil.depthWriteEnable = translucent ? VK_FALSE : VK_TRUE;
-        blendAttachment.blendEnable = translucent ? VK_TRUE : VK_FALSE;
-        blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-        blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-        blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-        blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        if (variant == TRANSLUCENT_MODE) {
+            // 반투명은 누적과 잔여 투과율 두 대상에 기록하고 깊이는 읽기만 한다.
+            stages[1].module = oitFragment;
+            depthStencil.depthWriteEnable = VK_FALSE;
+            renderingInfo.colorAttachmentCount = 2;
+            colorFormats[0] = OIT_ACCUMULATION_FORMAT;
+            colorBlend.attachmentCount = 2;
+
+            blendAttachments[0].blendEnable = VK_TRUE;
+            blendAttachments[0].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blendAttachments[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blendAttachments[0].colorBlendOp = VK_BLEND_OP_ADD;
+            blendAttachments[0].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blendAttachments[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blendAttachments[0].alphaBlendOp = VK_BLEND_OP_ADD;
+
+            blendAttachments[1].blendEnable = VK_TRUE;
+            blendAttachments[1].srcColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            blendAttachments[1].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+            blendAttachments[1].colorBlendOp = VK_BLEND_OP_ADD;
+            blendAttachments[1].srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            blendAttachments[1].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blendAttachments[1].alphaBlendOp = VK_BLEND_OP_ADD;
+            blendAttachments[1].colorWriteMask = VK_COLOR_COMPONENT_R_BIT;
+        }
         VK_CHECK(vkCreateGraphicsPipelines(
             context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &meshPipelines[variant]));
     }
 
-    vkDestroyShaderModule(context.device, fragmentModule, nullptr);
+    vkDestroyShaderModule(context.device, oitFragment, nullptr);
+    vkDestroyShaderModule(context.device, opaqueFragment, nullptr);
+    vkDestroyShaderModule(context.device, vertexModule, nullptr);
+}
+
+void Renderer::createPostPipelines() {
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushConstantRange.size = sizeof(TonemapPushConstants);
+
+    VkDescriptorSetLayout bindlessLayout = bindless.layout();
+    VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &bindlessLayout;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushConstantRange;
+    VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &postPipelineLayout));
+
+    VkShaderModule vertexModule = createShaderModule(context.device, "fullscreen.vert.spv");
+    VkShaderModule compositeFragment = createShaderModule(context.device, "oit_composite.frag.spv");
+    VkShaderModule tonemapFragment = createShaderModule(context.device, "tonemap.frag.spv");
+
+    std::array<VkPipelineShaderStageCreateInfo, 2> stages{shaderStage(VK_SHADER_STAGE_VERTEX_BIT, vertexModule),
+                                                          shaderStage(VK_SHADER_STAGE_FRAGMENT_BIT, compositeFragment)};
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewportState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterization{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterization.cullMode = VK_CULL_MODE_NONE;
+    rasterization.lineWidth = 1.0F;
+
+    VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+
+    constexpr VkColorComponentFlags ALL_CHANNELS =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendAttachmentState blendAttachment{};
+    blendAttachment.colorWriteMask = ALL_CHANNELS;
+    // 합성은 알파에 담긴 잔여 투과율로 src*(1-a) + dst*a 를 만든다.
+    blendAttachment.blendEnable = VK_TRUE;
+    blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+    blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+    VkPipelineColorBlendStateCreateInfo colorBlend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    colorBlend.attachmentCount = 1;
+    colorBlend.pAttachments = &blendAttachment;
+
+    VkDynamicState dynamicStates[]{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamicState{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamicState.dynamicStateCount = 2;
+    dynamicState.pDynamicStates = dynamicStates;
+
+    VkFormat colorFormat = COLOR_FORMAT;
+    VkPipelineRenderingCreateInfo renderingInfo{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachmentFormats = &colorFormat;
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    pipelineInfo.pNext = &renderingInfo;
+    pipelineInfo.stageCount = static_cast<uint32_t>(stages.size());
+    pipelineInfo.pStages = stages.data();
+    pipelineInfo.pVertexInputState = &vertexInput;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterization;
+    pipelineInfo.pMultisampleState = &multisample;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlend;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = postPipelineLayout;
+    VK_CHECK(vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &compositePipeline));
+
+    stages[1].module = tonemapFragment;
+    blendAttachment.blendEnable = VK_FALSE;
+    colorFormat = swapchain->format;
+    VK_CHECK(vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &tonemapPipeline));
+
+    vkDestroyShaderModule(context.device, tonemapFragment, nullptr);
+    vkDestroyShaderModule(context.device, compositeFragment, nullptr);
     vkDestroyShaderModule(context.device, vertexModule, nullptr);
 }
 
 void Renderer::recreateSwapchain() {
     waitIdle();
     swapchain->recreate(vsync);
-    createDepthImage();
+    createRenderTargets();
     // 이미지 개수가 달라질 수 있으므로 표시 완료 세마포어도 다시 만든다.
     createPresentSemaphores();
     resizeRequested = false;
@@ -365,81 +562,12 @@ DrawBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene)
     return batches;
 }
 
-void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, const DrawBatches& batches) {
-    VkCommandBuffer commandBuffer = frame.commandBuffer;
-    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
-
-    imageBarrier(commandBuffer,
-                 swapchain->images[imageIndex],
-                 VK_IMAGE_ASPECT_COLOR_BIT,
-                 VK_IMAGE_LAYOUT_UNDEFINED,
-                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                 0,
-                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-    imageBarrier(commandBuffer,
-                 depthImage.handle,
-                 VK_IMAGE_ASPECT_DEPTH_BIT,
-                 VK_IMAGE_LAYOUT_UNDEFINED,
-                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                 0,
-                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-
-    VkRenderingAttachmentInfo colorAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    colorAttachment.imageView = swapchain->imageViews[imageIndex];
-    colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttachment.clearValue.color = {{0.05F, 0.05F, 0.07F, 1.0F}};
-
-    VkRenderingAttachmentInfo depthAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    depthAttachment.imageView = depthImage.view;
-    depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    depthAttachment.clearValue.depthStencil.depth = 0.0F;
-
-    VkRenderingInfo renderingInfo{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    renderingInfo.renderArea.extent = swapchain->extent;
-    renderingInfo.layerCount = 1;
-    renderingInfo.colorAttachmentCount = 1;
-    renderingInfo.pColorAttachments = &colorAttachment;
-    renderingInfo.pDepthAttachment = &depthAttachment;
-    vkCmdBeginRendering(commandBuffer, &renderingInfo);
-
-    VkViewport viewport{};
-    viewport.width = static_cast<float>(swapchain->extent.width);
-    viewport.height = static_cast<float>(swapchain->extent.height);
-    viewport.maxDepth = 1.0F;
-    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-
-    VkRect2D scissor{};
-    scissor.extent = swapchain->extent;
-    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-
-    ScenePushConstants pushConstants{geometry.vertexBuffer.address,
-                                     geometry.meshBuffer.address,
-                                     frame.instanceBuffer.address,
-                                     geometry.materialBuffer.address,
-                                     frame.cameraBuffer.address};
-    VkDescriptorSet bindlessSet = bindless.set();
-    vkCmdBindDescriptorSets(
-        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
-    vkCmdPushConstants(commandBuffer,
-                       meshPipelineLayout,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0,
-                       sizeof(pushConstants),
-                       &pushConstants);
-    vkCmdBindIndexBuffer(commandBuffer, geometry.indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
-
+void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer, const DrawBatches& batches, bool translucentPass) {
     constexpr VkDeviceSize DRAW_STRIDE = sizeof(VkDrawIndexedIndirectCommand);
-    for (size_t mode = 0; mode < ALPHA_MODE_COUNT; ++mode) {
+    size_t firstMode = translucentPass ? TRANSLUCENT_MODE : 0;
+    size_t lastMode = translucentPass ? TRANSLUCENT_MODE + 1 : TRANSLUCENT_MODE;
+
+    for (size_t mode = firstMode; mode < lastMode; ++mode) {
         bool bound = false;
         for (size_t sided = 0; sided < 2; ++sided) {
             const DrawBatch& batch = batches[mode][sided];
@@ -452,13 +580,223 @@ void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, const DrawBatch
             }
             vkCmdSetCullMode(commandBuffer, sided == 1 ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT);
             vkCmdDrawIndexedIndirect(commandBuffer,
-                                     frame.drawBuffer.handle,
+                                     frames[frameIndex % FRAMES_IN_FLIGHT].drawBuffer.handle,
                                      batch.first * DRAW_STRIDE,
                                      batch.count,
                                      static_cast<uint32_t>(DRAW_STRIDE));
         }
     }
+}
 
+void Renderer::recordCommands(Frame& frame, uint32_t imageIndex, const DrawBatches& batches) {
+    VkCommandBuffer commandBuffer = frame.commandBuffer;
+    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+
+    bool hasTranslucent = batches[TRANSLUCENT_MODE][0].count + batches[TRANSLUCENT_MODE][1].count > 0;
+
+    imageBarrier(commandBuffer,
+                 targets.color.handle,
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                 0,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    imageBarrier(commandBuffer,
+                 targets.depth.handle,
+                 VK_IMAGE_ASPECT_DEPTH_BIT,
+                 VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                 0,
+                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+
+    ScenePushConstants scenePushConstants{geometry.vertexBuffer.address,
+                                          geometry.meshBuffer.address,
+                                          frame.instanceBuffer.address,
+                                          geometry.materialBuffer.address,
+                                          frame.cameraBuffer.address};
+    VkDescriptorSet bindlessSet = bindless.set();
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+    vkCmdPushConstants(commandBuffer,
+                       meshPipelineLayout,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0,
+                       sizeof(scenePushConstants),
+                       &scenePushConstants);
+    vkCmdBindIndexBuffer(commandBuffer, geometry.indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
+
+    // 1) 불투명과 컷오프 경로를 HDR 색상 대상에 그린다.
+    VkRenderingAttachmentInfo opaqueColor =
+        colorAttachment(targets.color.view, VK_ATTACHMENT_LOAD_OP_CLEAR, {{0.05F, 0.05F, 0.07F, 1.0F}});
+
+    VkRenderingAttachmentInfo depthAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    depthAttachment.imageView = targets.depth.view;
+    depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depthAttachment.clearValue.depthStencil.depth = 0.0F;
+
+    VkRenderingInfo opaquePass{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    opaquePass.renderArea.extent = swapchain->extent;
+    opaquePass.layerCount = 1;
+    opaquePass.colorAttachmentCount = 1;
+    opaquePass.pColorAttachments = &opaqueColor;
+    opaquePass.pDepthAttachment = &depthAttachment;
+
+    vkCmdBeginRendering(commandBuffer, &opaquePass);
+    setFullViewport(commandBuffer, swapchain->extent);
+    recordGeometryPass(commandBuffer, batches, false);
+    vkCmdEndRendering(commandBuffer);
+
+    if (hasTranslucent) {
+        // 2) 반투명은 누적과 잔여 투과율 대상에 순서 독립으로 기록한다.
+        imageBarrier(commandBuffer,
+                     targets.oitAccumulation.handle,
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                     0,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        imageBarrier(commandBuffer,
+                     targets.oitRevealage.handle,
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                     0,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        imageBarrier(commandBuffer,
+                     targets.depth.handle,
+                     VK_IMAGE_ASPECT_DEPTH_BIT,
+                     VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                     VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
+
+        std::array<VkRenderingAttachmentInfo, 2> oitAttachments{
+            colorAttachment(targets.oitAccumulation.view, VK_ATTACHMENT_LOAD_OP_CLEAR, {{0.0F, 0.0F, 0.0F, 0.0F}}),
+            colorAttachment(targets.oitRevealage.view, VK_ATTACHMENT_LOAD_OP_CLEAR, {{1.0F, 0.0F, 0.0F, 0.0F}})};
+
+        VkRenderingAttachmentInfo readOnlyDepth = depthAttachment;
+        readOnlyDepth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        readOnlyDepth.storeOp = VK_ATTACHMENT_STORE_OP_NONE;
+
+        VkRenderingInfo translucentPass{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        translucentPass.renderArea.extent = swapchain->extent;
+        translucentPass.layerCount = 1;
+        translucentPass.colorAttachmentCount = static_cast<uint32_t>(oitAttachments.size());
+        translucentPass.pColorAttachments = oitAttachments.data();
+        translucentPass.pDepthAttachment = &readOnlyDepth;
+
+        vkCmdBeginRendering(commandBuffer, &translucentPass);
+        setFullViewport(commandBuffer, swapchain->extent);
+        recordGeometryPass(commandBuffer, batches, true);
+        vkCmdEndRendering(commandBuffer);
+
+        // 3) 누적 결과를 HDR 색상 위에 합성한다.
+        imageBarrier(commandBuffer,
+                     targets.oitAccumulation.handle,
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        imageBarrier(commandBuffer,
+                     targets.oitRevealage.handle,
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        imageBarrier(commandBuffer,
+                     targets.color.handle,
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+
+        VkRenderingAttachmentInfo compositeColor = colorAttachment(targets.color.view, VK_ATTACHMENT_LOAD_OP_LOAD, {});
+        VkRenderingInfo compositePass{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        compositePass.renderArea.extent = swapchain->extent;
+        compositePass.layerCount = 1;
+        compositePass.colorAttachmentCount = 1;
+        compositePass.pColorAttachments = &compositeColor;
+
+        CompositePushConstants compositePushConstants{targets.accumulationSlot, targets.revealageSlot};
+        vkCmdBeginRendering(commandBuffer, &compositePass);
+        setFullViewport(commandBuffer, swapchain->extent);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositePipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, postPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+        vkCmdPushConstants(commandBuffer,
+                           postPipelineLayout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0,
+                           sizeof(compositePushConstants),
+                           &compositePushConstants);
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+        vkCmdEndRendering(commandBuffer);
+    }
+
+    // 4) HDR 색상을 톤 매핑해 스왑체인에 옮긴다.
+    imageBarrier(commandBuffer,
+                 targets.color.handle,
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    imageBarrier(commandBuffer,
+                 swapchain->images[imageIndex],
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                 0,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+
+    VkRenderingAttachmentInfo presentColor =
+        colorAttachment(swapchain->imageViews[imageIndex], VK_ATTACHMENT_LOAD_OP_DONT_CARE, {});
+    VkRenderingInfo tonemapPass{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    tonemapPass.renderArea.extent = swapchain->extent;
+    tonemapPass.layerCount = 1;
+    tonemapPass.colorAttachmentCount = 1;
+    tonemapPass.pColorAttachments = &presentColor;
+
+    TonemapPushConstants tonemapPushConstants{targets.colorSlot, exposure};
+    vkCmdBeginRendering(commandBuffer, &tonemapPass);
+    setFullViewport(commandBuffer, swapchain->extent);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, tonemapPipeline);
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, postPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+    vkCmdPushConstants(commandBuffer,
+                       postPipelineLayout,
+                       VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0,
+                       sizeof(tonemapPushConstants),
+                       &tonemapPushConstants);
+    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     vkCmdEndRendering(commandBuffer);
 
     if (!capturePath.empty()) {
