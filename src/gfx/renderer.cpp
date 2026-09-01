@@ -508,7 +508,10 @@ void Renderer::createRenderTargets() {
     ImageDesc upscaledDesc;
     upscaledDesc.extent = presentDesc.extent;
     upscaledDesc.format = COLOR_FORMAT;
-    upscaledDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    // NGX 는 출력 이미지를 vkCmdClearColorImage 로 지우는 경로가 있어 전송 대상 자격이 필요하다.
+    // 렌더 배율 1.0(DLAA)일 때만 타서 축소 배율 시험에서는 드러나지 않았다.
+    upscaledDesc.usage =
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     targets.upscaledColor = createImage(context, upscaledDesc, "시간축 업스케일 결과");
 
     for (VkImageView view : targets.hzbMipViews) {
