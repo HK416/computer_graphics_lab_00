@@ -25,9 +25,13 @@ Application::Application() {
     }
 
     spdlog::info("윈도우 생성 완료 ({}x{})", DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT);
+
+    context = std::make_unique<gfx::Context>(window);
 }
 
 Application::~Application() {
+    // 서피스가 윈도우보다 먼저 파괴되어야 한다.
+    context.reset();
     SDL_DestroyWindow(window);
     SDL_Quit();
 }

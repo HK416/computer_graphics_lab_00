@@ -1,5 +1,9 @@
 #pragma once
 
+#include <memory>
+
+#include "gfx/context.h"
+
 struct SDL_Window;
 
 namespace app {
@@ -15,6 +19,7 @@ public:
 
 private:
     SDL_Window* window = nullptr;
+    std::unique_ptr<gfx::Context> context;
 };
 
 } // namespace app

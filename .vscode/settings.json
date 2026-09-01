@@ -1,0 +1,22 @@
+{
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/compile_commands.json",
+  "C_Cpp.default.cppStandard": "c++20",
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "clangd.arguments": [
+    "--compile-commands-dir=${workspaceFolder}",
+    "--background-index",
+    "--header-insertion=never"
+  ],
+  "cmake.configurePreset": "debug",
+  "cmake.buildPreset": "debug",
+  "files.associations": {
+    "*.vert": "glsl",
+    "*.frag": "glsl",
+    "*.comp": "glsl",
+    "*.mesh": "glsl",
+    "*.task": "glsl",
+    "*.rgen": "glsl",
+    "*.rchit": "glsl",
+    "*.rmiss": "glsl"
+  }
+}
