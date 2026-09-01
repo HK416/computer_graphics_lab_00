@@ -71,6 +71,9 @@ struct GpuMaterial {
 // 스킨이 없는 인스턴스의 조인트 오프셋. 셰이더가 이 값으로 스키닝 여부를 가른다.
 inline constexpr uint32_t NO_JOINTS = 0xFFFFFFFFU;
 
+// 그리지 않는 오브젝트의 인스턴스 슬롯.
+inline constexpr uint32_t INVALID_INSTANCE_SLOT = 0xFFFFFFFFU;
+
 struct GpuInstance {
     glm::mat4 model;
     glm::mat4 normalMatrix;

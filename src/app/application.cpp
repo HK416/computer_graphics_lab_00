@@ -292,6 +292,7 @@ void Application::instantiateModel(uint32_t modelIndex, scene::Scene& scene) {
 
     // 바인드 포즈라도 조인트 행렬이 있어야 스킨 메쉬가 제자리에 선다.
     scene.update(0.0F);
+    scene.refresh();
 }
 
 void Application::loadModel(const std::filesystem::path& path) {
@@ -391,6 +392,7 @@ void Application::openScene(const std::filesystem::path& path) {
         }
     }
     created.update(0.0F);
+    created.refresh();
 
     scenes.setActive(scenes.count() - 1);
     spdlog::info("장면 열기: {} (오브젝트 {}, 조명 {})", path.string(), created.objects.size(), created.lights.size());
@@ -454,6 +456,8 @@ void Application::run() {
             gfx::ProfilerScope scope(renderer->profiler(), "편집기 UI");
             editorUi->build(scenes, *geometry, deltaSeconds);
         }
+        // 편집기가 장면을 바꾼 뒤, 렌더러가 읽기 전에 캐시를 다시 만든다.
+        scenes.active().refresh();
         renderer->drawFrame(scenes.active());
         ++frameCount;
 

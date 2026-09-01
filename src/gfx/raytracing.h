@@ -5,6 +5,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include "gfx/geometry.h"
 #include "gfx/resources.h"
 
 namespace scene {
@@ -50,7 +51,11 @@ public:
     // 메쉬마다 0단계 LOD 로 하위 가속 구조를 만든다. 적재가 끝난 뒤 한 번 호출한다.
     void buildBottomLevel();
     // 장면 인스턴스로 상위 가속 구조를 다시 만든다. 매 프레임 호출해도 된다.
-    void updateTopLevel(VkCommandBuffer commandBuffer, const scene::Scene& sceneToTrace);
+    // instanceSlots 는 오브젝트 인덱스 -> 그리기 인스턴스 슬롯. 적중 셰이더가 인스턴스 배열을
+    // 이 번호로 찾으므로 buildDrawCommands 가 만든 것과 반드시 같아야 한다.
+    void updateTopLevel(VkCommandBuffer commandBuffer,
+                        const scene::Scene& sceneToTrace,
+                        const std::vector<uint32_t>& instanceSlots);
     void trace(VkCommandBuffer commandBuffer,
                VkExtent2D extent,
                VkDeviceAddress cameraAddress,

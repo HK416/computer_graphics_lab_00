@@ -1333,10 +1333,10 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
     bool hasBounds = false;
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
         const scene::Object& object = scene.objects[index];
-        if (object.meshIndex >= geometry.meshCount() || !scene.visibleInTree(index)) {
+        if (object.meshIndex >= geometry.meshCount() || !scene.visibleCached(index)) {
             continue;
         }
-        glm::mat4 world = scene.worldMatrix(index);
+        const glm::mat4& world = scene.world(index);
         glm::vec4 sphere = geometry.mesh(object.meshIndex).boundingSphere;
         glm::vec3 center = glm::vec3(world * glm::vec4{glm::vec3(sphere), 1.0F});
         float scale = std::sqrt(std::max({glm::dot(glm::vec3(world[0]), glm::vec3(world[0])),
@@ -1353,11 +1353,11 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
         const scene::Object& object = scene.objects[index];
         if (object.light < 0 || static_cast<size_t>(object.light) >= scene.lights.size() ||
-            !scene.visibleInTree(index)) {
+            !scene.visibleCached(index)) {
             continue;
         }
         const scene::Light& source = scene.lights[static_cast<size_t>(object.light)];
-        glm::mat4 world = scene.worldMatrix(index);
+        const glm::mat4& world = scene.world(index);
         glm::vec3 position = glm::vec3(world[3]);
         // glTF 와 Unity 처럼 -Z 를 앞으로 본다.
         glm::vec3 direction = glm::normalize(-glm::vec3(world[2]));
@@ -1422,6 +1422,12 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
 FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene) {
     reserveInstances(frame, static_cast<uint32_t>(scene.objects.size()));
 
+    // 장면이 통째로 바뀌면(장면 전환) 프레임 캐시가 다른 장면 것이다.
+    sceneChangedThisFrame = &scene != lastScene || scene.revision() != lastSceneRevision;
+    lastScene = &scene;
+    lastSceneRevision = scene.revision();
+    objectInstanceSlots.assign(scene.objects.size(), INVALID_INSTANCE_SLOT);
+
     // 재질 경로와 면 방향 조합마다 명령이 연속 구간을 이루도록 두 번 순회한다.
     auto bucketOf = [this](const scene::Object& object) {
         const asset::Material& material = geometry.material(geometry.mesh(object.meshIndex).materialIndex);
@@ -1436,7 +1442,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     };
     // 조상이 숨겨져 있으면 자식도 그리지 않는다. 변환만 담는 노드는 메쉬가 없어 걸러진다.
     auto drawable = [this, &scene](uint32_t index) {
-        return scene.visibleInTree(index) && scene.objects[index].meshIndex < geometry.meshCount();
+        return scene.visibleCached(index) && scene.objects[index].meshIndex < geometry.meshCount();
     };
 
     FrameBatches batches{};
@@ -1530,7 +1536,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
 
         const GpuMesh& mesh = geometry.mesh(object.meshIndex);
         const GpuMeshLod& lod = lodFor(object);
-        glm::mat4 model = scene.worldMatrix(index);
+        const glm::mat4& model = scene.world(index);
+        objectInstanceSlots[index] = slot;
 
         instances[slot].model = model;
         instances[slot].normalMatrix = glm::mat4(glm::inverseTranspose(glm::mat3(model)));
@@ -1590,8 +1597,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                                  1.0F / static_cast<float>(currentRenderExtent.height)};
     camera->inverseViewProjection = glm::inverse(camera->viewProjection);
 
-    // 카메라나 화면이 바뀌면 경로 추적 누적을 처음부터 다시 쌓는다.
-    if (camera->viewProjection != lastViewProjection) {
+    // 카메라나 화면, 장면이 바뀌면 경로 추적 누적을 처음부터 다시 쌓는다.
+    if (camera->viewProjection != lastViewProjection || sceneChangedThisFrame) {
         lastViewProjection = camera->viewProjection;
         pathSampleCount = 0;
     }
@@ -1802,7 +1809,10 @@ void Renderer::recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches&
 }
 
 void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, const scene::Scene& scene) {
-    rayTracer->updateTopLevel(commandBuffer, scene);
+    // 장면이 그대로면 가속 구조도 그대로다.
+    if (sceneChangedThisFrame || !rayTracer->ready()) {
+        rayTracer->updateTopLevel(commandBuffer, scene, objectInstanceSlots);
+    }
     if (!rayTracer->ready()) {
         return;
     }

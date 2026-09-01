@@ -283,6 +283,14 @@ private:
     bool oitTargetsValid = false;
     std::function<void(VkCommandBuffer)> uiCallback;
 
+    // 오브젝트 인덱스 -> 인스턴스 슬롯. 그리지 않는 오브젝트는 INVALID_INSTANCE_SLOT.
+    // 인스턴스는 버킷 순서로 채워지므로 장면 순서와 다르고, TLAS 가 이 표를 그대로 써야 한다.
+    std::vector<uint32_t> objectInstanceSlots;
+    // 장면이 바뀌었는지 판단하는 기준. 경로 추적 누적과 TLAS 재빌드가 함께 본다.
+    const scene::Scene* lastScene = nullptr;
+    uint64_t lastSceneRevision = 0;
+    bool sceneChangedThisFrame = true;
+
     // buildLights 가 채운다. 그림자 패스와 푸시 상수가 함께 쓴다.
     std::vector<GpuLight> frameLights;
     std::vector<glm::mat4> shadowViews;

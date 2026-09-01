@@ -24,7 +24,9 @@ Transform Transform::fromMatrix(const glm::mat4& matrix) {
 }
 
 void Scene::update(float deltaSeconds) {
-    for (Animator& animator : animators) {
+    animatorPosedFlags.assign(animators.size(), 0);
+    for (uint32_t index = 0; index < animators.size(); ++index) {
+        Animator& animator = animators[index];
         if (animator.skeleton.skins.empty()) {
             continue;
         }
@@ -38,11 +40,95 @@ void Scene::update(float deltaSeconds) {
             }
         }
 
+        // 재생 중이 아니고 클립도 시각도 그대로면 같은 포즈가 다시 나온다. 노드 배열 복사까지
+        // 통째로 건너뛴다.
+        if (animator.clip == animator.posedClip && animator.clipTime == animator.posedTime) {
+            continue;
+        }
+        animator.posedClip = animator.clip;
+        animator.posedTime = animator.clipTime;
+        animatorPosedFlags[index] = 1;
+
         asset::poseNodes(animator.skeleton, animator.clip, animator.clipTime, animator.nodeWorlds);
         animator.jointMatrices.resize(animator.skeleton.skins.size());
-        for (uint32_t i = 0; i < animator.skeleton.skins.size(); ++i) {
-            asset::skinMatrices(animator.skeleton, animator.nodeWorlds, i, animator.jointMatrices[i]);
+        for (uint32_t skin = 0; skin < animator.skeleton.skins.size(); ++skin) {
+            asset::skinMatrices(animator.skeleton, animator.nodeWorlds, skin, animator.jointMatrices[skin]);
         }
+    }
+}
+
+void Scene::resolveWorld(uint32_t index) {
+    if (cachedResolved[index] != 0) {
+        return;
+    }
+    // 순환 부모는 편집기가 막지만, 만에 하나 들어와도 재귀가 무한히 돌지 않도록 먼저 표시한다.
+    cachedResolved[index] = 1;
+
+    const Object& object = objects[index];
+    glm::mat4 local = object.transform.matrix();
+    if (object.parent < 0) {
+        cachedWorlds[index] = local;
+        cachedVisible[index] = object.visible ? 1 : 0;
+        return;
+    }
+
+    auto parent = static_cast<uint32_t>(object.parent);
+    resolveWorld(parent);
+    cachedWorlds[index] = cachedWorlds[parent] * local;
+    cachedVisible[index] = (object.visible && cachedVisible[parent] != 0) ? 1 : 0;
+    // 부모가 움직였으면 자손의 세계 변환도 바뀐 것이다.
+    cachedDirty[index] |= cachedDirty[parent];
+}
+
+void Scene::refresh() {
+    size_t count = objects.size();
+    bool sizeChanged = previousTransforms.size() != count;
+    bool topologyChanged = sizeChanged;
+    bool transformChanged = sizeChanged;
+
+    previousTransforms.resize(count);
+    previousParents.resize(count, -2);
+    previousVisible.resize(count, 2);
+    cachedWorlds.assign(count, glm::mat4{1.0F});
+    cachedVisible.assign(count, 0);
+    cachedResolved.assign(count, 0);
+    cachedDirty.assign(count, sizeChanged ? 1 : 0);
+
+    for (uint32_t index = 0; index < count; ++index) {
+        const Object& object = objects[index];
+        auto visible = static_cast<uint8_t>(object.visible ? 1 : 0);
+        bool reparented = previousParents[index] != object.parent;
+        bool posed = object.animator >= 0 && static_cast<size_t>(object.animator) < animatorPosedFlags.size() &&
+                     animatorPosedFlags[object.animator] != 0;
+        if (reparented || previousTransforms[index] != object.transform || previousVisible[index] != visible || posed) {
+            cachedDirty[index] = 1;
+            transformChanged = true;
+        }
+        topologyChanged = topologyChanged || reparented;
+
+        previousTransforms[index] = object.transform;
+        previousParents[index] = object.parent;
+        previousVisible[index] = visible;
+    }
+
+    for (uint32_t index = 0; index < count; ++index) {
+        resolveWorld(index);
+    }
+
+    bool lightsChanged = previousLights != lights;
+    previousLights = lights;
+
+    if (transformChanged) {
+        ++transformRev;
+    }
+    if (lightsChanged) {
+        ++lightRev;
+    }
+    if (topologyChanged) {
+        ++topologyRev;
+    }
+    if (transformChanged || lightsChanged || topologyChanged) {
+        ++anyRevision;
     }
 }
 

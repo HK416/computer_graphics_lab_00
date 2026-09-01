@@ -22,6 +22,8 @@ struct Transform {
 
     glm::mat4 matrix() const;
     static Transform fromMatrix(const glm::mat4& matrix);
+
+    bool operator==(const Transform&) const = default;
 };
 
 // 모델 하나의 스켈레톤과 재생 상태. Unity 의 Animator 처럼 오브젝트가 인덱스로 가리킨다.
@@ -40,6 +42,9 @@ struct Animator {
 private:
     friend struct Scene;
     std::vector<glm::mat4> nodeWorlds;
+    // 마지막으로 실제 포즈를 만든 클립과 시각. 같으면 다시 만들지 않는다.
+    uint32_t posedClip = 0xFFFFFFFFU;
+    float posedTime = -1.0F;
 };
 
 enum class LightType : uint32_t {
@@ -63,6 +68,8 @@ struct Light {
     // 영역광 직사각형의 가로세로 크기.
     glm::vec2 size{2.0F, 2.0F};
     bool castsShadow = true;
+
+    bool operator==(const Light&) const = default;
 };
 
 struct Object {
@@ -91,13 +98,32 @@ struct Scene {
     glm::vec3 ambientColor{0.25F};
     float ambientIntensity = 1.0F;
 
-    // 애니메이션 시간을 진행시키고 조인트 행렬을 다시 만든다.
+    // 애니메이션 시간을 진행시키고 조인트 행렬을 다시 만든다. 재생 중이 아니고 클립도 그대로면
+    // 포즈 계산 자체를 건너뛴다.
     void update(float deltaSeconds);
 
-    // 부모를 거슬러 올라가며 곱한 세계 변환.
+    // 프레임에 한 번, 장면을 읽기 직전에 부른다. 지난 사본과 비교해 변한 것을 찾고 세계 변환과
+    // 가시성 캐시를 다시 만든다.
     //
-    // ponytail: 오브젝트마다 부모 사슬을 다시 타므로 깊이에 비례한다. 편집기 규모에서는 문제가
-    // 없지만, 깊은 계층을 대량으로 다루게 되면 프레임마다 한 번 훑어 캐시해야 한다.
+    // 훅을 거는 대신 비교하는 이유: Object::transform 이 public 이고 편집기 여러 곳에서 직접
+    // 대입한다. 훅을 하나라도 빠뜨리면 화면이 조용히 틀리는데, 비교는 빠뜨릴 수가 없다.
+    // 덤으로 오브젝트별 더티 플래그가 나와 그림자 시점 무효화에 그대로 쓰인다.
+    void refresh();
+
+    // 마지막 refresh 에서 무엇이든 바뀌었으면 증가한다. 소비자는 자기가 본 값과 비교만 하면 된다.
+    uint64_t revision() const { return anyRevision; }
+    uint64_t transformRevision() const { return transformRev; }
+    uint64_t lightRevision() const { return lightRev; }
+    // 오브젝트 개수나 부모 관계가 바뀌면 증가한다. 인덱스가 통째로 재배치될 수 있다는 뜻이다.
+    uint64_t topologyRevision() const { return topologyRev; }
+
+    // 아래 셋은 refresh 이후에만 유효하다.
+    const glm::mat4& world(uint32_t index) const { return cachedWorlds[index]; }
+    bool visibleCached(uint32_t index) const { return cachedVisible[index] != 0; }
+    bool objectDirty(uint32_t index) const { return cachedDirty[index] != 0; }
+    bool animatorPosed(uint32_t index) const { return animatorPosedFlags[index] != 0; }
+
+    // 캐시를 쓰지 않는 즉시 계산. refresh 사이에 부르는 편집기(기즈모, 재부모화)가 쓴다.
     glm::mat4 worldMatrix(uint32_t index) const;
     // 조상 중 하나라도 숨겨져 있으면 보이지 않는다.
     bool visibleInTree(uint32_t index) const;
@@ -108,6 +134,26 @@ struct Scene {
     void removeObject(uint32_t index);
     // 대상과 그 자손을 복제하고 새로 만든 뿌리의 인덱스를 돌려준다.
     uint32_t duplicateObject(uint32_t index);
+
+private:
+    void resolveWorld(uint32_t index);
+
+    std::vector<glm::mat4> cachedWorlds;
+    std::vector<uint8_t> cachedVisible;
+    std::vector<uint8_t> cachedDirty;
+    std::vector<uint8_t> cachedResolved;
+    std::vector<uint8_t> animatorPosedFlags;
+
+    // 지난 refresh 때의 사본. 이것과 비교해 변경을 찾는다.
+    std::vector<Transform> previousTransforms;
+    std::vector<int32_t> previousParents;
+    std::vector<uint8_t> previousVisible;
+    std::vector<Light> previousLights;
+
+    uint64_t anyRevision = 1;
+    uint64_t transformRev = 1;
+    uint64_t lightRev = 1;
+    uint64_t topologyRev = 1;
 };
 
 // 여러 장면을 담아 두고 전환한다.

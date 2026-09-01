@@ -261,22 +261,25 @@ void RayTracer::buildBottomLevel() {
     spdlog::info("하위 가속 구조 {}개 생성", bottomLevels.size());
 }
 
-void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer, const scene::Scene& sceneToTrace) {
+void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
+                               const scene::Scene& sceneToTrace,
+                               const std::vector<uint32_t>& instanceSlots) {
     std::vector<VkAccelerationStructureInstanceKHR> instances;
     instances.reserve(sceneToTrace.objects.size());
 
-    uint32_t slot = 0;
     for (uint32_t index = 0; index < sceneToTrace.objects.size(); ++index) {
         const scene::Object& object = sceneToTrace.objects[index];
-        if (!sceneToTrace.visibleInTree(index) || object.meshIndex >= bottomLevels.size()) {
+        if (index >= instanceSlots.size() || instanceSlots[index] == INVALID_INSTANCE_SLOT ||
+            object.meshIndex >= bottomLevels.size()) {
             continue;
         }
-        glm::mat4 model = glm::transpose(sceneToTrace.worldMatrix(index));
+        glm::mat4 model = glm::transpose(sceneToTrace.world(index));
 
         VkAccelerationStructureInstanceKHR instance{};
         std::memcpy(&instance.transform, &model, sizeof(VkTransformMatrixKHR));
-        // 적중 셰이더가 인스턴스 배열을 찾는 데 쓰는 번호. 그리기 슬롯과 같은 순서여야 한다.
-        instance.instanceCustomIndex = slot++;
+        // 적중 셰이더가 인스턴스 배열을 찾는 번호. 그리기 인스턴스는 버킷 순서로 채워지므로
+        // 장면 순서로 매기면 어긋난다. buildDrawCommands 가 만든 슬롯을 그대로 쓴다.
+        instance.instanceCustomIndex = instanceSlots[index];
         instance.mask = 0xFF;
         instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         instance.accelerationStructureReference = bottomLevels[object.meshIndex].address;
