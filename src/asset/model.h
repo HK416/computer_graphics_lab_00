@@ -49,14 +49,32 @@ struct Vertex {
     glm::vec2 uv;
 };
 
-// meshoptimizer 로 나눈 meshlet 하나. mesh shader 경로와 클러스터 컬링에 함께 쓴다.
+// meshoptimizer 로 나눈 meshlet 하나. mesh shader 경로와 클러스터 컬링, LOD 선정에 함께 쓴다.
+//
+// LOD 선정은 Nanite 방식을 따른다. 자신이 나온 그룹의 오차(error, errorSphere)가 화면에서 충분히
+// 작고, 부모 그룹의 오차(parentError, parentSphere)는 너무 클 때만 이 meshlet 을 그린다. 같은 그룹의
+// meshlet 은 같은 판정을 받으므로 경계에 틈이 생기지 않는다.
 struct Meshlet {
     glm::vec4 boundingSphere{0.0F}; // xyz 중심, w 반지름
     glm::vec4 cone{0.0F};           // xyz 법선 원뿔 축, w 컷오프
-    uint32_t vertexOffset = 0;      // Mesh::vertices 기준. meshlet 마다 정점을 따로 소유한다.
-    uint32_t triangleOffset = 0;    // Mesh::meshletTriangles 기준
+    glm::vec4 errorSphere{0.0F};    // 자신이 나온 그룹의 경계 구
+    glm::vec4 parentSphere{0.0F};   // 부모 그룹의 경계 구
+    float error = 0.0F;
+    float parentError = 0.0F;
+    uint32_t vertexOffset = 0;   // Mesh::vertices 기준. meshlet 마다 정점을 따로 소유한다.
+    uint32_t triangleOffset = 0; // Mesh::meshletTriangles 기준
     uint32_t vertexCount = 0;
     uint32_t triangleCount = 0;
+    uint32_t level = 0;
+    uint32_t padding = 0;
+};
+
+// LOD 단계 하나가 차지하는 인덱스와 meshlet 구간.
+struct MeshLod {
+    uint32_t indexOffset = 0;
+    uint32_t indexCount = 0;
+    uint32_t meshletOffset = 0;
+    uint32_t meshletCount = 0;
 };
 
 struct Mesh {
@@ -66,6 +84,7 @@ struct Mesh {
     std::vector<uint32_t> indices;
 
     std::vector<Meshlet> meshlets;
+    std::vector<MeshLod> lods;
     // meshlet 안에서만 쓰는 지역 정점 인덱스. mesh shader 경로가 그대로 쓴다.
     std::vector<uint8_t> meshletTriangles;
     // 정점마다 속한 meshlet 번호. flat 보간으로 프래그먼트까지 내려 시각화에 쓴다.
@@ -111,7 +130,8 @@ struct Model {
 
 Model loadGltf(const std::filesystem::path& path);
 
-// 정점 캐시와 오버드로를 최적화한 뒤 meshlet 으로 나눈다. 인덱스 버퍼도 meshlet 순서로 재배열된다.
-void buildMeshlets(Mesh& mesh);
+// 정점 캐시와 오버드로를 최적화한 뒤 meshlet 으로 나누고, 단계별로 묶어 단순화해 LOD DAG 를 만든다.
+// 정점 버퍼는 meshlet 마다 정점을 소유하도록, 인덱스 버퍼는 LOD 단계별로 이어지도록 다시 만들어진다.
+void buildLodHierarchy(Mesh& mesh);
 
 } // namespace asset

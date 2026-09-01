@@ -656,8 +656,12 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         const asset::Material& material = geometry.material(geometry.mesh(object.meshIndex).materialIndex);
         return std::pair<size_t, size_t>{static_cast<size_t>(material.alphaMode), material.doubleSided ? 1U : 0U};
     };
-    auto groupsFor = [this](const scene::Object& object) {
-        return (geometry.mesh(object.meshIndex).meshletCount + MESHLET_GROUP_SIZE - 1) / MESHLET_GROUP_SIZE;
+    auto lodFor = [this](const scene::Object& object) -> const GpuMeshLod& {
+        const GpuMesh& mesh = geometry.mesh(object.meshIndex);
+        return geometry.lod(mesh.lodOffset + std::min(lodLevel, mesh.lodCount - 1));
+    };
+    auto groupsFor = [&lodFor](const scene::Object& object) {
+        return (lodFor(object).meshletCount + MESHLET_GROUP_SIZE - 1) / MESHLET_GROUP_SIZE;
     };
     auto drawable = [this](const scene::Object& object) {
         return object.visible && object.meshIndex < geometry.meshCount();
@@ -709,15 +713,16 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         uint32_t slot = drawCursors[mode][sided]++;
 
         const GpuMesh& mesh = geometry.mesh(object.meshIndex);
+        const GpuMeshLod& lod = lodFor(object);
         glm::mat4 model = object.transform.matrix();
 
         instances[slot].model = model;
         instances[slot].normalMatrix = glm::mat4(glm::inverseTranspose(glm::mat3(model)));
         instances[slot].meshIndex = object.meshIndex;
 
-        draws[slot].indexCount = mesh.indexCount;
+        draws[slot].indexCount = lod.indexCount;
         draws[slot].instanceCount = 1;
-        draws[slot].firstIndex = mesh.indexOffset;
+        draws[slot].firstIndex = lod.indexOffset;
         draws[slot].vertexOffset = mesh.vertexOffset;
         // 셰이더는 gl_InstanceIndex 로 인스턴스 배열을 참조한다.
         draws[slot].firstInstance = slot;
@@ -726,8 +731,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
             uint32_t groupSlot = groupCursors[mode][sided]++;
             uint32_t first = group * MESHLET_GROUP_SIZE;
             groups[groupSlot].instanceIndex = slot;
-            groups[groupSlot].firstMeshlet = mesh.meshletOffset + first;
-            groups[groupSlot].meshletCount = std::min(MESHLET_GROUP_SIZE, mesh.meshletCount - first);
+            groups[groupSlot].firstMeshlet = lod.meshletOffset + first;
+            groups[groupSlot].meshletCount = std::min(MESHLET_GROUP_SIZE, lod.meshletCount - first);
             groups[groupSlot].padding = 0;
         }
     }

@@ -88,6 +88,8 @@ public:
     bool wireframe = false;
     // shaders/scene_data.glsl 의 DEBUG_MODE_* 값.
     uint32_t debugMode = 0;
+    // 고정 LOD 단계. 자동 선정은 컴퓨트 컬링 단계에서 붙는다.
+    uint32_t lodLevel = 0;
     // mesh shader 미지원 장치에서는 켤 수 없다.
     bool useMeshShader = false;
     bool meshShaderAvailable() const { return meshShaderPipelines[0] != VK_NULL_HANDLE; }

@@ -10,6 +10,8 @@ vec4 debugColor() {
         return vec4(debugPalette(inMeshletIndex), 1.0);
     case DEBUG_MODE_NORMAL:
         return vec4(normalize(inNormal) * 0.5 + 0.5, 1.0);
+    case DEBUG_MODE_LOD:
+        return vec4(debugPalette(pushConstants.meshlets.items[inMeshletIndex].level * 977u + 13u), 1.0);
     case DEBUG_MODE_UV:
         return vec4(fract(inUv), 0.0, 1.0);
     case DEBUG_MODE_DEPTH: {

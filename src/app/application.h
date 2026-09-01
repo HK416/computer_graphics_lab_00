@@ -22,6 +22,7 @@ struct Options {
     size_t initialScene = 0;
     // shaders/scene_data.glsl 의 DEBUG_MODE_* 값.
     uint32_t debugMode = 0;
+    uint32_t lodLevel = 0;
 };
 
 class Application {

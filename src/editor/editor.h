@@ -51,6 +51,8 @@ private:
 
     gfx::Context& context;
     gfx::Renderer& renderer;
+    // build() 호출마다 갱신된다. 렌더 설정 패널에서 LOD 범위를 알기 위해 쓴다.
+    const gfx::GeometryStore* geometryStore = nullptr;
     std::shared_ptr<LogSink> logSink;
 
     std::unordered_map<VkImageView, VkDescriptorSet> textures;

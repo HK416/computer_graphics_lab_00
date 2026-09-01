@@ -22,17 +22,23 @@ struct Mesh {
     uint materialIndex;
     uint meshletOffset;
     uint meshletCount;
-    uint padding0;
-    uint padding1;
+    uint lodOffset;
+    uint lodCount;
 };
 
 struct Meshlet {
     vec4 boundingSphere;
     vec4 cone;
+    vec4 errorSphere;
+    vec4 parentSphere;
+    float error;
+    float parentError;
     uint vertexOffset;
     uint triangleOffset;
     uint vertexCount;
     uint triangleCount;
+    uint level;
+    uint padding;
 };
 
 #define INVALID_TEXTURE 0xFFFFFFFFu
@@ -86,6 +92,7 @@ struct Camera {
 #define DEBUG_MODE_NORMAL 2u
 #define DEBUG_MODE_UV 3u
 #define DEBUG_MODE_DEPTH 4u
+#define DEBUG_MODE_LOD 5u
 
 layout(buffer_reference, scalar) readonly buffer VertexBuffer { Vertex items[]; };
 layout(buffer_reference, scalar) readonly buffer MeshBuffer { Mesh items[]; };

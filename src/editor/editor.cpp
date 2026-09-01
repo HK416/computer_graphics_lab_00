@@ -443,6 +443,12 @@ void Editor::buildRenderSettings(float deltaSeconds) {
     ImGui::SliderFloat("노출", &renderer.exposure, 0.05F, 8.0F, "%.2f");
     ImGui::Checkbox("와이어프레임", &renderer.wireframe);
 
+    int lodLevel = static_cast<int>(renderer.lodLevel);
+    int maxLod = static_cast<int>(geometryStore != nullptr ? geometryStore->maxLodCount() : 1) - 1;
+    if (ImGui::SliderInt("LOD 단계", &lodLevel, 0, std::max(maxLod, 0))) {
+        renderer.lodLevel = static_cast<uint32_t>(lodLevel);
+    }
+
     ImGui::BeginDisabled(!renderer.meshShaderAvailable());
     ImGui::Checkbox("mesh shader 경로", &renderer.useMeshShader);
     ImGui::EndDisabled();
@@ -451,7 +457,7 @@ void Editor::buildRenderSettings(float deltaSeconds) {
         ImGui::TextDisabled("(미지원)");
     }
 
-    static constexpr const char* DEBUG_MODE_NAMES[] = {"셰이딩", "meshlet", "노멀", "UV", "깊이"};
+    static constexpr const char* DEBUG_MODE_NAMES[] = {"셰이딩", "meshlet", "노멀", "UV", "깊이", "LOD"};
     int debugMode = static_cast<int>(renderer.debugMode);
     if (ImGui::Combo("디버그 뷰", &debugMode, DEBUG_MODE_NAMES, IM_ARRAYSIZE(DEBUG_MODE_NAMES))) {
         renderer.debugMode = static_cast<uint32_t>(debugMode);
@@ -531,6 +537,8 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
     ImGuizmo::BeginFrame();
+
+    geometryStore = &geometry;
 
     buildDockspace();
     buildHierarchy(scenes, geometry);

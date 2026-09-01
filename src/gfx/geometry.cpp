@@ -1,5 +1,7 @@
 #include "gfx/geometry.h"
 
+#include <algorithm>
+
 #include <spdlog/spdlog.h>
 
 #include "core/error.h"
@@ -13,6 +15,7 @@ GeometryStore::GeometryStore(Context& context) : context(context) {}
 GeometryStore::~GeometryStore() {
     destroyBuffer(context, vertexMeshletBuffer);
     destroyBuffer(context, meshletTriangleBuffer);
+    destroyBuffer(context, lodBuffer);
     destroyBuffer(context, meshletBuffer);
     destroyBuffer(context, materialBuffer);
     destroyBuffer(context, meshBuffer);
@@ -64,6 +67,9 @@ uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<ui
         mesh.materialIndex = materialBase + source.materialIndex;
         mesh.meshletOffset = static_cast<uint32_t>(meshlets.size());
         mesh.meshletCount = static_cast<uint32_t>(source.meshlets.size());
+        mesh.lodOffset = static_cast<uint32_t>(lods.size());
+        mesh.lodCount = static_cast<uint32_t>(source.lods.size());
+        maxLods = std::max(maxLods, mesh.lodCount);
         meshes.push_back(mesh);
         meshNames.push_back(source.name);
 
@@ -71,11 +77,24 @@ uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<ui
             GpuMeshlet meshlet{};
             meshlet.boundingSphere = sourceMeshlet.boundingSphere;
             meshlet.cone = sourceMeshlet.cone;
+            meshlet.errorSphere = sourceMeshlet.errorSphere;
+            meshlet.parentSphere = sourceMeshlet.parentSphere;
+            meshlet.error = sourceMeshlet.error;
+            meshlet.parentError = sourceMeshlet.parentError;
             meshlet.vertexOffset = vertexBase + sourceMeshlet.vertexOffset;
             meshlet.triangleOffset = triangleBase + sourceMeshlet.triangleOffset;
             meshlet.vertexCount = sourceMeshlet.vertexCount;
             meshlet.triangleCount = sourceMeshlet.triangleCount;
+            meshlet.level = sourceMeshlet.level;
             meshlets.push_back(meshlet);
+        }
+        for (const asset::MeshLod& sourceLod : source.lods) {
+            GpuMeshLod lod{};
+            lod.indexOffset = mesh.indexOffset + sourceLod.indexOffset;
+            lod.indexCount = sourceLod.indexCount;
+            lod.meshletOffset = mesh.meshletOffset + sourceLod.meshletOffset;
+            lod.meshletCount = sourceLod.meshletCount;
+            lods.push_back(lod);
         }
         for (uint8_t local : source.meshletTriangles) {
             meshletTriangles.push_back(local);
@@ -132,12 +151,19 @@ void GeometryStore::build() {
                                        MemoryLocation::DEVICE,
                                        "정점별 meshlet");
 
+    lodBuffer = createBuffer(context,
+                             lods.size() * sizeof(GpuMeshLod),
+                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                             MemoryLocation::DEVICE,
+                             "LOD");
+
     Uploader uploader(context);
     uploader.uploadBuffer(vertexBuffer, 0, vertices.data(), vertexBuffer.size);
     uploader.uploadBuffer(indexBuffer, 0, indices.data(), indexBuffer.size);
     uploader.uploadBuffer(meshBuffer, 0, meshes.data(), meshBuffer.size);
     uploader.uploadBuffer(materialBuffer, 0, materials.data(), materialBuffer.size);
     uploader.uploadBuffer(meshletBuffer, 0, meshlets.data(), meshletBuffer.size);
+    uploader.uploadBuffer(lodBuffer, 0, lods.data(), lodBuffer.size);
     uploader.uploadBuffer(meshletTriangleBuffer, 0, meshletTriangles.data(), meshletTriangleBuffer.size);
     uploader.uploadBuffer(vertexMeshletBuffer, 0, vertexMeshlets.data(), vertexMeshletBuffer.size);
     uploader.flush();
@@ -148,6 +174,7 @@ void GeometryStore::build() {
                  meshes.size(),
                  materials.size(),
                  meshlets.size());
+    spdlog::info("LOD 단계 최대 {}, 총 LOD 항목 {}", maxLods, lods.size());
 
     // CPU 사본은 이후 meshlet 분할 단계에서 다시 필요하지만, 지금은 GPU 버퍼만 유지한다.
     vertices.clear();
