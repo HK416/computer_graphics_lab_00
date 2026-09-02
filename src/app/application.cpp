@@ -131,9 +131,18 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
         sceneRoot,
         [this](const std::filesystem::path& path) { saveScene(path); },
         [this](const std::filesystem::path& path) { openScene(path); });
+    // 에셋 장면은 그대로 두고 빈 장면을 하나 더 만들어 활성화한다. 지오메트리 버퍼가 비는 일이 없다.
+    if (options.emptyScene) {
+        scene::Scene& created = scenes.create("빈 장면");
+        addDefaultLight(created);
+        scenes.setActive(scenes.count() - 1);
+    }
     // 렌더러가 있어야 지오메트리 재구축을 알릴 수 있으므로 여기서 연다.
     for (const std::filesystem::path& path : options.modelPaths) {
         loadModel(path);
+    }
+    if (options.emptyScene && !options.modelPaths.empty()) {
+        frameCamera(scenes.active(), *geometry);
     }
     if (!options.scenePath.empty()) {
         openScene(options.scenePath);

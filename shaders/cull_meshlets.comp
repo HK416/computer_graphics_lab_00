@@ -47,6 +47,12 @@ void main() {
     // 쓰므로 그대로 두어도 같은 그룹이 같은 판정을 받아 틈이 생기지 않는다.
     bool skinned = instance.skinnedVertexOffset != NO_SKINNED_VERTICES;
     bool useNetwork = (cull.flags & CULL_FLAG_NEURAL_LOD) != 0u;
+    // 반투명 버킷은 불투명 두 패스 뒤의 반투명 패스가 읽는다. 그 패스는 2차 컬링이 남긴 명령을 쓰므로
+    // 2차에서 후보 전부를 내야 하고, 가시성 비트는 쓰지 않는다. 1차에서는 아무도 읽지 않아 건너뛴다.
+    bool translucent = instance.bucket >= ALPHA_MODE_TRANSLUCENT * 2u;
+    if (translucent && cull.phase == CULL_PHASE_FIRST) {
+        return;
+    }
     LodNetwork network = cull.network.item;
     mat3 normalMatrix = mat3(instance.normalMatrix);
 
@@ -72,7 +78,13 @@ void main() {
             vec3 coneAxis = normalize(normalMatrix * meshlet.cone.xyz);
             candidate = coneVisible(sphere.xyz, sphere.w, coneAxis, meshlet.cone.w, camera.position.xyz);
         }
-        if (!twoPhaseVisible(cull.phase, cull.visibility, instance.visibilityBase + i, candidate, camera, sphere)) {
+        bool visible;
+        if (translucent) {
+            visible = candidate && (cull.phase == CULL_PHASE_NONE || !occludedByHzb(camera, sphere));
+        } else {
+            visible = twoPhaseVisible(cull.phase, cull.visibility, instance.visibilityBase + i, candidate, camera, sphere);
+        }
+        if (!visible) {
             continue;
         }
 

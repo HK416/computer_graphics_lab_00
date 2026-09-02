@@ -44,6 +44,8 @@ int main(int argc, char* argv[]) {
             options.neuralLod = true;
         } else if (argument == "--pathtrace") {
             options.pathTracing = true;
+        } else if (argument == "--empty") {
+            options.emptyScene = true;
         } else if (argument == "--reflections") {
             options.reflections = true;
         } else if (argument == "--no-occlusion") {

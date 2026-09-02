@@ -51,6 +51,8 @@ struct Options {
     bool meshShader = true;
     // 시작할 때 광선 반사를 켠다. 광선 질의가 없으면 렌더러가 스스로 끈다.
     bool reflections = false;
+    // 빈 장면을 하나 만들어 그것으로 시작한다. --model 로 올린 모델만 보고 싶을 때 쓴다.
+    bool emptyScene = false;
     // 프레임마다 카메라를 이만큼(도) 궤도 회전한다. 정지 화면에서는 드러나지 않는 팝인을 재현한다.
     float orbitDegreesPerFrame = 0.0F;
     float triangleBudget = 0.0F;

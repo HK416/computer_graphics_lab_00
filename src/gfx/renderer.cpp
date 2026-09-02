@@ -2047,6 +2047,28 @@ void Renderer::createMeshPipelines() {
         blendAttachments[3].colorWriteMask = ALL_CHANNELS;
         colorFormats = {COLOR_FORMAT, VELOCITY_FORMAT, COLOR_FORMAT, COLOR_FORMAT};
     };
+    // 반투명은 누적과 잔여 투과율 두 대상에 기록한다. 누적은 더하고, 잔여 투과율은 (1 - 알파)를 곱해
+    // 나간다. 고전 경로와 mesh shader 경로가 같은 상태를 써야 하므로 한 곳에서 정한다.
+    auto setTranslucentAttachments = [&]() {
+        blendAttachments = {};
+        colorFormats = {OIT_ACCUMULATION_FORMAT, OIT_REVEALAGE_FORMAT, COLOR_FORMAT, COLOR_FORMAT};
+        blendAttachments[0].colorWriteMask = ALL_CHANNELS;
+        blendAttachments[0].blendEnable = VK_TRUE;
+        blendAttachments[0].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachments[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachments[0].colorBlendOp = VK_BLEND_OP_ADD;
+        blendAttachments[0].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachments[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachments[0].alphaBlendOp = VK_BLEND_OP_ADD;
+        blendAttachments[1].blendEnable = VK_TRUE;
+        blendAttachments[1].srcColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+        blendAttachments[1].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+        blendAttachments[1].colorBlendOp = VK_BLEND_OP_ADD;
+        blendAttachments[1].srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        blendAttachments[1].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blendAttachments[1].alphaBlendOp = VK_BLEND_OP_ADD;
+        blendAttachments[1].colorWriteMask = VK_COLOR_COMPONENT_R_BIT;
+    };
     resetOpaqueAttachments();
 
     VkPipelineColorBlendStateCreateInfo colorBlend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
@@ -2090,31 +2112,12 @@ void Renderer::createMeshPipelines() {
             for (uint32_t variant = 0; variant < ALPHA_MODE_COUNT; ++variant) {
                 alphaVariant = variant;
                 if (variant == TRANSLUCENT_MODE) {
-                    // 반투명은 누적과 잔여 투과율 두 대상에 기록하고 깊이는 읽기만 한다.
-                    // 모션 벡터는 불투명 표면만 남기므로 이 경로는 기록하지 않는다.
+                    // 반투명은 깊이를 읽기만 한다. 모션 벡터는 불투명 표면만 남기므로 기록하지 않는다.
                     stages[1].module = oit;
                     depthStencil.depthWriteEnable = VK_FALSE;
-                    colorFormats[0] = OIT_ACCUMULATION_FORMAT;
-                    colorFormats[1] = OIT_REVEALAGE_FORMAT;
+                    setTranslucentAttachments();
                     colorBlend.attachmentCount = TRANSLUCENT_ATTACHMENTS;
                     renderingInfo.colorAttachmentCount = TRANSLUCENT_ATTACHMENTS;
-
-                    blendAttachments[0].blendEnable = VK_TRUE;
-                    blendAttachments[0].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
-                    blendAttachments[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
-                    blendAttachments[0].colorBlendOp = VK_BLEND_OP_ADD;
-                    blendAttachments[0].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-                    blendAttachments[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-                    blendAttachments[0].alphaBlendOp = VK_BLEND_OP_ADD;
-
-                    blendAttachments[1].blendEnable = VK_TRUE;
-                    blendAttachments[1].srcColorBlendFactor = VK_BLEND_FACTOR_ZERO;
-                    blendAttachments[1].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
-                    blendAttachments[1].colorBlendOp = VK_BLEND_OP_ADD;
-                    blendAttachments[1].srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-                    blendAttachments[1].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-                    blendAttachments[1].alphaBlendOp = VK_BLEND_OP_ADD;
-                    blendAttachments[1].colorWriteMask = VK_COLOR_COMPONENT_R_BIT;
                 }
                 VK_CHECK(vkCreateGraphicsPipelines(
                     context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &target[variant]));
@@ -2163,11 +2166,12 @@ void Renderer::createMeshPipelines() {
                     bool translucent = variant == static_cast<uint32_t>(asset::AlphaMode::TRANSLUCENT);
                     meshStages[2].module = translucent ? oit : opaque;
                     depthStencil.depthWriteEnable = translucent ? VK_FALSE : VK_TRUE;
-                    colorFormats[0] = translucent ? OIT_ACCUMULATION_FORMAT : COLOR_FORMAT;
-                    colorFormats[1] = translucent ? OIT_REVEALAGE_FORMAT : VELOCITY_FORMAT;
-                    blendAttachments[0].blendEnable = translucent ? VK_TRUE : VK_FALSE;
-                    blendAttachments[1].blendEnable = translucent ? VK_TRUE : VK_FALSE;
-                    blendAttachments[1].colorWriteMask = translucent ? VK_COLOR_COMPONENT_R_BIT : VELOCITY_CHANNELS;
+                    // 블렌드 상태는 앞 루프가 남긴 것에 기대지 않고 매번 통째로 정한다.
+                    if (translucent) {
+                        setTranslucentAttachments();
+                    } else {
+                        resetOpaqueAttachments();
+                    }
                     colorBlend.attachmentCount = translucent ? TRANSLUCENT_ATTACHMENTS : OPAQUE_ATTACHMENTS;
                     renderingInfo.colorAttachmentCount = translucent ? TRANSLUCENT_ATTACHMENTS : OPAQUE_ATTACHMENTS;
                     VK_CHECK(vkCreateGraphicsPipelines(
