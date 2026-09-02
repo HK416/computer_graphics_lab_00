@@ -219,6 +219,54 @@ bool Scene::isDescendant(uint32_t candidate, uint32_t ancestor) const {
     return false;
 }
 
+SceneSnapshot Scene::capture() const {
+    SceneSnapshot snapshot;
+    snapshot.name = name;
+    snapshot.objects = objects;
+    snapshot.meshRenderers = meshRenderers;
+    snapshot.animators = animators;
+    snapshot.lights = lights;
+    snapshot.ambientColor = ambientColor;
+    snapshot.ambientIntensity = ambientIntensity;
+    snapshot.environment = environment;
+    return snapshot;
+}
+
+void Scene::restore(const SceneSnapshot& snapshot) {
+    // public 필드만 되돌린다. previous* 캐시와 리비전까지 되돌리면 다음 refresh 가 "변한 게
+    // 없다"고 판단해 세계 변환과 그림자 캐시가 낡은 채로 남는다.
+    name = snapshot.name;
+    objects = snapshot.objects;
+    meshRenderers = snapshot.meshRenderers;
+    animators = snapshot.animators;
+    lights = snapshot.lights;
+    ambientColor = snapshot.ambientColor;
+    ambientIntensity = snapshot.ambientIntensity;
+    environment = snapshot.environment;
+}
+
+bool Scene::differsFrom(const SceneSnapshot& snapshot) const {
+    if (name != snapshot.name || objects != snapshot.objects || meshRenderers != snapshot.meshRenderers ||
+        lights != snapshot.lights || ambientColor != snapshot.ambientColor ||
+        ambientIntensity != snapshot.ambientIntensity || !(environment == snapshot.environment)) {
+        return true;
+    }
+    if (animators.size() != snapshot.animators.size()) {
+        return true;
+    }
+    for (size_t i = 0; i < animators.size(); ++i) {
+        const Animator& current = animators[i];
+        const Animator& saved = snapshot.animators[i];
+        // clipTime 은 재생 중 매 프레임 흐르므로 뺀다. 그것 때문에 기록이 쌓이면 되돌리기가
+        // 쓸모없어진다.
+        if (current.name != saved.name || current.model != saved.model || current.clip != saved.clip ||
+            current.playing != saved.playing || current.speed != saved.speed) {
+            return true;
+        }
+    }
+    return false;
+}
+
 int32_t Scene::attachMeshRenderer(uint32_t index, uint32_t mesh, int32_t skin) {
     Object& object = objects[index];
     if (object.meshRenderer < 0 || static_cast<size_t>(object.meshRenderer) >= meshRenderers.size()) {

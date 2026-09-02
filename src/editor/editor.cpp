@@ -1172,7 +1172,62 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
         }
     }
 
+    updateHistory(scenes.active(), scenes.current());
+
     ImGui::Render();
+}
+
+// 되돌리기 기록은 한 번에 하나씩 쌓는다. 기즈모를 끄는 동안이나 슬라이더를 잡고 있는 동안에는
+// 담지 않고, 손을 뗀 뒤 한 덩어리로 담는다. 그렇지 않으면 끌기 한 번이 수십 개의 기록이 된다.
+void Editor::updateHistory(scene::Scene& active, size_t sceneIndex) {
+    // 기록이 너무 길어지면 애니메이터 스켈레톤 사본이 쌓여 메모리를 먹는다.
+    constexpr size_t MAX_HISTORY = 64;
+
+    if (histories.size() <= sceneIndex) {
+        histories.resize(sceneIndex + 1);
+    }
+    History& history = histories[sceneIndex];
+    if (!history.started) {
+        history.baseline = active.capture();
+        history.started = true;
+        return;
+    }
+
+    ImGuiIO& io = ImGui::GetIO();
+    bool editing = ImGui::IsAnyItemActive() || gizmoUsing;
+    // 글자를 입력하는 중에는 단축키를 받지 않는다. 이름을 고치다 장면이 되돌아가면 곤란하다.
+    bool shortcutsAllowed = io.KeyCtrl && !io.WantTextInput;
+    bool wantUndo = shortcutsAllowed && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false);
+    bool wantRedo = shortcutsAllowed && (ImGui::IsKeyPressed(ImGuiKey_Y, false) ||
+                                         (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)));
+
+    if (wantUndo && !history.undoStack.empty()) {
+        history.redoStack.push_back(active.capture());
+        active.restore(history.undoStack.back());
+        history.undoStack.pop_back();
+        history.baseline = active.capture();
+        // 오브젝트 번호가 통째로 달라질 수 있어 선택은 놓는다.
+        selectedObject = -1;
+        return;
+    }
+    if (wantRedo && !history.redoStack.empty()) {
+        history.undoStack.push_back(active.capture());
+        active.restore(history.redoStack.back());
+        history.redoStack.pop_back();
+        history.baseline = active.capture();
+        selectedObject = -1;
+        return;
+    }
+
+    if (!editing && active.differsFrom(history.baseline)) {
+        history.undoStack.push_back(std::move(history.baseline));
+        if (history.undoStack.size() > MAX_HISTORY) {
+            history.undoStack.erase(history.undoStack.begin());
+        }
+        // 새로 편집했으므로 앞서 되돌린 것들은 이어 갈 수 없다.
+        history.redoStack.clear();
+        history.baseline = active.capture();
+    }
 }
 
 void Editor::record(VkCommandBuffer commandBuffer) {

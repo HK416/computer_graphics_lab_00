@@ -11,6 +11,9 @@
 #include <SDL3/SDL_events.h>
 #include <vulkan/vulkan.h>
 
+// 되돌리기 기록이 SceneSnapshot 을 값으로 들고 있어 전방 선언으로는 부족하다.
+#include "scene/scene.h"
+
 struct SDL_Window;
 
 namespace gfx {
@@ -21,7 +24,6 @@ class Renderer;
 
 namespace scene {
 class SceneManager;
-struct Scene;
 } // namespace scene
 
 namespace editor {
@@ -61,6 +63,8 @@ private:
     void buildRenderSettings(scene::Scene& active, float deltaSeconds);
     void buildRenderTargets();
     void buildConsole();
+    // 장면이 바뀌었으면 되돌리기 기록에 담고, Ctrl+Z / Ctrl+Y 를 처리한다.
+    void updateHistory(scene::Scene& active, size_t sceneIndex);
     VkDescriptorSet textureFor(VkImageView view, VkImageLayout layout);
 
     gfx::Context& context;
@@ -75,6 +79,16 @@ private:
     VkExtent2D viewportExtent{1280, 720};
     bool sceneHovered = false;
     bool layoutBuilt = false;
+    // 장면마다의 되돌리기 기록. 장면을 오갈 수 있으므로 하나로 묶어 두면 섞인다.
+    struct History {
+        std::vector<scene::SceneSnapshot> undoStack;
+        std::vector<scene::SceneSnapshot> redoStack;
+        // 마지막으로 기록에 담은 상태. 다음 변경이 생기면 이것이 되돌릴 자리가 된다.
+        scene::SceneSnapshot baseline;
+        bool started = false;
+    };
+    std::vector<History> histories;
+
     int selectedObject = -1;
     // 계층 순회 도중 부모를 바꾸면 그리기가 어긋나므로 순회가 끝난 뒤에 적용한다.
     int pendingChild = -1;

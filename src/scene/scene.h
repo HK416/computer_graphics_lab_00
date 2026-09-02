@@ -94,6 +94,8 @@ struct Object {
     int32_t meshRenderer = -1;
     int32_t animator = -1;
     int32_t light = -1;
+
+    bool operator==(const Object&) const = default;
 };
 
 // 환경 맵(IBL)을 만들 재료. 태양 방향은 첫 방향광에서 받으므로 여기 두지 않는다.
@@ -110,6 +112,19 @@ struct Environment {
     float yawDegrees = 0.0F;
 
     bool operator==(const Environment&) const = default;
+};
+
+// 되돌리기가 되살리는 장면 상태. 카메라와 애니메이션 재생 시각처럼 매 프레임 스스로 변하는
+// 것은 담지 않는다. 담으면 재생 중에 되돌리기 기록이 프레임마다 쌓인다.
+struct SceneSnapshot {
+    std::string name;
+    std::vector<Object> objects;
+    std::vector<MeshRenderer> meshRenderers;
+    std::vector<Animator> animators;
+    std::vector<Light> lights;
+    glm::vec3 ambientColor{0.25F};
+    float ambientIntensity = 1.0F;
+    Environment environment;
 };
 
 struct Scene {
@@ -153,6 +168,12 @@ struct Scene {
     glm::mat4 worldMatrix(uint32_t index) const;
     // 조상 중 하나라도 숨겨져 있으면 보이지 않는다.
     bool visibleInTree(uint32_t index) const;
+
+    // 되돌리기용 사본을 뜨고 되살린다.
+    SceneSnapshot capture() const;
+    void restore(const SceneSnapshot& snapshot);
+    // 되돌리기 기록에 남길 만한 차이가 있는지. 애니메이션 재생 시각은 빼고 본다.
+    bool differsFrom(const SceneSnapshot& snapshot) const;
 
     // 메쉬 부품을 붙이고 그 첨자를 돌려준다. 이미 붙어 있으면 값만 바꾼다.
     int32_t attachMeshRenderer(uint32_t index, uint32_t mesh, int32_t skin = -1);

@@ -93,6 +93,45 @@ int main() {
     assert(rig.objects[rigCopy + 1].animator == 1 && "사본끼리는 계속 같은 애니메이터를 공유한다");
     assert(rig.objects[rigCopy + 2].animator == 1);
 
+    // 되돌리기 스냅샷. public 필드만 되살리므로 복원 뒤에도 refresh 가 변경을 잡아야 한다.
+    // Scene 을 통째로 대입하면 previous* 캐시까지 되돌아가 "변한 게 없다"고 판단해 버린다.
+    {
+        scene::Scene history = makeChain();
+        history.refresh();
+        scene::SceneSnapshot saved = history.capture();
+        assert(!history.differsFrom(saved));
+
+        history.objects[1].transform.position.x = 10.0F;
+        assert(history.differsFrom(saved) && "변경은 스냅샷과의 차이로 잡혀야 한다");
+        history.refresh();
+        assert(origin(history, 2).x == 12.0F);
+
+        uint64_t beforeRestore = history.transformRevision();
+        history.restore(saved);
+        history.refresh();
+        assert(!history.differsFrom(saved) && "되살린 뒤에는 스냅샷과 같아야 한다");
+        assert(history.transformRevision() != beforeRestore && "복원도 변경으로 잡혀야 한다");
+        assert(origin(history, 2).x == 3.0F && "세계 변환 캐시가 복원된 값으로 다시 만들어져야 한다");
+        assert(history.objectDirty(1) && "복원된 오브젝트는 더티로 표시되어야 한다");
+    }
+
+    // 재생 시각은 스냅샷 비교에서 빠진다. 안 그러면 재생 중에 기록이 프레임마다 쌓인다.
+    {
+        scene::Scene playing;
+        scene::Object node;
+        playing.objects.push_back(std::move(node));
+        scene::Animator animator;
+        animator.name = "재생";
+        playing.animators.push_back(std::move(animator));
+        playing.objects[0].animator = 0;
+
+        scene::SceneSnapshot saved = playing.capture();
+        playing.animators[0].clipTime = 1.25F;
+        assert(!playing.differsFrom(saved) && "재생 시각만 흐른 것은 변경이 아니다");
+        playing.animators[0].speed = 2.0F;
+        assert(playing.differsFrom(saved) && "재생 속도는 편집이므로 변경이다");
+    }
+
     // 부모가 자식보다 뒤에 있어도 세계 변환이 맞아야 한다.
     scene::Scene reversed;
     scene::Object child;
