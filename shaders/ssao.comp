@@ -18,12 +18,6 @@ layout(push_constant) uniform SsaoPushConstants {
 }
 ssao;
 
-// 화면 좌표와 깊이에서 월드 위치를 되돌린다. 역 뷰프로젝션 하나면 되므로 시야 공간을 따로 두지 않는다.
-vec3 worldFromDepth(Camera camera, vec2 uv, float depth) {
-    vec4 clip = camera.inverseViewProjection * vec4(uv * 2.0 - 1.0, depth, 1.0);
-    return clip.xyz / clip.w;
-}
-
 float hash(vec2 seed) {
     return fract(sin(dot(seed, vec2(12.9898, 78.233))) * 43758.5453);
 }

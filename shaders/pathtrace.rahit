@@ -2,6 +2,7 @@
 #extension GL_EXT_nonuniform_qualifier : require
 
 #include "bindless.glsl"
+#include "material.glsl"
 #include "pathtrace_common.glsl"
 
 hitAttributeEXT vec2 barycentrics;
@@ -18,19 +19,16 @@ void main() {
         return;
     }
 
-    float alpha = material.baseColorFactor.a;
-    if (material.baseColorTexture != INVALID_TEXTURE) {
-        MeshLod lod = pathTrace.lods.items[mesh.lodOffset];
-        uint base = lod.indexOffset + uint(gl_PrimitiveID) * 3;
-        bool skinned = instance.skinnedVertexOffset != NO_SKINNED_VERTICES;
-        VertexBuffer source = skinned ? pathTrace.skinnedVertices : pathTrace.vertices;
-        uint vertexBase = skinned ? instance.skinnedVertexOffset : uint(mesh.vertexOffset);
-        vec2 uv0 = source.items[vertexBase + pathTrace.indices.items[base]].uv;
-        vec2 uv1 = source.items[vertexBase + pathTrace.indices.items[base + 1]].uv;
-        vec2 uv2 = source.items[vertexBase + pathTrace.indices.items[base + 2]].uv;
-        vec2 uv = uv0 * (1.0 - barycentrics.x - barycentrics.y) + uv1 * barycentrics.x + uv2 * barycentrics.y;
-        alpha *= sampleBindless(material.baseColorTexture, uv).a;
-    }
+    vec2 uv = interpolateHitUv(pathTrace.instances,
+                               pathTrace.meshes,
+                               pathTrace.lods,
+                               pathTrace.vertices,
+                               pathTrace.skinnedVertices,
+                               pathTrace.indices,
+                               uint(gl_InstanceCustomIndexEXT),
+                               uint(gl_PrimitiveID),
+                               barycentrics);
+    float alpha = materialAlpha(material, uv);
 
     if (material.alphaMode == ALPHA_MODE_CUTOFF) {
         if (alpha < material.emissiveAndCutoff.w) {

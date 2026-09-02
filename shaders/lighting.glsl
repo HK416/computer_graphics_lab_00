@@ -1,6 +1,8 @@
 #ifndef LIGHTING_GLSL
 #define LIGHTING_GLSL
 
+#include "bindless.glsl"
+#include "ibl.glsl"
 #include "pbr.glsl"
 #include "scene_types.glsl"
 
@@ -101,6 +103,44 @@ vec3 sampleLightRadiance(Light light, vec3 position, out vec3 lightDirection, ou
         radiance *= falloff * falloff;
     }
     return radiance;
+}
+
+// split-sum 의 스페큘러 가중 F·A + B. 프리필터 큐브맵이나 추적한 반사 색에 곱한다.
+vec3 specularAlbedo(Camera camera, Surface surface) {
+    float nDotV = max(dot(surface.normal, surface.view), 1e-4);
+    vec3 f0 = mix(vec3(0.04), surface.albedo, surface.metallic);
+    vec3 fresnel = fresnelSchlickRoughness(nDotV, f0, surface.roughness);
+    vec2 integrated = sampleBindlessArray(camera.environment.z, vec2(nDotV, surface.roughness), 0.0).rg;
+    return fresnel * integrated.x + integrated.y;
+}
+
+// 환경광. 프리필터 밉 수가 0 이면 IBL 이 꺼진 것이라 균일 환경광만 남긴다. ambient 는 IBL 에
+// 곱하는 색조 겸 세기로 계속 쓰인다. includeSpecular 를 끄면 확산만 돌려주고, 스페큘러는 부르는
+// 쪽이 추적한 반사에 specularAlbedo 를 곱해 대신 넣는다.
+vec3 environmentLight(Camera camera, Surface surface, float occlusion, bool includeSpecular) {
+    vec3 tint = camera.ambient.rgb;
+    uvec4 environment = camera.environment;
+    if (environment.w == 0u) {
+        return tint * surface.albedo * occlusion;
+    }
+
+    float nDotV = max(dot(surface.normal, surface.view), 1e-4);
+    vec3 f0 = mix(vec3(0.04), surface.albedo, surface.metallic);
+    vec3 fresnel = fresnelSchlickRoughness(nDotV, f0, surface.roughness);
+    vec3 diffuseWeight = (vec3(1.0) - fresnel) * (1.0 - surface.metallic);
+
+    vec3 irradiance = sampleBindlessCube(environment.x, surface.normal).rgb;
+    vec3 diffuse = diffuseWeight * irradiance * surface.albedo;
+
+    vec3 specular = vec3(0.0);
+    if (includeSpecular) {
+        vec3 reflection = reflect(-surface.view, surface.normal);
+        vec3 prefiltered =
+            sampleBindlessCubeLod(environment.y, reflection, surface.roughness * float(environment.w - 1u)).rgb;
+        vec2 integrated = sampleBindlessArray(environment.z, vec2(nDotV, surface.roughness), 0.0).rg;
+        specular = prefiltered * (fresnel * integrated.x + integrated.y);
+    }
+    return (diffuse + specular) * occlusion * tint;
 }
 
 // 그림자를 뺀 조명 하나의 기여. attenuation 은 그림자 계산에도 쓰라고 따로 돌려준다.

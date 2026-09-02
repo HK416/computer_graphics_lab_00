@@ -4,7 +4,7 @@
 #include "scene_data.glsl"
 
 #ifdef RAY_QUERY_SHADOWS
-#extension GL_EXT_ray_query : require
+#include "ray_query.glsl"
 
 // 경로 추적기와 같은 상위 가속 구조. 집합 1 로 묶여 있다.
 layout(set = 1, binding = 0) uniform accelerationStructureEXT shadowTopLevel;
@@ -14,24 +14,6 @@ layout(set = 1, binding = 0) uniform accelerationStructureEXT shadowTopLevel;
 // ponytail: 장면 반지름을 넘겨 주면 더 정확하지만, 상수 하나로 UBO 를 늘리지 않는 편이 낫다.
 const float RAY_SHADOW_MAX_DISTANCE = 1.0e4;
 
-// 그림자 맵 대신 광선으로 가시성을 판정한다. 0 이면 완전히 가려진 것이다.
-float rayQueryVisibility(vec3 position, vec3 normal, vec3 toLight, float maxDistance) {
-    // 자기 자신을 맞히지 않도록 표면에서 살짝 띄운다. 접선 방향 오차가 텍셀 크기에 비례하지
-    // 않으므로 그림자 맵보다 훨씬 작은 값이면 된다.
-    vec3 origin = position + normal * 1.0e-3;
-
-    rayQueryEXT query;
-    rayQueryInitializeEXT(query,
-                          shadowTopLevel,
-                          gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
-                          0xFFu,
-                          origin,
-                          1.0e-4,
-                          toLight,
-                          maxDistance);
-    rayQueryProceedEXT(query);
-    return rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
-}
 #endif
 
 // src/gfx/renderer.h 의 SHADOW_MAP_SIZE 와 같아야 한다.
@@ -92,7 +74,7 @@ float shadowFactor(Light light, vec3 position, vec3 normal, vec3 lightDirection)
     if (rayDistance > 0.0 && length(position - pushConstants.camera.item.position.xyz) < rayDistance) {
         float reach = type == LIGHT_TYPE_DIRECTIONAL ? RAY_SHADOW_MAX_DISTANCE
                                                      : length(light.positionRange.xyz - position);
-        return rayQueryVisibility(position, normal, lightDirection, reach);
+        return rayQueryVisibility(shadowTopLevel, position, normal, lightDirection, reach);
     }
 #endif
 

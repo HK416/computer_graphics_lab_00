@@ -4,6 +4,7 @@
 #include "fog.glsl"
 #include "ibl.glsl"
 #include "lighting.glsl"
+#include "material.glsl"
 #include "scene_data.glsl"
 #include "shadow.glsl"
 
@@ -36,83 +37,24 @@ float screenSpaceOcclusion() {
     return sampleBindless(slot, gl_FragCoord.xy * pushConstants.camera.item.viewport.zw).r;
 }
 
-// 환경광. 프리필터 밉 수가 0 이면 IBL 이 꺼진 것이라 균일 환경광만 남긴다. ambient 는 IBL 에
-// 곱하는 색조 겸 세기로 계속 쓰인다.
-vec3 environmentLight(Surface surface, float occlusion) {
-    vec3 tint = pushConstants.camera.item.ambient.rgb;
-    uvec4 environment = pushConstants.camera.item.environment;
-    if (environment.w == 0u) {
-        return tint * surface.albedo * occlusion;
-    }
-
-    float nDotV = max(dot(surface.normal, surface.view), 1e-4);
-    vec3 f0 = mix(vec3(0.04), surface.albedo, surface.metallic);
-    vec3 fresnel = fresnelSchlickRoughness(nDotV, f0, surface.roughness);
-    vec3 diffuseWeight = (vec3(1.0) - fresnel) * (1.0 - surface.metallic);
-
-    vec3 irradiance = sampleBindlessCube(environment.x, surface.normal).rgb;
-    vec3 reflection = reflect(-surface.view, surface.normal);
-    vec3 prefiltered =
-        sampleBindlessCubeLod(environment.y, reflection, surface.roughness * float(environment.w - 1u)).rgb;
-    vec2 integrated = sampleBindlessArray(environment.z, vec2(nDotV, surface.roughness), 0.0).rg;
-
-    vec3 diffuse = diffuseWeight * irradiance * surface.albedo;
-    vec3 specular = prefiltered * (fresnel * integrated.x + integrated.y);
-    return (diffuse + specular) * occlusion * tint;
-}
-
-vec3 shadingNormal(Material material) {
-    vec3 normal = normalize(inNormal);
-    if (material.normalTexture != INVALID_TEXTURE) {
-        vec3 tangent = normalize(inTangent.xyz - normal * dot(normal, inTangent.xyz));
-        vec3 bitangent = cross(normal, tangent) * inTangent.w;
-        vec3 sampled = sampleBindless(material.normalTexture, inUv).xyz * 2.0 - 1.0;
-        sampled.xy *= material.normalScale;
-        normal = normalize(mat3(tangent, bitangent, normal) * sampled);
-    }
-    // 양면 재질의 뒷면은 노멀을 뒤집어야 조명이 뒤집히지 않는다.
-    return gl_FrontFacing ? normal : -normal;
-}
-
 // 톤 매핑 이전의 선형 HDR 색과 알파를 돌려준다.
 vec4 shadeSurface() {
     Material material = pushConstants.materials.items[inMaterialIndex];
-
-    vec4 baseColor = material.baseColorFactor;
-    if (material.baseColorTexture != INVALID_TEXTURE) {
-        baseColor *= sampleBindless(material.baseColorTexture, inUv);
-    }
-    if (ALPHA_MODE_VARIANT == ALPHA_MODE_CUTOFF && baseColor.a < material.emissiveAndCutoff.w) {
+    // 재질 읽기와 노멀 맵은 경로 추적 적중 셰이더와 같은 함수를 쓴다.
+    MaterialSample sampled = sampleMaterial(material, inUv);
+    if (ALPHA_MODE_VARIANT == ALPHA_MODE_CUTOFF && sampled.alpha < material.emissiveAndCutoff.w) {
         discard;
     }
-
-    float metallic = material.metallicFactor;
-    float roughness = material.roughnessFactor;
-    if (material.metallicRoughnessTexture != INVALID_TEXTURE) {
-        vec4 sampled = sampleBindless(material.metallicRoughnessTexture, inUv);
-        roughness *= sampled.g;
-        metallic *= sampled.b;
-    }
-    roughness = clamp(roughness, 0.03, 1.0);
-
-    float occlusion = 1.0;
-    if (material.occlusionTexture != INVALID_TEXTURE) {
-        float sampled = sampleBindless(material.occlusionTexture, inUv).r;
-        occlusion = mix(1.0, sampled, material.occlusionStrength);
-    }
-
-    vec3 emissive = material.emissiveAndCutoff.rgb;
-    if (material.emissiveTexture != INVALID_TEXTURE) {
-        emissive *= sampleBindless(material.emissiveTexture, inUv).rgb;
-    }
+    vec3 normal = perturbNormal(material, normalize(inNormal), inTangent.xyz, inTangent.w, inUv);
 
     Surface surface;
     surface.position = inWorldPosition;
-    surface.normal = shadingNormal(material);
+    // 양면 재질의 뒷면은 노멀을 뒤집어야 조명이 뒤집히지 않는다.
+    surface.normal = gl_FrontFacing ? normal : -normal;
     surface.view = normalize(pushConstants.camera.item.position.xyz - inWorldPosition);
-    surface.albedo = baseColor.rgb;
-    surface.metallic = metallic;
-    surface.roughness = roughness;
+    surface.albedo = sampled.albedo;
+    surface.metallic = sampled.metallic;
+    surface.roughness = sampled.roughness;
 
     // 조명이 많아도 그냥 훑는다.
     //
@@ -130,9 +72,9 @@ vec4 shadeSurface() {
         color += contribution * shadowFactor(light, surface.position, surface.normal, lightDirection);
     }
 
-    float ambientOcclusion = occlusion * screenSpaceOcclusion();
-    color += environmentLight(surface, ambientOcclusion);
-    color += emissive;
+    float ambientOcclusion = sampled.occlusion * screenSpaceOcclusion();
+    color += environmentLight(pushConstants.camera.item, surface, ambientOcclusion, true);
+    color += sampled.emissive;
 
     // 안개는 카메라에서 표면까지의 구간에 건다. 반투명도 같은 식으로 잠긴다.
     vec3 cameraPosition = pushConstants.camera.item.position.xyz;
@@ -142,7 +84,7 @@ vec4 shadeSurface() {
                      -surface.view,
                      length(inWorldPosition - cameraPosition));
 
-    float alpha = ALPHA_MODE_VARIANT == ALPHA_MODE_TRANSLUCENT ? baseColor.a : 1.0;
+    float alpha = ALPHA_MODE_VARIANT == ALPHA_MODE_TRANSLUCENT ? sampled.alpha : 1.0;
     return vec4(color, alpha);
 }
 

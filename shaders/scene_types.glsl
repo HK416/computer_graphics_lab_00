@@ -139,6 +139,13 @@ struct Camera {
     vec4 fogParameters;
 };
 
+// 화면 UV 와 깊이에서 월드 위치를 되돌린다. 역 뷰프로젝션 하나면 되므로 시야 공간을 따로 두지 않는다.
+// SSAO 와 반사 컴퓨트가 함께 쓴다.
+vec3 worldFromDepth(Camera camera, vec2 uv, float depth) {
+    vec4 clip = camera.inverseViewProjection * vec4(uv * 2.0 - 1.0, depth, 1.0);
+    return clip.xyz / clip.w;
+}
+
 #define LIGHT_TYPE_DIRECTIONAL 0u
 #define LIGHT_TYPE_POINT 1u
 #define LIGHT_TYPE_SPOT 2u
