@@ -1106,8 +1106,10 @@ void Renderer::buildShadowDraws(Frame& frame, const FrameBatches& batches, const
     uint32_t cameraPlaneCount = extractFrustumPlanes(cameraViewProjection, cameraPlanes, false);
     float sweep = 2.0F * sceneRadius;
 
-    const auto* source = static_cast<const VkDrawIndexedIndirectCommand*>(frame.drawBuffer.mapped);
-    auto* destination = static_cast<VkDrawIndexedIndirectCommand*>(frame.shadowDrawBuffer.mapped);
+    // 매핑된 버퍼가 아니라 CPU 사본에서 읽는다. buildDrawCommands 가 같은 프레임에 채워 둔다.
+    const VkDrawIndexedIndirectCommand* source = drawCommands.data();
+    shadowDrawData.resize(shadowDrawsTotal);
+    auto* destination = shadowDrawData.data();
     uint32_t cursor = 0;
 
     for (size_t view = 0; view < shadowViews.size(); ++view) {
@@ -1144,6 +1146,8 @@ void Renderer::buildShadowDraws(Frame& frame, const FrameBatches& batches, const
         }
     }
     shadowDrawsIssued = cursor;
+    std::copy_n(
+        shadowDrawData.data(), cursor, static_cast<VkDrawIndexedIndirectCommand*>(frame.shadowDrawBuffer.mapped));
 }
 
 void Renderer::reserveMeshletDraws(Frame& frame, uint32_t drawCount) {
@@ -2512,6 +2516,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     // 스킨 인스턴스 슬롯과 디스패치 번호. 버퍼 용량이 정해진 뒤 절대 위치를 채운다.
     std::vector<std::pair<uint32_t, uint32_t>> skinnedSlots;
 
+    uint32_t instanceZone = frameProfiler.begin("인스턴스 구성");
     // 재질 경로와 면 방향 조합마다 명령이 연속 구간을 이루도록 두 번 순회한다.
     auto bucketOf = [this, &scene](uint32_t index) {
         const asset::Material& material = geometry.material(geometry.mesh(scene.meshOf(index)).materialIndex);
@@ -2617,9 +2622,14 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         }
     }
 
-    auto* instances = static_cast<GpuInstance*>(frame.instanceBuffer.mapped);
-    auto* draws = static_cast<VkDrawIndexedIndirectCommand*>(frame.drawBuffer.mapped);
-    auto* groups = static_cast<GpuMeshletGroup*>(frame.meshletGroupBuffer.mapped);
+    instanceData.resize(scene.objects.size());
+    auto* instances = instanceData.data();
+    // 그리기 명령은 CPU 사본에 먼저 쓴다. 그림자 시점마다 이 명령을 골라 복사하는데, 매핑된 쓰기 결합
+    // 메모리를 읽으면 캐시가 없어 오브젝트 만 개에서 프레임당 100 ms 를 넘긴다.
+    drawCommands.resize(scene.objects.size());
+    auto* draws = drawCommands.data();
+    std::vector<GpuMeshletGroup> groupData(totalGroups);
+    auto* groups = groupData.data();
 
     std::array<std::array<uint32_t, 2>, ALPHA_MODE_COUNT> drawCursors{};
     std::array<std::array<uint32_t, 2>, ALPHA_MODE_COUNT> groupCursors{};
@@ -2693,6 +2703,10 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         }
     }
 
+    std::copy_n(
+        drawCommands.data(), drawCommands.size(), static_cast<VkDrawIndexedIndirectCommand*>(frame.drawBuffer.mapped));
+    std::copy_n(groupData.data(), groupData.size(), static_cast<GpuMeshletGroup*>(frame.meshletGroupBuffer.mapped));
+
     // 그리지 않은 오브젝트도 지난 변환을 갱신해 둔다. 숨겼다 다시 보인 오브젝트가 오래된 자리에서
     // 날아오는 것처럼 보이지 않게 한다.
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
@@ -2741,6 +2755,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         instances[slot].skinnedMeshletOffset = dispatch.boundsOffset;
         skinnedInstances[dispatchIndex] = SkinnedInstance{instances[slot].meshIndex, offset};
     }
+    std::copy_n(instanceData.data(), instanceData.size(), static_cast<GpuInstance*>(frame.instanceBuffer.mapped));
+    frameProfiler.end(instanceZone);
 
     auto* meshTasks = static_cast<VkDrawMeshTasksIndirectCommandEXT*>(frame.meshTaskIndirectBuffer.mapped);
     for (size_t mode = 0; mode < ALPHA_MODE_COUNT; ++mode) {
@@ -2776,7 +2792,9 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     glm::mat4 cameraViewProjection =
         glm::translate(glm::mat4{1.0F}, glm::vec3{jitterNdc, 0.0F}) * unjitteredViewProjection;
 
+    uint32_t lightZone = frameProfiler.begin("조명 구성");
     buildLights(frame, scene);
+    frameProfiler.end(lightZone);
     if (usePathTracing && rayTracer != nullptr) {
         // 경로 추적은 그림자 아틀라스를 읽지 않는다. 시점마다 캐스터를 걸러 명령을 짜는 CPU 비용을
         // 통째로 아끼고, 편집기 표시도 실제로 그리는 양과 어긋나지 않게 0 으로 둔다.
@@ -2785,7 +2803,9 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         shadowDrawsIssued = 0;
         shadowDrawsTotal = 0;
     } else {
+        uint32_t shadowDrawZone = frameProfiler.begin("그림자 드로우 구성");
         buildShadowDraws(frame, batches, cameraViewProjection);
+        frameProfiler.end(shadowDrawZone);
     }
 
     auto* camera = static_cast<GpuCamera*>(frame.cameraBuffer.mapped);

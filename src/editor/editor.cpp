@@ -287,10 +287,10 @@ void Editor::setSceneIo(std::filesystem::path root,
     sceneOpener = std::move(opener);
 }
 
-void Editor::drawHierarchyNode(scene::Scene& active, int index) {
+void Editor::drawHierarchyNode(scene::Scene& active, const std::vector<std::vector<int>>& children, int index) {
     scene::Object& object = active.objects[static_cast<size_t>(index)];
-    bool hasChildren = std::ranges::any_of(
-        active.objects, [index](const scene::Object& candidate) { return candidate.parent == index; });
+    const std::vector<int>& own = children[static_cast<size_t>(index)];
+    bool hasChildren = !own.empty();
 
     ImGui::PushID(index);
     ImGui::Checkbox("##visible", &object.visible);
@@ -329,10 +329,8 @@ void Editor::drawHierarchyNode(scene::Scene& active, int index) {
     }
 
     if (open) {
-        for (int child = 0; child < static_cast<int>(active.objects.size()); ++child) {
-            if (active.objects[static_cast<size_t>(child)].parent == index) {
-                drawHierarchyNode(active, child);
-            }
+        for (int child : own) {
+            drawHierarchyNode(active, children, child);
         }
         ImGui::TreePop();
     }
@@ -514,9 +512,17 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
     ImGui::Separator();
 
     // 여기부터는 오브젝트의 부모-자식 구조만 보여준다.
+    // 부모별 자식 목록을 한 번 만든다. 노드마다 전체를 훑으면 오브젝트 만 개에서 프레임당 수백 ms 다.
+    std::vector<std::vector<int>> children(active.objects.size());
+    for (int i = 0; i < static_cast<int>(active.objects.size()); ++i) {
+        int parent = active.objects[static_cast<size_t>(i)].parent;
+        if (parent >= 0 && parent < static_cast<int>(active.objects.size())) {
+            children[static_cast<size_t>(parent)].push_back(i);
+        }
+    }
     for (int i = 0; i < static_cast<int>(active.objects.size()); ++i) {
         if (active.objects[static_cast<size_t>(i)].parent < 0) {
-            drawHierarchyNode(active, i);
+            drawHierarchyNode(active, children, i);
         }
     }
 

@@ -600,6 +600,11 @@ private:
     glm::mat4 previousViewProjection{1.0F};
     std::vector<glm::mat4> previousWorld;
     std::vector<glm::mat4> jointMatrices;
+    // 매핑된 버퍼는 캐시가 없어 필드 단위로 흩어 쓰거나 되읽으면 오브젝트 만 개에서 프레임당 수십 ms
+    // 가 든다. CPU 사본을 채운 뒤 한 번에 복사한다. 그림자 시점별 압축도 이 사본에서 읽는다.
+    std::vector<GpuInstance> instanceData;
+    std::vector<VkDrawIndexedIndirectCommand> drawCommands;
+    std::vector<VkDrawIndexedIndirectCommand> shadowDrawData;
     uint64_t lastTopologyRevision = 0;
     uint32_t pathSampleCount = 0;
 

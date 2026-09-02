@@ -57,7 +57,8 @@ private:
     // F 키로 선택한 오브젝트를 궤도 중심으로 옮긴다.
     void focusSelected(scene::Scene& active, const gfx::GeometryStore& geometry);
     // 계층 패널의 노드 하나와 그 자식들을 그린다.
-    void drawHierarchyNode(scene::Scene& active, int index);
+    // children 은 buildHierarchy 가 프레임마다 한 번 만든 부모별 자식 목록이다. 노드마다 전체를 훑으면 O(n²)다.
+    void drawHierarchyNode(scene::Scene& active, const std::vector<std::vector<int>>& children, int index);
     void buildInspector(scene::Scene& scene, const gfx::GeometryStore& geometry);
     void buildSceneView(scene::Scene& active);
     void buildRenderSettings(scene::Scene& active, float deltaSeconds);
