@@ -40,6 +40,17 @@ struct PathTraceOptions {
     bool operator==(const PathTraceOptions&) const = default;
 };
 
+// DLSS Ray Reconstruction 이 요구하는 안내 버퍼의 bindless 스토리지 슬롯.
+// write 가 거짓이면 광선 생성 셰이더가 아무것도 쓰지 않고 나머지 값도 보지 않는다.
+struct PathGuideTargets {
+    bool write = false;
+    uint32_t diffuseAlbedo = 0;
+    uint32_t specularAlbedo = 0;
+    uint32_t normal = 0;
+    uint32_t roughness = 0;
+    uint32_t depth = 0;
+};
+
 // 스킨 인스턴스 하나가 쓸 하위 가속 구조의 재료. 변형 정점 버퍼 안의 구간과 그 메쉬 번호다.
 struct SkinnedInstance {
     uint32_t meshIndex;
@@ -90,7 +101,8 @@ public:
                uint32_t velocityImage,
                uint32_t frameIndex,
                uint32_t sampleCount,
-               const PathTraceOptions& options);
+               const PathTraceOptions& options,
+               const PathGuideTargets& guides);
 
     // 스킨이 아닌 오브젝트의 하위 가속 구조 번호.
     static constexpr uint32_t NO_SKINNED_BLAS = 0xFFFFFFFFU;

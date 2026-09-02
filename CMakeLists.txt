@@ -289,11 +289,14 @@ if(CG_LAB_DLSS_SDK)
         target_include_directories(cg_lab PRIVATE "${ngx_include}")
         target_link_libraries(cg_lab PRIVATE "${ngx_lib}")
         # 가중치를 담은 DLL. NGX 는 실행 파일 옆이나 초기화 때 넘긴 경로에서 찾는다.
-        add_custom_command(TARGET cg_lab POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${ngx_dll_dir}/nvngx_dlss.dll"
-                    "$<TARGET_FILE_DIR:cg_lab>/nvngx_dlss.dll"
-            COMMENT "nvngx_dlss.dll 복사")
+        # 초해상(dlss)과 Ray Reconstruction(dlssd)은 가중치가 따로다.
+        foreach(ngx_dll nvngx_dlss.dll nvngx_dlssd.dll)
+            add_custom_command(TARGET cg_lab POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${ngx_dll_dir}/${ngx_dll}"
+                        "$<TARGET_FILE_DIR:cg_lab>/${ngx_dll}"
+                COMMENT "${ngx_dll} 복사")
+        endforeach()
     endif()
 endif()
 

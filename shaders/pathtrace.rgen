@@ -158,6 +158,8 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed, out PrimaryHit prim
     primary.albedo = vec3(0.0);
     primary.uv = vec2(0.0);
     primary.roughness = 0.0;
+    primary.metallic = 0.0;
+    primary.ndcDepth = 0.0;
     primary.velocity = vec2(0.0);
     primary.hitDistance = -1.0;
     primary.visibility = -1.0;
@@ -191,7 +193,10 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed, out PrimaryHit prim
             primary.albedo = payload.albedo;
             primary.uv = payload.uv;
             primary.roughness = payload.roughness;
+            primary.metallic = payload.metallic;
             primary.hitDistance = payload.hitDistance;
+            vec4 clip = pathTrace.camera.item.viewProjection * vec4(payload.position, 1.0);
+            primary.ndcDepth = clip.w > 0.0 ? clip.z / clip.w : 0.0;
             primary.velocity = screenVelocity(payload.position, payload.previousPosition);
             if (pathTrace.debugMode == DEBUG_MODE_SHADOW) {
                 primary.visibility = firstLightVisibility(surface.position, surface.normal);
@@ -260,8 +265,13 @@ void main() {
     PrimaryHit primary;
 
     for (uint sampleIndex = 0; sampleIndex < samplesPerFrame; ++sampleIndex) {
-        // 픽셀 안에서 표본 위치를 흔들어 누적하면서 앤티에일리어싱이 된다.
-        vec2 jitter = vec2(randomFloat(seed), randomFloat(seed));
+        // 픽셀 안에서 표본 위치를 흔들어 누적하면서 앤티에일리어싱이 된다. RR 은 자기가 기대하는
+        // 지터 수열이 있으므로 그때는 렌더러가 넘긴 값을 쓴다. camera.jitter 는 NDC 평행이동이라
+        // 화면 크기의 절반을 곱해 픽셀 오프셋으로 되돌린다.
+        // RR 프레임은 렌더러가 지터를 투영 행렬에 이미 넣어 두었다. 여기서 또 흔들면 두 번 흔들린다.
+        vec2 jitter = (pathTrace.flags & PATH_FLAG_WRITE_GUIDES) != 0u
+                          ? vec2(0.5)
+                          : vec2(randomFloat(seed), randomFloat(seed));
         vec2 ndc = ((vec2(pixel) + jitter) / size) * 2.0 - 1.0;
 
         vec4 nearPoint = camera.inverseViewProjection * vec4(ndc, 1.0, 1.0);
@@ -289,4 +299,27 @@ void main() {
     // 돌지 않아 지난 프레임 값이 그대로 남아 있었다.
     imageStore(bindlessStorageImagesRg16[nonuniformEXT(pathTrace.velocityImage)], pixel,
                vec4(primary.velocity, 0.0, 0.0));
+
+    if ((pathTrace.flags & PATH_FLAG_WRITE_GUIDES) != 0u) {
+        // 금속은 알베도가 그대로 반사색이 되고, 유전체는 F0 0.04 다. pbr.glsl 과 같은 분해다.
+        vec3 diffuse = primary.albedo * (1.0 - primary.metallic);
+        vec3 specular = mix(vec3(0.04), primary.albedo, primary.metallic);
+        // 맞힌 것이 없으면 하늘이다. 안내 값은 비워 두고 깊이는 무한 원거리(reverse-Z 의 0)로 둔다.
+        bool hit = primary.hitDistance >= 0.0;
+        imageStore(bindlessStorageImagesRgba16[nonuniformEXT(lowSlot(pathTrace.guideAlbedoSlots))],
+                   pixel,
+                   vec4(hit ? diffuse : vec3(0.0), 1.0));
+        imageStore(bindlessStorageImagesRgba16[nonuniformEXT(highSlot(pathTrace.guideAlbedoSlots))],
+                   pixel,
+                   vec4(hit ? specular : vec3(0.0), 1.0));
+        imageStore(bindlessStorageImagesRgba16[nonuniformEXT(lowSlot(pathTrace.guideNormalRoughnessSlots))],
+                   pixel,
+                   vec4(hit ? normalize(primary.normal) : vec3(0.0), 0.0));
+        imageStore(bindlessStorageImages[nonuniformEXT(highSlot(pathTrace.guideNormalRoughnessSlots))],
+                   pixel,
+                   vec4(hit ? primary.roughness : 1.0, 0.0, 0.0, 0.0));
+        imageStore(bindlessStorageImages[nonuniformEXT(pathTrace.guideDepthSlot)],
+                   pixel,
+                   vec4(hit ? primary.ndcDepth : 0.0, 0.0, 0.0, 0.0));
+    }
 }

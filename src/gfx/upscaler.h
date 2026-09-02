@@ -21,12 +21,14 @@ enum class Upscaler : uint32_t {
     TAAU = 2,
     FSR = 3,
     DLSS = 4,
+    // 경로 추적의 1표본 결과를 디노이즈하면서 확대한다. 경로 추적에서만 쓴다.
+    DLSS_RR = 5,
 };
 
 // 시간축 업스케일러는 지터와 모션 벡터를 요구하고 톤 매핑 앞에서 돈다. 공간 업스케일은 톤 매핑
 // 뒤에서 도므로 렌더러가 두 경로를 다르게 엮는다.
 inline bool isTemporal(Upscaler kind) {
-    return kind == Upscaler::TAAU || kind == Upscaler::FSR || kind == Upscaler::DLSS;
+    return kind == Upscaler::TAAU || kind == Upscaler::FSR || kind == Upscaler::DLSS || kind == Upscaler::DLSS_RR;
 }
 
 struct UpscalerInfo {
@@ -51,6 +53,12 @@ struct UpscaleInputs {
     // 표시 해상도 결과를 쓸 rgba16f 스토리지 슬롯.
     uint32_t outputStorage = 0;
     VkDescriptorSet bindlessSet = VK_NULL_HANDLE;
+    // Ray Reconstruction 이 요구하는 안내 버퍼. 그 방식이 아니면 널이다.
+    const Image* guideDiffuseAlbedo = nullptr;
+    const Image* guideSpecularAlbedo = nullptr;
+    const Image* guideNormal = nullptr;
+    const Image* guideRoughness = nullptr;
+    const Image* guideDepth = nullptr;
     // 이번 프레임 투영에 들어간 지터. 렌더 해상도 픽셀 단위다.
     glm::vec2 jitter{0.0F};
     float deltaSeconds = 0.0F;
@@ -83,9 +91,11 @@ std::unique_ptr<TemporalUpscaler> createUpscaler(Upscaler kind, Context& context
 std::unique_ptr<TemporalUpscaler> createTaauUpscaler(Context& context, BindlessTextures& bindless);
 std::unique_ptr<TemporalUpscaler> createFsrUpscaler(Context& context, BindlessTextures& bindless);
 std::unique_ptr<TemporalUpscaler> createDlssUpscaler(Context& context, BindlessTextures& bindless);
+std::unique_ptr<TemporalUpscaler> createDlssRayReconstruction(Context& context, BindlessTextures& bindless);
 // 쓸 수 있으면 nullptr 을 돌려준다.
 const char* fsrUnavailableReason();
 const char* dlssUnavailableReason(const Context& context);
+const char* dlssRayReconstructionUnavailableReason(const Context& context);
 
 // NGX 가 요구하는 인스턴스/장치 확장. 장치를 만들기 전에 불러야 한다. NGX 는 자기 셰이더를 직접
 // 올리느라 NVX 확장 몇 개가 있어야 하고, 그건 인스턴스/장치 생성 시점에만 켤 수 있다. DLSS 가

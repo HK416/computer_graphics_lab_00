@@ -41,10 +41,15 @@ struct PathTracePushConstants {
     float radianceClamp;
     float skyIntensity;
     uint32_t debugMode;
+    // 안내 버퍼 슬롯을 둘씩 16비트로 묶는다. 이유는 pathtrace_common.glsl 쪽 주석 참조.
+    uint32_t guideAlbedoSlots;
+    uint32_t guideNormalRoughnessSlots;
+    uint32_t guideDepthSlot;
 };
 
 constexpr uint32_t PATH_FLAG_NEXT_EVENT = 1;
 constexpr uint32_t PATH_FLAG_RUSSIAN_ROULETTE = 2;
+constexpr uint32_t PATH_FLAG_WRITE_GUIDES = 4;
 
 uint64_t alignUp(uint64_t value, uint64_t alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
@@ -647,7 +652,8 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
                       uint32_t velocityImage,
                       uint32_t frameIndex,
                       uint32_t sampleCount,
-                      const PathTraceOptions& options) {
+                      const PathTraceOptions& options,
+                      const PathGuideTargets& guides) {
     PathTracePushConstants pushConstants{};
     pushConstants.vertices = geometry.vertexBuffer.address;
     pushConstants.skinnedVertices = skinnedVertexAddress;
@@ -665,10 +671,14 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
     pushConstants.maxBounces = options.maxBounces;
     pushConstants.samplesPerFrame = options.samplesPerFrame;
     pushConstants.flags = (options.nextEventEstimation ? PATH_FLAG_NEXT_EVENT : 0U) |
-                          (options.russianRoulette ? PATH_FLAG_RUSSIAN_ROULETTE : 0U);
+                          (options.russianRoulette ? PATH_FLAG_RUSSIAN_ROULETTE : 0U) |
+                          (guides.write ? PATH_FLAG_WRITE_GUIDES : 0U);
     pushConstants.radianceClamp = options.radianceClamp;
     pushConstants.skyIntensity = options.skyIntensity;
     pushConstants.debugMode = options.debugMode;
+    pushConstants.guideAlbedoSlots = (guides.diffuseAlbedo & 0xFFFFU) | (guides.specularAlbedo << 16);
+    pushConstants.guideNormalRoughnessSlots = (guides.normal & 0xFFFFU) | (guides.roughness << 16);
+    pushConstants.guideDepthSlot = guides.depth;
 
     std::array<VkDescriptorSet, 2> sets{bindless.set(), descriptorSet};
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline);

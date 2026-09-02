@@ -27,6 +27,9 @@ struct PrimaryHit {
     vec3 albedo;
     vec2 uv;
     float roughness;
+    float metallic;
+    // reverse-Z NDC 깊이. 안내 버퍼로 나간다.
+    float ndcDepth;
     // 화면 UV 단위 모션 벡터. 래스터와 같은 규약(지난 프레임 - 이번 프레임)이다.
     vec2 velocity;
     // 카메라에서의 거리. 아무것도 못 맞히면 음수.
@@ -37,6 +40,8 @@ struct PrimaryHit {
 
 #define PATH_FLAG_NEXT_EVENT 1u
 #define PATH_FLAG_RUSSIAN_ROULETTE 2u
+// DLSS Ray Reconstruction 용 안내 버퍼를 채운다. 이때는 누적하지 않고 1표본만 쓴다.
+#define PATH_FLAG_WRITE_GUIDES 4u
 
 layout(push_constant) uniform PathTracePushConstants {
     VertexBuffer vertices;
@@ -61,7 +66,20 @@ layout(push_constant) uniform PathTracePushConstants {
     float skyIntensity;
     // scene_types.glsl 의 DEBUG_MODE_*. 0 이 아니면 셰이딩 대신 중간 값을 그린다.
     uint debugMode;
+    // 안내 버퍼 슬롯. 여기까지가 124 바이트로, 규격이 보장하는 128 바이트에 거의 닿는다.
+    // 그래서 슬롯을 하나씩 두지 않고 둘씩 16비트로 묶는다. 더 늘려야 하면 버퍼 주소로 옮긴다.
+    uint guideAlbedoSlots;          // 하위 16비트 확산, 상위 16비트 반사
+    uint guideNormalRoughnessSlots; // 하위 노멀, 상위 거칠기
+    uint guideDepthSlot;
 } pathTrace;
+
+uint lowSlot(uint packed) {
+    return packed & 0xFFFFu;
+}
+
+uint highSlot(uint packed) {
+    return packed >> 16;
+}
 
 // 접선 공간의 방향을 노멀 둘레의 월드 공간으로 옮긴다.
 vec3 tangentToWorld(vec3 local, vec3 normal) {

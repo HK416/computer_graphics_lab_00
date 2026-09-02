@@ -137,6 +137,19 @@ struct RenderTargets {
     uint32_t ssaoRawStorageSlot = 0;
     uint32_t ssaoSlot = 0;
     uint32_t ssaoStorageSlot = 0;
+    // DLSS Ray Reconstruction 이 요구하는 안내 버퍼. 경로 추적이 1차 히트에서 채운다.
+    // 깊이까지 여기 두는 이유는 경로 추적이 깊이 첨부물을 쓰지 않기 때문이다.
+    Image guideDiffuseAlbedo;
+    Image guideSpecularAlbedo;
+    Image guideNormal;
+    Image guideRoughness;
+    Image guideDepth;
+    uint32_t guideDiffuseAlbedoStorageSlot = 0;
+    uint32_t guideSpecularAlbedoStorageSlot = 0;
+    uint32_t guideNormalStorageSlot = 0;
+    uint32_t guideRoughnessStorageSlot = 0;
+    uint32_t guideDepthStorageSlot = 0;
+
     // 경로 추적 누적 버퍼. 카메라가 멈춰 있는 동안 표본을 쌓는다.
     Image pathAccumulation;
     uint32_t pathAccumulationStorageSlot = 0;
@@ -322,6 +335,11 @@ private:
     // 시간축 업스케일러가 붙어 있고 마지막 크기 변경도 성공했는지. 벤더 SDK 는 컨텍스트 생성이
     // 실패할 수 있어, 그때는 지터도 끄고 공간 경로로 돌아가야 한다.
     bool temporalReady() const { return temporalUpscaler != nullptr && temporalUpscaler->ready(); }
+    // Ray Reconstruction 이 도는 프레임인지. 이때만 경로 추적이 누적하지 않고 1표본과 안내
+    // 버퍼를 내놓으며, 지터도 들어간다.
+    bool rayReconstructionActive() const {
+        return usePathTracing && rayTracer != nullptr && upscaler == Upscaler::DLSS_RR && temporalReady();
+    }
     void createMeshPipelines();
     void createPostPipelines();
     void updateRenderExtent();

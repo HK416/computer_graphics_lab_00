@@ -19,6 +19,10 @@ UpscalerInfo upscalerInfo(Upscaler kind, const Context& context) {
         const char* reason = dlssUnavailableReason(context);
         return {kind, "DLSS", reason == nullptr, reason == nullptr ? "" : reason};
     }
+    case Upscaler::DLSS_RR: {
+        const char* reason = dlssRayReconstructionUnavailableReason(context);
+        return {kind, "DLSS Ray Reconstruction", reason == nullptr, reason == nullptr ? "" : reason};
+    }
     }
     return {kind, "알 수 없음", false, "지원하지 않는 방식"};
 }
@@ -35,6 +39,9 @@ std::unique_ptr<TemporalUpscaler> createUpscaler(Upscaler kind, Context& context
     }
     if (kind == Upscaler::DLSS) {
         return createDlssUpscaler(context, bindless);
+    }
+    if (kind == Upscaler::DLSS_RR) {
+        return createDlssRayReconstruction(context, bindless);
     }
     return nullptr;
 }

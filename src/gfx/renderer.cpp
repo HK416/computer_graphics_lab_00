@@ -342,6 +342,11 @@ Renderer::~Renderer() {
     destroyImage(context, targets.ssao);
     destroyImage(context, targets.ssaoRaw);
     destroyImage(context, targets.pathAccumulation);
+    destroyImage(context, targets.guideDepth);
+    destroyImage(context, targets.guideRoughness);
+    destroyImage(context, targets.guideNormal);
+    destroyImage(context, targets.guideSpecularAlbedo);
+    destroyImage(context, targets.guideDiffuseAlbedo);
     destroyImage(context, targets.tonemapped);
     destroyImage(context, targets.upscaledColor);
     destroyImage(context, targets.present);
@@ -392,7 +397,7 @@ void Renderer::setDisplayExtent(VkExtent2D extent) {
 std::vector<UpscalerInfo> Renderer::upscalers() const {
     std::vector<UpscalerInfo> infos;
     for (Upscaler kind :
-         {Upscaler::NONE, Upscaler::SPATIAL, Upscaler::TAAU, Upscaler::FSR, Upscaler::DLSS}) {
+         {Upscaler::NONE, Upscaler::SPATIAL, Upscaler::TAAU, Upscaler::FSR, Upscaler::DLSS, Upscaler::DLSS_RR}) {
         infos.push_back(upscalerInfo(kind, context));
     }
     return infos;
@@ -449,6 +454,11 @@ uint32_t Renderer::swapchainImageCount() const {
 }
 
 void Renderer::createRenderTargets() {
+    destroyImage(context, targets.guideDepth);
+    destroyImage(context, targets.guideRoughness);
+    destroyImage(context, targets.guideNormal);
+    destroyImage(context, targets.guideSpecularAlbedo);
+    destroyImage(context, targets.guideDiffuseAlbedo);
     destroyImage(context, targets.tonemapped);
     destroyImage(context, targets.upscaledColor);
     destroyImage(context, targets.present);
@@ -514,6 +524,19 @@ void Renderer::createRenderTargets() {
     upscaledDesc.usage =
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     targets.upscaledColor = createImage(context, upscaledDesc, "시간축 업스케일 결과");
+
+    // RR 안내 버퍼는 전부 렌더 해상도이고 광선 생성 셰이더가 스토리지로 쓴다. 깊이까지 여기 두는
+    // 이유는 경로 추적이 깊이 첨부물을 쓰지 않아 읽을 깊이가 없기 때문이다.
+    ImageDesc guideDesc;
+    guideDesc.extent = extent;
+    guideDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    guideDesc.format = COLOR_FORMAT;
+    targets.guideDiffuseAlbedo = createImage(context, guideDesc, "안내: 확산 알베도");
+    targets.guideSpecularAlbedo = createImage(context, guideDesc, "안내: 반사 알베도");
+    targets.guideNormal = createImage(context, guideDesc, "안내: 노멀");
+    guideDesc.format = SSAO_FORMAT;
+    targets.guideRoughness = createImage(context, guideDesc, "안내: 거칠기");
+    targets.guideDepth = createImage(context, guideDesc, "안내: 깊이");
 
     for (VkImageView view : targets.hzbMipViews) {
         vkDestroyImageView(context.device, view, nullptr);
@@ -595,6 +618,11 @@ void Renderer::createRenderTargets() {
         targets.upscaledColorStorageSlot = bindless.addStorageImageRgba16(targets.upscaledColor.view);
         // HZB 는 컴퓨트가 쓰고 읽으므로 계속 GENERAL 레이아웃에 둔다.
         targets.hzbSampledSlot = bindless.add(targets.hzb.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        targets.guideDiffuseAlbedoStorageSlot = bindless.addStorageImageRgba16(targets.guideDiffuseAlbedo.view);
+        targets.guideSpecularAlbedoStorageSlot = bindless.addStorageImageRgba16(targets.guideSpecularAlbedo.view);
+        targets.guideNormalStorageSlot = bindless.addStorageImageRgba16(targets.guideNormal.view);
+        targets.guideRoughnessStorageSlot = bindless.addStorageImage(targets.guideRoughness.view);
+        targets.guideDepthStorageSlot = bindless.addStorageImage(targets.guideDepth.view);
         targets.pathAccumulationStorageSlot = bindless.addStorageImageRgba(targets.pathAccumulation.view);
         targets.pathAccumulationSampledSlot =
             bindless.add(targets.pathAccumulation.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
@@ -620,6 +648,11 @@ void Renderer::createRenderTargets() {
         bindless.update(targets.upscaledColorSlot, targets.upscaledColor.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
         bindless.updateStorageImageRgba16(targets.upscaledColorStorageSlot, targets.upscaledColor.view);
         bindless.update(targets.hzbSampledSlot, targets.hzb.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        bindless.updateStorageImageRgba16(targets.guideDiffuseAlbedoStorageSlot, targets.guideDiffuseAlbedo.view);
+        bindless.updateStorageImageRgba16(targets.guideSpecularAlbedoStorageSlot, targets.guideSpecularAlbedo.view);
+        bindless.updateStorageImageRgba16(targets.guideNormalStorageSlot, targets.guideNormal.view);
+        bindless.updateStorageImage(targets.guideRoughnessStorageSlot, targets.guideRoughness.view);
+        bindless.updateStorageImage(targets.guideDepthStorageSlot, targets.guideDepth.view);
         bindless.updateStorageImageRgba(targets.pathAccumulationStorageSlot, targets.pathAccumulation.view);
         bindless.update(
             targets.pathAccumulationSampledSlot, targets.pathAccumulation.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
@@ -2064,9 +2097,10 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     // w 에 비례해 밀려, 깊이와 무관하게 정확히 지터 픽셀만큼 옮겨진다.
     //
     // 경로 추적은 흔들지 않는다. 카메라가 바뀐 것으로 보여 누적을 매 프레임 버리게 된다.
+    // 다만 Ray Reconstruction 은 누적 자체를 하지 않고 지터를 요구하므로 그때는 넣는다.
     glm::vec2 jitterNdc{0.0F};
     currentJitter = glm::vec2{0.0F};
-    if (temporalReady() && !(usePathTracing && rayTracer != nullptr)) {
+    if (temporalReady() && (!(usePathTracing && rayTracer != nullptr) || rayReconstructionActive())) {
         uint32_t phases = jitterPhaseCount(currentRenderExtent.width, currentDisplayExtent.width);
         currentJitter = haltonJitter(jitterIndex % phases + 1);
         ++jitterIndex;
@@ -2421,6 +2455,33 @@ void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, 
                      0,
                      VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        // RR 은 누적된 결과가 아니라 이번 프레임 1표본을 디노이즈한다. 표본 수를 0 으로 두면
+        // 광선 생성 셰이더가 더하지 않고 덮어쓰고, 톤 매핑도 나누지 않는다.
+        bool guides = rayReconstructionActive();
+        PathGuideTargets guideTargets{};
+        guideTargets.write = guides;
+        guideTargets.diffuseAlbedo = targets.guideDiffuseAlbedoStorageSlot;
+        guideTargets.specularAlbedo = targets.guideSpecularAlbedoStorageSlot;
+        guideTargets.normal = targets.guideNormalStorageSlot;
+        guideTargets.roughness = targets.guideRoughnessStorageSlot;
+        guideTargets.depth = targets.guideDepthStorageSlot;
+        if (guides) {
+            for (const Image* image : {&targets.guideDiffuseAlbedo,
+                                       &targets.guideSpecularAlbedo,
+                                       &targets.guideNormal,
+                                       &targets.guideRoughness,
+                                       &targets.guideDepth}) {
+                imageBarrier(commandBuffer,
+                             image->handle,
+                             VK_IMAGE_ASPECT_COLOR_BIT,
+                             VK_IMAGE_LAYOUT_UNDEFINED,
+                             VK_IMAGE_LAYOUT_GENERAL,
+                             VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                             0,
+                             VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+            }
+        }
         rayTracer->trace(commandBuffer,
                          currentRenderExtent,
                          frame.cameraBuffer.address,
@@ -2430,9 +2491,28 @@ void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, 
                          targets.pathAccumulationStorageSlot,
                          targets.velocityStorageSlot,
                          static_cast<uint32_t>(frameIndex),
-                         pathSampleCount,
-                         pathTrace);
-        ++pathSampleCount;
+                         guides ? 0U : pathSampleCount,
+                         pathTrace,
+                         guideTargets);
+        if (guides) {
+            for (const Image* image : {&targets.guideDiffuseAlbedo,
+                                       &targets.guideSpecularAlbedo,
+                                       &targets.guideNormal,
+                                       &targets.guideRoughness,
+                                       &targets.guideDepth}) {
+                imageBarrier(commandBuffer,
+                             image->handle,
+                             VK_IMAGE_ASPECT_COLOR_BIT,
+                             VK_IMAGE_LAYOUT_GENERAL,
+                             VK_IMAGE_LAYOUT_GENERAL,
+                             VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                             VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            }
+        } else {
+            ++pathSampleCount;
+        }
         imageBarrier(commandBuffer,
                      targets.velocity.handle,
                      VK_IMAGE_ASPECT_COLOR_BIT,
@@ -2936,7 +3016,9 @@ void Renderer::recordCommands(Frame& frame,
                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
     // 경로 추적은 누적 버퍼가 이미 표본을 쌓고 있어 시간축 업스케일과 겹친다. 지터도 꺼져 있다.
-    bool temporalUpscale = temporalReady() && !pathTracing;
+    // Ray Reconstruction 만 예외다. 누적 대신 1표본을 받아 스스로 디노이즈한다.
+    bool rayReconstruction = rayReconstructionActive();
+    bool temporalUpscale = temporalReady() && (!pathTracing || rayReconstruction);
 
     TonemapPushConstants tonemapPushConstants{};
     tonemapPushConstants.colorTexture = pathTracing ? targets.pathAccumulationSampledSlot : targets.colorSlot;
@@ -2958,8 +3040,16 @@ void Renderer::recordCommands(Frame& frame,
                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
         UpscaleInputs inputs{};
-        inputs.color = &targets.color;
-        inputs.depth = &targets.depth;
+        // RR 은 경로 추적의 1표본 색상과 안내 버퍼를 받는다. 깊이도 경로 추적이 따로 적은 것을 쓴다.
+        inputs.color = rayReconstruction ? &targets.pathAccumulation : &targets.color;
+        inputs.depth = rayReconstruction ? &targets.guideDepth : &targets.depth;
+        if (rayReconstruction) {
+            inputs.guideDiffuseAlbedo = &targets.guideDiffuseAlbedo;
+            inputs.guideSpecularAlbedo = &targets.guideSpecularAlbedo;
+            inputs.guideNormal = &targets.guideNormal;
+            inputs.guideRoughness = &targets.guideRoughness;
+            inputs.guideDepth = &targets.guideDepth;
+        }
         inputs.velocity = &targets.velocity;
         inputs.output = &targets.upscaledColor;
         inputs.colorTexture = targets.colorSlot;

@@ -6,9 +6,14 @@
 #include <filesystem>
 #include <string>
 
+// clang-format off
+// dlssd 헤더는 helpers_vk 의 NVSDK_NGX_ENSURE_VK_IMAGEVIEW 와 GBufferSurface 를 쓰면서 스스로
+// 포함하지 않는다. 알파벳 순으로 정렬하면 앞에 놓여 컴파일이 깨지므로 순서를 고정한다.
 #include <nvsdk_ngx_defs.h>
-#include <nvsdk_ngx_helpers_vk.h>
 #include <nvsdk_ngx_vk.h>
+#include <nvsdk_ngx_helpers_vk.h>
+#include <nvsdk_ngx_helpers_dlssd_vk.h>
+// clang-format on
 
 #include <spdlog/spdlog.h>
 
@@ -26,6 +31,7 @@ constexpr const char* NGX_PROJECT_ID = "a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
 struct NgxRuntime {
     bool initialized = false;
     bool superSamplingAvailable = false;
+    bool rayReconstructionAvailable = false;
     NVSDK_NGX_Parameter* capabilities = nullptr;
     VkDevice device = VK_NULL_HANDLE;
     std::string reason = "초기화하지 않음";
@@ -68,6 +74,14 @@ struct NgxRuntime {
         }
         superSamplingAvailable = true;
         reason.clear();
+
+        // Ray Reconstruction 은 별개 기능이라 따로 묻는다. 초해상만 되는 드라이버도 있다.
+        int denoisingAvailable = 0;
+        capabilities->Get(NVSDK_NGX_Parameter_SuperSamplingDenoising_Available, &denoisingAvailable);
+        rayReconstructionAvailable = denoisingAvailable != 0;
+        if (!rayReconstructionAvailable) {
+            spdlog::info("DLSS Ray Reconstruction 은 이 장치/드라이버에서 쓸 수 없다");
+        }
     }
 
     // 장치가 살아 있을 때 명시적으로 부른다. 정적 소멸자는 장치가 없어진 뒤에 돌아 쓸 수 없다.
@@ -81,6 +95,7 @@ struct NgxRuntime {
             initialized = false;
         }
         superSamplingAvailable = false;
+        rayReconstructionAvailable = false;
         reason = "종료됨";
     }
 };
@@ -222,6 +237,141 @@ private:
     bool evaluateFailed = false;
 };
 
+// Ray Reconstruction. 초해상과 달리 경로 추적의 1표본 결과를 디노이즈하면서 확대하므로 색상
+// 말고도 알베도, 노멀, 거칠기, 깊이를 함께 받는다.
+class DlssRayReconstruction final : public TemporalUpscaler {
+public:
+    explicit DlssRayReconstruction(Context& context) : context(context) {}
+
+    ~DlssRayReconstruction() override { releaseFeature(); }
+
+    void resize(VkExtent2D render, VkExtent2D display) override {
+        releaseFeature();
+        renderExtent = render;
+        displayExtent = display;
+        needsCreate = true;
+    }
+
+    void evaluate(VkCommandBuffer commandBuffer, const UpscaleInputs& inputs) override {
+        // 안내 버퍼가 하나라도 없으면 평가할 수 없다. 경로 추적이 아닌 프레임이 그렇다.
+        if (inputs.guideDiffuseAlbedo == nullptr || inputs.guideSpecularAlbedo == nullptr ||
+            inputs.guideNormal == nullptr || inputs.guideRoughness == nullptr || inputs.guideDepth == nullptr) {
+            return;
+        }
+        if (needsCreate && !createFeature(commandBuffer)) {
+            return;
+        }
+        if (handle == nullptr) {
+            return;
+        }
+
+        NVSDK_NGX_Resource_VK color = makeResource(*inputs.color, renderExtent, false);
+        NVSDK_NGX_Resource_VK depth = makeResource(*inputs.guideDepth, renderExtent, false);
+        NVSDK_NGX_Resource_VK velocity = makeResource(*inputs.velocity, renderExtent, false);
+        NVSDK_NGX_Resource_VK diffuse = makeResource(*inputs.guideDiffuseAlbedo, renderExtent, false);
+        NVSDK_NGX_Resource_VK specular = makeResource(*inputs.guideSpecularAlbedo, renderExtent, false);
+        NVSDK_NGX_Resource_VK normal = makeResource(*inputs.guideNormal, renderExtent, false);
+        NVSDK_NGX_Resource_VK roughness = makeResource(*inputs.guideRoughness, renderExtent, false);
+        NVSDK_NGX_Resource_VK output = makeResource(*inputs.output, displayExtent, true);
+
+        NVSDK_NGX_VK_DLSSD_Eval_Params params{};
+        params.pInColor = &color;
+        params.pInOutput = &output;
+        params.pInDepth = &depth;
+        params.pInMotionVectors = &velocity;
+        params.pInDiffuseAlbedo = &diffuse;
+        params.pInSpecularAlbedo = &specular;
+        params.pInNormals = &normal;
+        params.pInRoughness = &roughness;
+        params.InJitterOffsetX = inputs.jitter.x;
+        params.InJitterOffsetY = inputs.jitter.y;
+        params.InRenderSubrectDimensions = {renderExtent.width, renderExtent.height};
+        params.InReset = inputs.reset ? 1 : 0;
+        // 모션 벡터를 화면 UV 로 담았으므로 렌더 픽셀 단위로 되돌린다. 초해상 쪽과 같은 규약이다.
+        params.InMVScaleX = static_cast<float>(renderExtent.width);
+        params.InMVScaleY = static_cast<float>(renderExtent.height);
+        params.InPreExposure = 1.0F;
+
+        NVSDK_NGX_Result result =
+            NGX_VULKAN_EVALUATE_DLSSD_EXT(commandBuffer, handle, ngxRuntime().capabilities, &params);
+        if (NVSDK_NGX_FAILED(result) && !evaluateFailed) {
+            spdlog::error("DLSS Ray Reconstruction 평가 실패 (0x{:08X})", static_cast<uint32_t>(result));
+            evaluateFailed = true;
+        }
+    }
+
+    bool ready() const override { return handle != nullptr || needsCreate; }
+
+private:
+    bool createFeature(VkCommandBuffer commandBuffer) {
+        needsCreate = false;
+        NVSDK_NGX_DLSSD_Create_Params create{};
+        create.InDenoiseMode = NVSDK_NGX_DLSS_Denoise_Mode_DLUnified;
+        // 거칠기를 노멀의 w 가 아니라 따로 준다.
+        create.InRoughnessMode = NVSDK_NGX_DLSS_Roughness_Mode_Unpacked;
+        // 광선 생성 셰이더가 투영 깊이(clip.z / clip.w)를 그대로 적으므로 하드웨어 깊이와 같다.
+        create.InUseHWDepth = NVSDK_NGX_DLSS_Depth_Type_HW;
+        create.InWidth = renderExtent.width;
+        create.InHeight = renderExtent.height;
+        create.InTargetWidth = displayExtent.width;
+        create.InTargetHeight = displayExtent.height;
+        create.InPerfQualityValue = qualityForRatio();
+        create.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+                                      NVSDK_NGX_DLSS_Feature_Flags_DepthInverted |
+                                      NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
+
+        NVSDK_NGX_Result result = NGX_VULKAN_CREATE_DLSSD_EXT1(
+            context.device, commandBuffer, 1, 1, &handle, ngxRuntime().capabilities, &create);
+        if (NVSDK_NGX_FAILED(result)) {
+            spdlog::error("DLSS Ray Reconstruction 기능 생성 실패 (0x{:08X})", static_cast<uint32_t>(result));
+            handle = nullptr;
+            return false;
+        }
+        spdlog::info("DLSS Ray Reconstruction 준비 완료: 렌더 {}x{} -> 표시 {}x{}",
+                     renderExtent.width,
+                     renderExtent.height,
+                     displayExtent.width,
+                     displayExtent.height);
+        return true;
+    }
+
+    // 렌더 배율에 가장 가까운 사전 설정. 초해상 쪽과 같은 기준이다.
+    NVSDK_NGX_PerfQuality_Value qualityForRatio() const {
+        float ratio = displayExtent.height > 0
+                          ? static_cast<float>(renderExtent.height) / static_cast<float>(displayExtent.height)
+                          : 1.0F;
+        if (ratio >= 0.99F) {
+            return NVSDK_NGX_PerfQuality_Value_DLAA;
+        }
+        if (ratio >= 0.65F) {
+            return NVSDK_NGX_PerfQuality_Value_MaxQuality;
+        }
+        if (ratio >= 0.55F) {
+            return NVSDK_NGX_PerfQuality_Value_Balanced;
+        }
+        if (ratio >= 0.45F) {
+            return NVSDK_NGX_PerfQuality_Value_MaxPerf;
+        }
+        return NVSDK_NGX_PerfQuality_Value_UltraPerformance;
+    }
+
+    void releaseFeature() {
+        if (handle != nullptr) {
+            NVSDK_NGX_VULKAN_ReleaseFeature(handle);
+            handle = nullptr;
+        }
+        needsCreate = false;
+        evaluateFailed = false;
+    }
+
+    Context& context;
+    NVSDK_NGX_Handle* handle = nullptr;
+    VkExtent2D renderExtent{};
+    VkExtent2D displayExtent{};
+    bool needsCreate = false;
+    bool evaluateFailed = false;
+};
+
 } // namespace
 
 void dlssRequiredExtensions(std::vector<const char*>& instanceExtensions,
@@ -257,6 +407,27 @@ std::unique_ptr<TemporalUpscaler> createDlssUpscaler(Context& context, BindlessT
     return std::make_unique<DlssUpscaler>(context);
 }
 
+const char* dlssRayReconstructionUnavailableReason(const Context& context) {
+    if (context.properties.vendorID != 0x10DE) {
+        return "NVIDIA 장치 아님";
+    }
+    NgxRuntime& runtime = ngxRuntime();
+    if (!runtime.superSamplingAvailable) {
+        static std::string reason;
+        reason = runtime.reason;
+        return reason.c_str();
+    }
+    return runtime.rayReconstructionAvailable ? nullptr : "이 장치/드라이버에서 Ray Reconstruction 미지원";
+}
+
+std::unique_ptr<TemporalUpscaler> createDlssRayReconstruction(Context& context, BindlessTextures&) {
+    ngxRuntime().start(context);
+    if (!ngxRuntime().rayReconstructionAvailable) {
+        return nullptr;
+    }
+    return std::make_unique<DlssRayReconstruction>(context);
+}
+
 void startDlssRuntime(Context& context) {
     if (context.properties.vendorID == 0x10DE) {
         ngxRuntime().start(context);
@@ -282,6 +453,14 @@ const char* dlssUnavailableReason(const Context& context) {
 }
 
 std::unique_ptr<TemporalUpscaler> createDlssUpscaler(Context&, BindlessTextures&) {
+    return nullptr;
+}
+
+const char* dlssRayReconstructionUnavailableReason(const Context& context) {
+    return context.properties.vendorID == 0x10DE ? "NGX SDK 미포함" : "NVIDIA 장치 아님";
+}
+
+std::unique_ptr<TemporalUpscaler> createDlssRayReconstruction(Context&, BindlessTextures&) {
     return nullptr;
 }
 
