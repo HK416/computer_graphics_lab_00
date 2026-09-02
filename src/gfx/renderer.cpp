@@ -3789,6 +3789,17 @@ void Renderer::recordCommands(Frame& frame,
             translucentPass.pColorAttachments = oitAttachments.data();
             translucentPass.pDepthAttachment = &readOnlyDepth;
 
+            // 하늘 패스가 후처리 배치로 집합 0 을 다시 묶었다. 장면 배치와 푸시 상수를 되돌린다.
+            vkCmdBindDescriptorSets(
+                commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, sceneLayout, 0, 1, &bindlessSet, 0, nullptr);
+            if (rayQueryPass) {
+                VkDescriptorSet accelerationSet = rayTracer->accelerationSet();
+                vkCmdBindDescriptorSets(
+                    commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, sceneLayout, 1, 1, &accelerationSet, 0, nullptr);
+            }
+            vkCmdPushConstants(
+                commandBuffer, sceneLayout, scenePushStages, 0, sizeof(scenePushConstants), &scenePushConstants);
+
             vkCmdBeginRendering(commandBuffer, &translucentPass);
             setFullViewport(commandBuffer, currentRenderExtent);
             recordGeometryPass(commandBuffer, batches, true, CULL_PHASE_NONE);
