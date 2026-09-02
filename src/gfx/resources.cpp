@@ -46,8 +46,12 @@ void setDebugName(Context& context, uint64_t handle, VkObjectType type, const ch
 
 } // namespace
 
-Buffer createBuffer(
-    Context& context, VkDeviceSize size, VkBufferUsageFlags usage, MemoryLocation location, const char* debugName) {
+Buffer createBuffer(Context& context,
+                    VkDeviceSize size,
+                    VkBufferUsageFlags usage,
+                    MemoryLocation location,
+                    const char* debugName,
+                    VkDeviceSize minAlignment) {
     if (size == 0) {
         core::fatal("크기가 0 인 버퍼를 만들 수 없습니다: {}", debugName != nullptr ? debugName : "이름 없음");
     }
@@ -76,8 +80,18 @@ Buffer createBuffer(
     Buffer buffer;
     buffer.size = size;
     VmaAllocationInfo allocationResult{};
-    VK_CHECK(vmaCreateBuffer(
-        context.allocator, &bufferInfo, &allocationInfo, &buffer.handle, &buffer.allocation, &allocationResult));
+    if (minAlignment > 0) {
+        VK_CHECK(vmaCreateBufferWithAlignment(context.allocator,
+                                              &bufferInfo,
+                                              &allocationInfo,
+                                              minAlignment,
+                                              &buffer.handle,
+                                              &buffer.allocation,
+                                              &allocationResult));
+    } else {
+        VK_CHECK(vmaCreateBuffer(
+            context.allocator, &bufferInfo, &allocationInfo, &buffer.handle, &buffer.allocation, &allocationResult));
+    }
     buffer.mapped = allocationResult.pMappedData;
 
     VkBufferDeviceAddressInfo addressInfo{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};

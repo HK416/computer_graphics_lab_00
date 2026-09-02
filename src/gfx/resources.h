@@ -36,8 +36,14 @@ enum class MemoryLocation {
     HOST_READ,  // GPU 결과를 CPU 가 읽어가는 리드백 버퍼.
 };
 
-Buffer createBuffer(
-    Context& context, VkDeviceSize size, VkBufferUsageFlags usage, MemoryLocation location, const char* debugName);
+// minAlignment 가 0 이 아니면 그 배수 주소로 할당한다. 가속 구조 스크래치처럼 장치가 정렬을
+// 요구하는 버퍼에 쓴다.
+Buffer createBuffer(Context& context,
+                    VkDeviceSize size,
+                    VkBufferUsageFlags usage,
+                    MemoryLocation location,
+                    const char* debugName,
+                    VkDeviceSize minAlignment = 0);
 void destroyBuffer(Context& context, Buffer& buffer);
 
 struct ImageDesc {

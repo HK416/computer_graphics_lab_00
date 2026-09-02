@@ -142,7 +142,14 @@ void RayTracer::reserveScratch(Buffer& buffer, VkDeviceSize size, const char* de
         return;
     }
     destroyBuffer(context, buffer);
-    buffer = createBuffer(context, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, MemoryLocation::DEVICE, debugName);
+    // 구축 스크래치는 장치가 정렬을 요구한다. SBT 정렬(shaderGroupBaseAlignment)은 지키면서 이건
+    // 빠져 있었다. VMA 기본 정렬이 우연히 커서 통과하던 것에 기대지 않는다.
+    buffer = createBuffer(context,
+                          size,
+                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                          MemoryLocation::DEVICE,
+                          debugName,
+                          context.accelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment);
 }
 
 void RayTracer::buildBottomLevel() {
@@ -521,6 +528,13 @@ void RayTracer::createPipeline() {
     pushConstantRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
                                    VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
     pushConstantRange.size = sizeof(PathTracePushConstants);
+    // bindless.cpp 와 texture.cpp 처럼 장치 한도와 대조한다. 규격 보장 최소치는 128 바이트라
+    // 여유가 넉넉하지 않고, 이 구조체는 앞으로 더 커진다.
+    if (pushConstantRange.size > context.properties.limits.maxPushConstantsSize) {
+        core::fatal("경로 추적 푸시 상수가 장치 한도를 넘습니다: {} > {} 바이트",
+                    pushConstantRange.size,
+                    context.properties.limits.maxPushConstantsSize);
+    }
 
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
