@@ -84,7 +84,6 @@ constexpr const char* WINDOW_HIERARCHY = "계층";
 constexpr const char* WINDOW_INSPECTOR = "인스펙터";
 constexpr const char* WINDOW_SCENE = "장면";
 constexpr const char* WINDOW_CONSOLE = "콘솔";
-constexpr const char* WINDOW_TARGETS = "렌더 타겟";
 constexpr const char* WINDOW_SETTINGS = "렌더 설정";
 // 계층 패널에서 오브젝트를 끌 때 쓰는 페이로드 이름.
 constexpr const char* HIERARCHY_PAYLOAD = "계층 오브젝트";
@@ -258,7 +257,6 @@ void Editor::buildDockspace() {
         ImGui::DockBuilderDockWindow(WINDOW_INSPECTOR, right);
         ImGui::DockBuilderDockWindow(WINDOW_SETTINGS, right);
         ImGui::DockBuilderDockWindow(WINDOW_CONSOLE, bottom);
-        ImGui::DockBuilderDockWindow(WINDOW_TARGETS, bottom);
         ImGui::DockBuilderDockWindow(WINDOW_SCENE, center);
         ImGui::DockBuilderFinish(dockspaceId);
     }
@@ -669,17 +667,47 @@ void Editor::buildSceneView(scene::Scene& active) {
         viewportExtent = {static_cast<uint32_t>(available.x * scale.x), static_cast<uint32_t>(available.y * scale.y)};
     }
 
+    // 툴바에서 고른 렌더 타깃을 장면 자리에 보여 준다. 기본은 표시 이미지고, 다른 대상은 자기 비율로
+    // 가운데에 맞춰 넣는다. 기즈모와 클릭 선택은 표시 이미지일 때만 받는다.
+    std::vector<gfx::Renderer::TargetView> targets = renderer.targetViews();
+    int targetCount = static_cast<int>(targets.size());
+    int presentIndex = 0;
+    for (int i = 0; i < targetCount; ++i) {
+        if (targets[static_cast<size_t>(i)].views[0] == renderer.presentView()) {
+            presentIndex = i;
+        }
+    }
+    if (selectedTarget < 0 || selectedTarget >= targetCount) {
+        selectedTarget = presentIndex;
+    }
+    const gfx::Renderer::TargetView& target = targets[static_cast<size_t>(selectedTarget)];
+    bool presentView = selectedTarget == presentIndex;
+    int sliceCount = static_cast<int>(target.views.size());
+    selectedSlice = std::clamp(selectedSlice, 0, sliceCount - 1);
+
+    ImVec2 imageArea = available;
+    ImVec2 imageOrigin = ImGui::GetCursorPos();
+    if (!presentView) {
+        float aspect = static_cast<float>(target.extent.width) / static_cast<float>(std::max(target.extent.height, 1U));
+        float height = std::min(available.y, available.x / aspect);
+        imageArea = ImVec2{height * aspect, height};
+        ImGui::SetCursorPos(ImVec2{imageOrigin.x + (available.x - imageArea.x) * 0.5F,
+                                   imageOrigin.y + (available.y - imageArea.y) * 0.5F});
+    }
     ImGui::Image(ImTextureRef{static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
-                     textureFor(renderer.presentView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)))},
-                 available);
+                     textureFor(target.views[static_cast<size_t>(selectedSlice)], target.layout)))},
+                 imageArea);
     sceneHovered = ImGui::IsItemHovered();
-    bool imageClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+    bool imageClicked = presentView && ImGui::IsItemClicked(ImGuiMouseButton_Left);
 
     ImVec2 imagePosition = ImGui::GetItemRectMin();
     ImVec2 imageSize = ImGui::GetItemRectSize();
+    // 툴바는 대상 크기와 무관하게 장면 창 왼쪽 위에 둔다.
+    ImVec2 toolbarPosition = ImVec2{ImGui::GetWindowPos().x + imageOrigin.x + 8.0F,
+                                    ImGui::GetWindowPos().y + imageOrigin.y - ImGui::GetScrollY() + 8.0F};
 
     gizmoUsing = false;
-    bool anySelected = hasSelection();
+    bool anySelected = hasSelection() && presentView;
     if (anySelected && imageSize.x > 1.0F && imageSize.y > 1.0F) {
         // 텍스트 입력 중에는 W/E/R 이 글자다.
         if (!active.camera.isLooking() && !ImGui::GetIO().WantTextInput) {
@@ -771,9 +799,27 @@ void Editor::buildSceneView(scene::Scene& active) {
         }
     }
 
-    // 조작 도구 선택은 장면 뷰 위에 겹쳐 둔다.
-    ImGui::SetCursorScreenPos(ImVec2{imagePosition.x + 8.0F, imagePosition.y + 8.0F});
+    // 조작 도구 선택은 장면 뷰 위에 겹쳐 둔다. 맨 앞에서 무엇을 볼지 고른다.
+    ImGui::SetCursorScreenPos(toolbarPosition);
     ImGui::BeginGroup();
+    ImGui::SetNextItemWidth(160.0F);
+    if (ImGui::BeginCombo("##target", target.name)) {
+        for (int i = 0; i < targetCount; ++i) {
+            if (ImGui::Selectable(targets[static_cast<size_t>(i)].name, selectedTarget == i)) {
+                selectedTarget = i;
+                selectedSlice = 0;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (sliceCount > 1) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120.0F);
+        ImGui::SliderInt(target.sliceLabel, &selectedSlice, 0, sliceCount - 1);
+    }
+    ImGui::SameLine();
+    ImGui::TextUnformatted("|");
+    ImGui::SameLine();
     if (ImGui::RadioButton("이동", gizmoOperation == ImGuizmo::TRANSLATE)) {
         gizmoOperation = ImGuizmo::TRANSLATE;
     }
@@ -1279,37 +1325,6 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     ImGui::End();
 }
 
-void Editor::buildRenderTargets() {
-    if (!ImGui::Begin(WINDOW_TARGETS)) {
-        ImGui::End();
-        return;
-    }
-
-    std::vector<gfx::Renderer::TargetView> views = renderer.targetViews();
-    selectedTarget = std::clamp(selectedTarget, 0, static_cast<int>(views.size()) - 1);
-
-    for (int i = 0; i < static_cast<int>(views.size()); ++i) {
-        if (i > 0) {
-            ImGui::SameLine();
-        }
-        if (ImGui::RadioButton(views[static_cast<size_t>(i)].name, selectedTarget == i)) {
-            selectedTarget = i;
-        }
-    }
-
-    ImVec2 available = ImGui::GetContentRegionAvail();
-    if (available.y > 8.0F && !views.empty()) {
-        VkExtent2D extent = renderer.renderExtent();
-        float aspect = static_cast<float>(extent.width) / static_cast<float>(extent.height);
-        float height = std::min(available.y - 4.0F, available.x / aspect);
-        ImGui::Image(
-            ImTextureRef{static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(textureFor(
-                views[static_cast<size_t>(selectedTarget)].view, views[static_cast<size_t>(selectedTarget)].layout)))},
-            ImVec2{height * aspect, height});
-    }
-    ImGui::End();
-}
-
 void Editor::buildConsole() {
     if (!ImGui::Begin(WINDOW_CONSOLE)) {
         ImGui::End();
@@ -1366,7 +1381,6 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
     buildInspector(scenes.active(), geometry);
     buildSceneView(scenes.active());
     buildRenderSettings(scenes.active(), deltaSeconds);
-    buildRenderTargets();
     buildConsole();
     focusSelected(scenes.active(), geometry);
 

@@ -235,11 +235,14 @@ public:
     // 스왑체인에 UI 를 기록할 콜백. 편집기가 채운다.
     void setUiCallback(std::function<void(VkCommandBuffer)> callback) { uiCallback = std::move(callback); }
 
-    // 디버그 뷰어가 보여줄 오프스크린 대상.
+    // 디버그 뷰어가 보여줄 오프스크린 대상. 층이나 밉이 여럿이면 views 에 하나씩 담고 sliceLabel 로
+    // 무엇을 고르는지 알려 준다. ImGui 는 2D 뷰만 그릴 수 있어 배열 뷰를 통째로 넘기지 않는다.
     struct TargetView {
         const char* name;
-        VkImageView view;
+        std::vector<VkImageView> views;
         VkImageLayout layout;
+        VkExtent2D extent;
+        const char* sliceLabel = nullptr;
     };
     std::vector<TargetView> targetViews() const;
     VkImageView presentView() const { return targets.present.view; }

@@ -567,20 +567,25 @@ void Renderer::updateUpscaler() {
 
 std::vector<Renderer::TargetView> Renderer::targetViews() const {
     constexpr VkImageLayout READ_ONLY = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    std::vector<TargetView> views{{"색상 (HDR)", targets.color.view, READ_ONLY},
-                                  {"그림자 아틀라스", targets.shadowAtlas.view, READ_ONLY},
-                                  {"SSAO", targets.ssao.view, VK_IMAGE_LAYOUT_GENERAL},
-                                  {"톤 매핑", targets.tonemapped.view, READ_ONLY},
-                                  {"표시 (업스케일)", targets.present.view, READ_ONLY},
-                                  {"깊이", targets.depth.view, READ_ONLY},
-                                  {"모션 벡터", targets.velocity.view, READ_ONLY},
-                                  {"시간축 업스케일 (HDR)", targets.upscaledColor.view, VK_IMAGE_LAYOUT_GENERAL},
-                                  // HZB 는 컴퓨트가 쓰고 읽으므로 계속 GENERAL 이다.
-                                  {"HZB", targets.hzb.view, VK_IMAGE_LAYOUT_GENERAL},
-                                  {"Bloom", targets.bloom.view, VK_IMAGE_LAYOUT_GENERAL}};
+    constexpr VkImageLayout GENERAL = VK_IMAGE_LAYOUT_GENERAL;
+    VkExtent2D render = currentRenderExtent;
+    std::vector<TargetView> views{
+        {"색상 (HDR)", {targets.color.view}, READ_ONLY, render},
+        {"그림자 아틀라스", targets.shadowLayerViews, READ_ONLY, {SHADOW_MAP_SIZE, SHADOW_MAP_SIZE}, "층"},
+        {"SSAO", {targets.ssao.view}, GENERAL, targets.ssaoExtent},
+        {"톤 매핑", {targets.tonemapped.view}, READ_ONLY, render},
+        {"표시 (업스케일)", {targets.present.view}, READ_ONLY, currentDisplayExtent},
+        {"깊이", {targets.depth.view}, READ_ONLY, render},
+        {"모션 벡터", {targets.velocity.view}, READ_ONLY, render},
+        {"시간축 업스케일 (HDR)", {targets.upscaledColor.view}, GENERAL, currentDisplayExtent},
+        // HZB 와 Bloom 은 컴퓨트가 쓰고 읽으므로 계속 GENERAL 이고, 밉을 골라 본다.
+        {"HZB", targets.hzbMipViews, GENERAL, targets.hzbExtent, "밉"},
+        {"Bloom", targets.bloomMipViews, GENERAL, targets.bloomExtent, "밉"},
+        {"반사 원본", {targets.reflectionRaw.view}, GENERAL, render},
+    };
     if (oitTargetsValid) {
-        views.push_back({"OIT 누적", targets.oitAccumulation.view, READ_ONLY});
-        views.push_back({"OIT 잔여 투과율", targets.oitRevealage.view, READ_ONLY});
+        views.push_back({"OIT 누적", {targets.oitAccumulation.view}, READ_ONLY, render});
+        views.push_back({"OIT 잔여 투과율", {targets.oitRevealage.view}, READ_ONLY, render});
     }
     return views;
 }

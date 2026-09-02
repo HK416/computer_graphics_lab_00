@@ -61,7 +61,6 @@ private:
     void buildInspector(scene::Scene& scene, const gfx::GeometryStore& geometry);
     void buildSceneView(scene::Scene& active);
     void buildRenderSettings(scene::Scene& active, float deltaSeconds);
-    void buildRenderTargets();
     void buildConsole();
     // 장면이 바뀌었으면 되돌리기 기록에 담고, Ctrl+Z / Ctrl+Y 를 처리한다.
     void updateHistory(scene::Scene& active, size_t sceneIndex);
@@ -117,7 +116,9 @@ private:
     std::filesystem::path pendingSceneSave;
     std::filesystem::path pendingSceneOpen;
     std::array<char, 256> sceneNameInput{};
-    int selectedTarget = 0;
+    // 장면 뷰에 보여줄 렌더 타깃. 음수면 표시 이미지(기본)다. 층이나 밉이 있는 대상은 slice 로 고른다.
+    int selectedTarget = -1;
+    int selectedSlice = 0;
     // ImGuizmo::OPERATION 과 MODE 값. 헤더에서 ImGuizmo 를 끌어오지 않으려고 정수로 둔다.
     int gizmoOperation = 7;
     int gizmoMode = 1;
