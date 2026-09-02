@@ -4,6 +4,10 @@
 layout(location = 0) out vec4 outColor;
 // 화면 UV 단위 모션 벡터. 업스케일러가 해상도에 맞춰 다시 잰다.
 layout(location = 1) out vec2 outVelocity;
+// xyz 셰이딩 노멀, w 거칠기. 광선 반사 컴퓨트가 반사 방향을 정하는 데 쓴다.
+layout(location = 2) out vec4 outNormalRoughness;
+// 광선 반사에 곱할 스페큘러 가중(F·A + B). 반사 대상이 아니면 0.
+layout(location = 3) out vec4 outReflectionWeight;
 
 // 디버그 모드는 셰이딩 대신 중간 값을 그대로 보여준다.
 vec4 debugColor() {
@@ -63,9 +67,11 @@ vec4 debugColor() {
 
 void main() {
     outVelocity = motionVector();
-    if (pushConstants.debugMode != DEBUG_MODE_SHADED) {
-        outColor = debugColor();
-        return;
-    }
-    outColor = shadeSurface();
+    // 디버그 뷰에서도 셰이딩을 돌려 안내 버퍼와 컷오프 discard 가 같게 나오도록 한다.
+    vec4 normalRoughness;
+    vec3 reflectionWeight;
+    vec4 shaded = shadeSurface(normalRoughness, reflectionWeight);
+    outNormalRoughness = normalRoughness;
+    outReflectionWeight = vec4(reflectionWeight, 1.0);
+    outColor = pushConstants.debugMode != DEBUG_MODE_SHADED ? debugColor() : shaded;
 }

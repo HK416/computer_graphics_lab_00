@@ -631,9 +631,10 @@ void Renderer::createRenderTargets() {
 
     // RR 안내 버퍼는 전부 렌더 해상도이고 광선 생성 셰이더가 스토리지로 쓴다. 깊이까지 여기 두는
     // 이유는 경로 추적이 깊이 첨부물을 쓰지 않아 읽을 깊이가 없기 때문이다.
+    // 노멀과 반사 알베도는 래스터 불투명 패스도 첨부물로 채운다. 광선 반사 컴퓨트가 읽는다.
     ImageDesc guideDesc;
     guideDesc.extent = extent;
-    guideDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    guideDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     guideDesc.format = COLOR_FORMAT;
     targets.guideDiffuseAlbedo = createImage(context, guideDesc, "안내: 확산 알베도");
     targets.guideSpecularAlbedo = createImage(context, guideDesc, "안내: 반사 알베도");
@@ -755,6 +756,8 @@ void Renderer::createRenderTargets() {
         targets.guideDiffuseAlbedoStorageSlot = bindless.addStorageImageRgba16(targets.guideDiffuseAlbedo.view);
         targets.guideSpecularAlbedoStorageSlot = bindless.addStorageImageRgba16(targets.guideSpecularAlbedo.view);
         targets.guideNormalStorageSlot = bindless.addStorageImageRgba16(targets.guideNormal.view);
+        targets.guideNormalSlot = bindless.add(targets.guideNormal.view, postSampler);
+        targets.guideSpecularAlbedoSlot = bindless.add(targets.guideSpecularAlbedo.view, postSampler);
         targets.guideRoughnessStorageSlot = bindless.addStorageImage(targets.guideRoughness.view);
         targets.guideDepthStorageSlot = bindless.addStorageImage(targets.guideDepth.view);
         targets.pathAccumulationStorageSlot = bindless.addStorageImageRgba(targets.pathAccumulation.view);
@@ -792,6 +795,8 @@ void Renderer::createRenderTargets() {
         bindless.updateStorageImageRgba16(targets.guideDiffuseAlbedoStorageSlot, targets.guideDiffuseAlbedo.view);
         bindless.updateStorageImageRgba16(targets.guideSpecularAlbedoStorageSlot, targets.guideSpecularAlbedo.view);
         bindless.updateStorageImageRgba16(targets.guideNormalStorageSlot, targets.guideNormal.view);
+        bindless.update(targets.guideNormalSlot, targets.guideNormal.view, postSampler);
+        bindless.update(targets.guideSpecularAlbedoSlot, targets.guideSpecularAlbedo.view, postSampler);
         bindless.updateStorageImage(targets.guideRoughnessStorageSlot, targets.guideRoughness.view);
         bindless.updateStorageImage(targets.guideDepthStorageSlot, targets.guideDepth.view);
         bindless.updateStorageImageRgba(targets.pathAccumulationStorageSlot, targets.pathAccumulation.view);
@@ -1702,6 +1707,11 @@ void Renderer::destroyPresentSemaphores() {
 //
 // ponytail: 광선 질의는 있는데 경로 추적 파이프라인이 없는 장치도 규격상 가능하다. 그런 장치까지
 // 받으려면 가속 구조 관리만 RayTracer 에서 떼어내야 한다.
+bool Renderer::reflectionsActive() const {
+    return useReflections && rayQueryShadowsAvailable() && useIbl && environment != nullptr && environment->ready() &&
+           !(usePathTracing && rayTracer != nullptr);
+}
+
 bool Renderer::rayQueryShadowsAvailable() const {
     return context.caps.rayQuery && rayTracer != nullptr;
 }
@@ -1780,13 +1790,24 @@ void Renderer::createMeshPipelines() {
     constexpr VkColorComponentFlags ALL_CHANNELS =
         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     constexpr VkColorComponentFlags VELOCITY_CHANNELS = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT;
-    std::array<VkPipelineColorBlendAttachmentState, 2> blendAttachments{};
-    blendAttachments[0].colorWriteMask = ALL_CHANNELS;
-    blendAttachments[1].colorWriteMask = VELOCITY_CHANNELS;
+    // 불투명 경로는 색상, 모션 벡터, 노멀·거칠기, 반사 가중치 넷이고 반투명 경로는 누적과 잔여
+    // 투과율 둘이다.
+    constexpr uint32_t OPAQUE_ATTACHMENTS = 4;
+    constexpr uint32_t TRANSLUCENT_ATTACHMENTS = 2;
+    std::array<VkPipelineColorBlendAttachmentState, OPAQUE_ATTACHMENTS> blendAttachments{};
+    std::array<VkFormat, OPAQUE_ATTACHMENTS> colorFormats{};
+    auto resetOpaqueAttachments = [&]() {
+        blendAttachments = {};
+        blendAttachments[0].colorWriteMask = ALL_CHANNELS;
+        blendAttachments[1].colorWriteMask = VELOCITY_CHANNELS;
+        blendAttachments[2].colorWriteMask = ALL_CHANNELS;
+        blendAttachments[3].colorWriteMask = ALL_CHANNELS;
+        colorFormats = {COLOR_FORMAT, VELOCITY_FORMAT, COLOR_FORMAT, COLOR_FORMAT};
+    };
+    resetOpaqueAttachments();
 
     VkPipelineColorBlendStateCreateInfo colorBlend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    // 불투명 경로는 색상과 모션 벡터, 반투명 경로는 누적과 잔여 투과율로 둘 다 대상이 둘이다.
-    colorBlend.attachmentCount = 2;
+    colorBlend.attachmentCount = OPAQUE_ATTACHMENTS;
     colorBlend.pAttachments = blendAttachments.data();
 
     // 양면 재질은 컬 모드만 다르므로 파이프라인을 늘리지 않고 동적 상태로 전환한다.
@@ -1795,9 +1816,8 @@ void Renderer::createMeshPipelines() {
     dynamicState.dynamicStateCount = 3;
     dynamicState.pDynamicStates = dynamicStates;
 
-    std::array<VkFormat, 2> colorFormats{COLOR_FORMAT, VELOCITY_FORMAT};
     VkPipelineRenderingCreateInfo renderingInfo{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-    renderingInfo.colorAttachmentCount = 2;
+    renderingInfo.colorAttachmentCount = OPAQUE_ATTACHMENTS;
     renderingInfo.pColorAttachmentFormats = colorFormats.data();
     renderingInfo.depthAttachmentFormat = DEPTH_FORMAT;
 
@@ -1820,10 +1840,9 @@ void Renderer::createMeshPipelines() {
         [&](VkShaderModule opaque, VkShaderModule oit, VkPipelineLayout layout, VkPipeline* target) {
             stages[1].module = opaque;
             depthStencil.depthWriteEnable = VK_TRUE;
-            colorFormats = {COLOR_FORMAT, VELOCITY_FORMAT};
-            blendAttachments = {};
-            blendAttachments[0].colorWriteMask = ALL_CHANNELS;
-            blendAttachments[1].colorWriteMask = VELOCITY_CHANNELS;
+            resetOpaqueAttachments();
+            colorBlend.attachmentCount = OPAQUE_ATTACHMENTS;
+            renderingInfo.colorAttachmentCount = OPAQUE_ATTACHMENTS;
             pipelineInfo.layout = layout;
             for (uint32_t variant = 0; variant < ALPHA_MODE_COUNT; ++variant) {
                 alphaVariant = variant;
@@ -1832,7 +1851,10 @@ void Renderer::createMeshPipelines() {
                     // 모션 벡터는 불투명 표면만 남기므로 이 경로는 기록하지 않는다.
                     stages[1].module = oit;
                     depthStencil.depthWriteEnable = VK_FALSE;
-                    colorFormats = {OIT_ACCUMULATION_FORMAT, OIT_REVEALAGE_FORMAT};
+                    colorFormats[0] = OIT_ACCUMULATION_FORMAT;
+                    colorFormats[1] = OIT_REVEALAGE_FORMAT;
+                    colorBlend.attachmentCount = TRANSLUCENT_ATTACHMENTS;
+                    renderingInfo.colorAttachmentCount = TRANSLUCENT_ATTACHMENTS;
 
                     blendAttachments[0].blendEnable = VK_TRUE;
                     blendAttachments[0].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
@@ -1866,10 +1888,9 @@ void Renderer::createMeshPipelines() {
     pipelineInfo.layout = meshPipelineLayout;
     stages[1].module = opaqueFragment;
     depthStencil.depthWriteEnable = VK_TRUE;
-    colorFormats = {COLOR_FORMAT, VELOCITY_FORMAT};
-    blendAttachments[0].blendEnable = VK_FALSE;
-    blendAttachments[1].blendEnable = VK_FALSE;
-    blendAttachments[1].colorWriteMask = VELOCITY_CHANNELS;
+    resetOpaqueAttachments();
+    colorBlend.attachmentCount = OPAQUE_ATTACHMENTS;
+    renderingInfo.colorAttachmentCount = OPAQUE_ATTACHMENTS;
     rasterization.polygonMode = VK_POLYGON_MODE_LINE;
     VK_CHECK(vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &wireframePipeline));
 
@@ -1904,6 +1925,8 @@ void Renderer::createMeshPipelines() {
                     blendAttachments[0].blendEnable = translucent ? VK_TRUE : VK_FALSE;
                     blendAttachments[1].blendEnable = translucent ? VK_TRUE : VK_FALSE;
                     blendAttachments[1].colorWriteMask = translucent ? VK_COLOR_COMPONENT_R_BIT : VELOCITY_CHANNELS;
+                    colorBlend.attachmentCount = translucent ? TRANSLUCENT_ATTACHMENTS : OPAQUE_ATTACHMENTS;
+                    renderingInfo.colorAttachmentCount = translucent ? TRANSLUCENT_ATTACHMENTS : OPAQUE_ATTACHMENTS;
                     VK_CHECK(vkCreateGraphicsPipelines(
                         context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &target[variant]));
                 }
@@ -2563,7 +2586,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                              static_cast<uint32_t>(targets.hzbStorageSlots.size() - 1),
                              targets.hzbExtent.width,
                              targets.hzbExtent.height};
-    camera->jitter = glm::vec4{jitterNdc, 0.0F, 0.0F};
+    camera->jitter = glm::vec4{jitterNdc, reflectionsActive() ? reflectionRoughnessCutoff : 0.0F, reflectionIntensity};
     camera->fog = glm::vec4{scene.post.fogColor, scene.post.fogDensity};
     camera->fogParameters = glm::vec4{scene.post.fogHeight, scene.post.fogFalloff, 0.0F, 0.0F};
     previousViewProjection = unjitteredViewProjection;
@@ -3316,10 +3339,25 @@ void Renderer::recordCommands(Frame& frame,
         depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         depthAttachment.clearValue.depthStencil.depth = 0.0F;
 
+        // 노멀·거칠기와 반사 가중치는 프레임마다 처음부터 채운다. 경로 추적 프레임은 같은 이미지를
+        // 스토리지로 쓰므로 지난 내용을 잇지 않는다.
+        for (const Image* image : {&targets.guideNormal, &targets.guideSpecularAlbedo}) {
+            imageBarrier(commandBuffer,
+                         image->handle,
+                         VK_IMAGE_ASPECT_COLOR_BIT,
+                         VK_IMAGE_LAYOUT_UNDEFINED,
+                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                         0,
+                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        }
         auto drawOpaque = [&](VkAttachmentLoadOp loadOp, uint32_t phase) {
-            std::array<VkRenderingAttachmentInfo, 2> opaqueColor{
+            std::array<VkRenderingAttachmentInfo, 4> opaqueColor{
                 colorAttachment(targets.color.view, loadOp, {{0.05F, 0.05F, 0.07F, 1.0F}}),
-                colorAttachment(targets.velocity.view, loadOp, {{0.0F, 0.0F, 0.0F, 0.0F}})};
+                colorAttachment(targets.velocity.view, loadOp, {{0.0F, 0.0F, 0.0F, 0.0F}}),
+                colorAttachment(targets.guideNormal.view, loadOp, {{0.0F, 0.0F, 0.0F, 0.0F}}),
+                colorAttachment(targets.guideSpecularAlbedo.view, loadOp, {{0.0F, 0.0F, 0.0F, 0.0F}})};
             VkRenderingAttachmentInfo depth = depthAttachment;
             depth.loadOp = loadOp;
 
@@ -3363,7 +3401,8 @@ void Renderer::recordCommands(Frame& frame,
                          VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
                          VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                              VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-            for (const Image* image : {&targets.color, &targets.velocity}) {
+            for (const Image* image :
+                 {&targets.color, &targets.velocity, &targets.guideNormal, &targets.guideSpecularAlbedo}) {
                 imageBarrier(commandBuffer,
                              image->handle,
                              VK_IMAGE_ASPECT_COLOR_BIT,
@@ -3385,6 +3424,19 @@ void Renderer::recordCommands(Frame& frame,
             uint32_t secondZone = frameProfiler.begin("불투명 2차", commandBuffer);
             drawOpaque(VK_ATTACHMENT_LOAD_OP_LOAD, CULL_PHASE_SECOND);
             frameProfiler.end(secondZone, commandBuffer);
+        }
+
+        // 불투명이 끝났으니 노멀·거칠기와 반사 가중치는 읽기 전용이다. 반사 컴퓨트가 읽는다.
+        for (const Image* image : {&targets.guideNormal, &targets.guideSpecularAlbedo}) {
+            imageBarrier(commandBuffer,
+                         image->handle,
+                         VK_IMAGE_ASPECT_COLOR_BIT,
+                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
         }
 
         // 2) 아무것도 그려지지 않은 화소를 하늘로 채운다. 톤 매핑이 아니라 여기서 채워야 시간축

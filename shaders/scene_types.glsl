@@ -124,7 +124,8 @@ struct Camera {
     // 지난 프레임의 시점 변환. 지터는 빠져 있어 두 프레임의 차가 실제 화면 이동만 남는다.
     mat4 previousViewProjection;
     // xy 이번 프레임의 NDC 지터. viewProjection 에는 들어가 있고 previousViewProjection 에는 없어서
-    // 모션 벡터를 만들 때 현재 좌표에서 이만큼 빼야 두 프레임이 같은 격자 위에 놓인다. zw 는 예약.
+    // 모션 벡터를 만들 때 현재 좌표에서 이만큼 빼야 두 프레임이 같은 격자 위에 놓인다.
+    // z 광선 반사를 추적할 거칠기 상한(0 이면 반사 끔), w 반사 세기.
     vec4 jitter;
     // x: 조명 수, y: 그림자 배열 슬롯(없으면 INVALID_TEXTURE), z: SSAO 슬롯, w: 환경 큐브 슬롯.
     // bindless 슬롯은 상위 8비트에 샘플러 번호가 들어가 float 로는 정확히 담기지 않으므로 정수로 둔다.

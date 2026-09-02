@@ -155,6 +155,10 @@ struct RenderTargets {
     uint32_t guideDiffuseAlbedoStorageSlot = 0;
     uint32_t guideSpecularAlbedoStorageSlot = 0;
     uint32_t guideNormalStorageSlot = 0;
+    // 래스터 불투명 패스가 첨부물로 채운 노멀·거칠기와 반사 가중치를 반사 컴퓨트가 읽는 슬롯.
+    // 경로 추적 프레임에는 이 이미지가 GENERAL 스토리지라 이 슬롯을 읽으면 안 된다.
+    uint32_t guideNormalSlot = 0;
+    uint32_t guideSpecularAlbedoSlot = 0;
     uint32_t guideRoughnessStorageSlot = 0;
     uint32_t guideDepthStorageSlot = 0;
 
@@ -269,6 +273,13 @@ public:
     bool useRayQueryShadows = false;
     float rayShadowDistance = 12.0F;
     bool rayQueryShadowsAvailable() const;
+    // 광선 반사: 거칠기가 상한 이하인 불투명 표면의 스페큘러 IBL 을 추적한 반사로 바꾼다. 광선
+    // 질의와 IBL 이 있어야 하고, 경로 추적 중에는 그쪽이 반사를 직접 계산하므로 꺼진다.
+    bool useReflections = false;
+    float reflectionRoughnessCutoff = 0.6F;
+    float reflectionIntensity = 1.0F;
+    uint32_t reflectionMaxSamples = 16;
+    bool reflectionsActive() const;
     // 장면 반지름에 대한 비율. 장면 크기가 제각각이라 절대 길이로 두지 않는다.
     float ssaoRadius = 0.04F;
     float ssaoIntensity = 1.0F;

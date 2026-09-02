@@ -37,8 +37,9 @@ float screenSpaceOcclusion() {
     return sampleBindless(slot, gl_FragCoord.xy * pushConstants.camera.item.viewport.zw).r;
 }
 
-// 톤 매핑 이전의 선형 HDR 색과 알파를 돌려준다.
-vec4 shadeSurface() {
+// 톤 매핑 이전의 선형 HDR 색과 알파를 돌려준다. 안내 버퍼용 노멀·거칠기와, 광선 반사가 곱할
+// 스페큘러 가중치도 함께 내놓는다.
+vec4 shadeSurface(out vec4 normalRoughness, out vec3 reflectionWeight) {
     Material material = pushConstants.materials.items[inMaterialIndex];
     // 재질 읽기와 노멀 맵은 경로 추적 적중 셰이더와 같은 함수를 쓴다.
     MaterialSample sampled = sampleMaterial(material, inUv);
@@ -73,7 +74,15 @@ vec4 shadeSurface() {
     }
 
     float ambientOcclusion = sampled.occlusion * screenSpaceOcclusion();
-    color += environmentLight(pushConstants.camera.item, surface, ambientOcclusion, true);
+    Camera camera = pushConstants.camera.item;
+    // 광선 반사 대상이면 스페큘러 IBL 을 빼고 그 가중치만 내보낸다. 반사 컴퓨트가 추적한 색에 곱해
+    // 색상 버퍼에 더한다. 반투명은 반사 패스가 깊이로 표면을 찾지 못하므로 제외한다.
+    bool traceReflection = ALPHA_MODE_VARIANT != ALPHA_MODE_TRANSLUCENT && camera.jitter.z > 0.0 &&
+                           surface.roughness <= camera.jitter.z && camera.environment.w != 0u;
+    color += environmentLight(camera, surface, ambientOcclusion, !traceReflection);
+    reflectionWeight =
+        traceReflection ? specularAlbedo(camera, surface) * ambientOcclusion * camera.ambient.rgb : vec3(0.0);
+    normalRoughness = vec4(surface.normal, surface.roughness);
     color += sampled.emissive;
 
     // 안개는 카메라에서 표면까지의 구간에 건다. 반투명도 같은 식으로 잠긴다.
