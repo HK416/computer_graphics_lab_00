@@ -11,10 +11,24 @@ struct PathPayload {
     vec3 emissive;
     vec3 normal;
     vec3 position;
+    // 디버그 뷰와 가이드 버퍼만 쓴다. 경로 자체는 필요로 하지 않는다.
+    vec2 uv;
     float metallic;
     float roughness;
     float hitDistance;
     bool missed;
+};
+
+// 1차 히트에서 건져 두는 값들. 경로 루프가 페이로드를 덮어쓰기 전에 복사해 둔다.
+struct PrimaryHit {
+    vec3 normal;
+    vec3 albedo;
+    vec2 uv;
+    float roughness;
+    // 카메라에서의 거리. 아무것도 못 맞히면 음수.
+    float hitDistance;
+    // 첫 그림자 조명의 가시성. 조명이 없으면 음수.
+    float visibility;
 };
 
 #define PATH_FLAG_NEXT_EVENT 1u
@@ -40,6 +54,8 @@ layout(push_constant) uniform PathTracePushConstants {
     uint flags;
     float radianceClamp;
     float skyIntensity;
+    // scene_types.glsl 의 DEBUG_MODE_*. 0 이 아니면 셰이딩 대신 중간 값을 그린다.
+    uint debugMode;
 } pathTrace;
 
 // 접선 공간의 방향을 노멀 둘레의 월드 공간으로 옮긴다.

@@ -65,6 +65,38 @@ vec3 nextEventEstimation(Surface surface, inout uint seed) {
     return evaluateBrdf(surface, lightDirection, radiance) * float(lightCount);
 }
 
+// 첫 그림자 조명 하나만 보고 가시성을 잰다. 디버그 뷰 전용이며, 조명을 매 바운스 무작위로
+// 고르는 다음 사건 추정과 달리 래스터의 DEBUG_MODE_SHADOW 와 같은 조명을 본다.
+float firstLightVisibility(vec3 position, vec3 normal) {
+    uint lightCount = pathTrace.camera.item.shading.x;
+    for (uint i = 0; i < lightCount; ++i) {
+        Light light = pathTrace.lights.items[i];
+        if (light.rightShadow.w < 0.0) {
+            continue;
+        }
+        vec3 lightDirection;
+        float distanceToLight;
+        vec3 radiance = sampleLightRadiance(light, position, lightDirection, distanceToLight);
+        if (radiance == vec3(0.0) || dot(normal, lightDirection) <= 0.0) {
+            return 0.0;
+        }
+        shadowVisibility = 0.0;
+        traceRayEXT(topLevel,
+                    PATH_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                    0xFF,
+                    0,
+                    0,
+                    1,
+                    position,
+                    1e-3,
+                    lightDirection,
+                    min(distanceToLight - 1e-3, 1e4),
+                    1);
+        return shadowVisibility;
+    }
+    return -1.0;
+}
+
 // 다음 방향을 뽑고 그 방향의 BSDF 가중치(brdf * cos / pdf)를 돌려준다. 확산과 거울 반사 로브를
 // 프레넬 비중으로 골라 둘 다 표본이 남게 한다.
 vec3 sampleBsdf(Surface surface, inout uint seed, out vec3 direction) {
@@ -95,9 +127,15 @@ vec3 sampleBsdf(Surface surface, inout uint seed, out vec3 direction) {
     return (vec3(1.0) - fresnel) * (1.0 - surface.metallic) * surface.albedo / (1.0 - specularProbability);
 }
 
-vec3 tracePath(vec3 origin, vec3 direction, inout uint seed) {
+vec3 tracePath(vec3 origin, vec3 direction, inout uint seed, out PrimaryHit primary) {
     vec3 radiance = vec3(0.0);
     vec3 throughput = vec3(1.0);
+    primary.normal = vec3(0.0);
+    primary.albedo = vec3(0.0);
+    primary.uv = vec2(0.0);
+    primary.roughness = 0.0;
+    primary.hitDistance = -1.0;
+    primary.visibility = -1.0;
     bool useNextEvent = (pathTrace.flags & PATH_FLAG_NEXT_EVENT) != 0u;
     bool useRoulette = (pathTrace.flags & PATH_FLAG_RUSSIAN_ROULETTE) != 0u;
 
@@ -118,6 +156,18 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed) {
         surface.metallic = payload.metallic;
         surface.roughness = payload.roughness;
         radiance += throughput * payload.emissive;
+
+        // 1차 히트만 건져 둔다. 다음 바운스가 페이로드를 덮어쓰기 때문이다.
+        if (bounce == 0u) {
+            primary.normal = payload.normal;
+            primary.albedo = payload.albedo;
+            primary.uv = payload.uv;
+            primary.roughness = payload.roughness;
+            primary.hitDistance = payload.hitDistance;
+            if (pathTrace.debugMode == DEBUG_MODE_SHADOW) {
+                primary.visibility = firstLightVisibility(surface.position, surface.normal);
+            }
+        }
 
         if (useNextEvent) {
             radiance += throughput * nextEventEstimation(surface, seed);
@@ -145,6 +195,26 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed) {
     return radiance;
 }
 
+// mesh.frag 의 debugColor 와 같은 그림이 나오도록 맞춘다. 경로 추적에 없는 모드(meshlet, LOD,
+// 캐스케이드, 모션 벡터)는 편집기가 고를 수 없게 막아 두었다.
+vec3 debugColor(PrimaryHit primary) {
+    switch (pathTrace.debugMode) {
+    case DEBUG_MODE_NORMAL:
+        return normalize(primary.normal) * 0.5 + 0.5;
+    case DEBUG_MODE_UV:
+        return vec3(fract(primary.uv), 0.0);
+    case DEBUG_MODE_DEPTH:
+        // 래스터는 시야 축 거리를 쓰지만 여기서는 광선 거리를 그대로 쓴다. 축 거리보다 크거나
+        // 같아 화면 가장자리만 아주 조금 멀게 나온다.
+        return vec3(primary.hitDistance / (primary.hitDistance + 10.0));
+    case DEBUG_MODE_SHADOW:
+        // 그림자를 만드는 조명이 없으면 자홍색으로 알린다. 래스터 경로와 같은 관례다.
+        return primary.visibility < 0.0 ? vec3(1.0, 0.0, 1.0) : vec3(primary.visibility);
+    default:
+        return vec3(0.0);
+    }
+}
+
 void main() {
     ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
     vec2 size = vec2(gl_LaunchSizeEXT.xy);
@@ -153,6 +223,7 @@ void main() {
     Camera camera = pathTrace.camera.item;
     uint samplesPerFrame = max(pathTrace.samplesPerFrame, 1u);
     vec3 radiance = vec3(0.0);
+    PrimaryHit primary;
 
     for (uint sampleIndex = 0; sampleIndex < samplesPerFrame; ++sampleIndex) {
         // 픽셀 안에서 표본 위치를 흔들어 누적하면서 앤티에일리어싱이 된다.
@@ -165,9 +236,15 @@ void main() {
         vec3 direction = normalize(farPoint.xyz / farPoint.w - origin);
 
         // 반딧불이 표본이 누적을 오래 흔들지 않도록 잘라 낸다.
-        radiance += min(tracePath(origin, direction, seed), vec3(pathTrace.radianceClamp));
+        radiance += min(tracePath(origin, direction, seed, primary), vec3(pathTrace.radianceClamp));
     }
     radiance /= float(samplesPerFrame);
+
+    // 디버그 뷰는 셰이딩 대신 중간 값을 그린다. 매 프레임 같은 값이 쌓이므로 톤 매핑이 표본 수로
+    // 나눠도 그 값 그대로 남는다. 아무것도 못 맞힌 화소는 래스터 경로와 맞춰 하늘을 그대로 둔다.
+    if (pathTrace.debugMode != DEBUG_MODE_SHADED && primary.hitDistance >= 0.0) {
+        radiance = debugColor(primary);
+    }
 
     // 누적만 하고 나눗셈은 톤 매핑 패스에서 한다. 표본 수가 0 이면 이전 값을 버린다.
     vec4 previous = imageLoad(bindlessStorageImagesRgba[nonuniformEXT(pathTrace.accumulationImage)], pixel);

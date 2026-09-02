@@ -35,6 +35,21 @@ class BindlessTextures;
 class GeometryStore;
 
 inline constexpr uint32_t FRAMES_IN_FLIGHT = 2;
+
+// shaders/scene_types.glsl 의 DEBUG_MODE_* 와 값이 같아야 한다.
+inline constexpr uint32_t DEBUG_MODE_SHADED = 0;
+inline constexpr uint32_t DEBUG_MODE_NORMAL = 2;
+inline constexpr uint32_t DEBUG_MODE_UV = 3;
+inline constexpr uint32_t DEBUG_MODE_DEPTH = 4;
+inline constexpr uint32_t DEBUG_MODE_SHADOW = 7;
+
+// 경로 추적이 그릴 수 있는 디버그 뷰인지. meshlet 과 LOD 는 하위 가속 구조가 메쉬 단위 LOD 0 이라
+// 개념 자체가 없고, 캐스케이드는 그림자 맵을 읽지 않으며, 모션 벡터는 경로 추적 프레임에 갱신되지
+// 않는다.
+inline bool pathTraceSupportsDebugMode(uint32_t mode) {
+    return mode == DEBUG_MODE_SHADED || mode == DEBUG_MODE_NORMAL || mode == DEBUG_MODE_UV ||
+           mode == DEBUG_MODE_DEPTH || mode == DEBUG_MODE_SHADOW;
+}
 inline constexpr uint32_t ALPHA_MODE_COUNT = 3;
 
 // shaders/scene_types.glsl 의 Light 와 배치가 같아야 한다.

@@ -2106,6 +2106,9 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
 
     // 카메라나 화면, 장면, 경로 추적 설정이 바뀌면 누적을 처음부터 다시 쌓는다. 설정 변경을 빼면
     // 수백 표본이 쌓인 뒤에는 새 표본이 1/N 밖에 못 섞여 화면이 멈춘 것처럼 보인다.
+    // 경로 추적이 그릴 수 있는 디버그 뷰만 넘긴다. 편집기가 고른 값은 그대로 두어 래스터로
+    // 돌아갔을 때 이어지게 한다. 이 대입이 traceInputsChanged 를 통해 누적을 초기화한다.
+    pathTrace.debugMode = pathTraceSupportsDebugMode(debugMode) ? debugMode : 0U;
     bool traceInputsChanged = pathTrace != lastPathTrace || useIbl != lastUseIbl;
     lastPathTrace = pathTrace;
     lastUseIbl = useIbl;

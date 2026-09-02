@@ -75,6 +75,7 @@ void main() {
     payload.metallic = clamp(metallic, 0.0, 1.0);
     // 완전한 거울은 GGX 표본의 분모를 0 으로 만든다. 래스터 경로와 같은 하한을 쓴다.
     payload.roughness = clamp(roughness, 0.03, 1.0);
+    payload.uv = uv;
     payload.hitDistance = gl_HitTEXT;
     payload.missed = false;
 }

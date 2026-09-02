@@ -40,6 +40,7 @@ struct PathTracePushConstants {
     uint32_t flags;
     float radianceClamp;
     float skyIntensity;
+    uint32_t debugMode;
 };
 
 constexpr uint32_t PATH_FLAG_NEXT_EVENT = 1;
@@ -667,6 +668,7 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
                           (options.russianRoulette ? PATH_FLAG_RUSSIAN_ROULETTE : 0U);
     pushConstants.radianceClamp = options.radianceClamp;
     pushConstants.skyIntensity = options.skyIntensity;
+    pushConstants.debugMode = options.debugMode;
 
     std::array<VkDescriptorSet, 2> sets{bindless.set(), descriptorSet};
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline);

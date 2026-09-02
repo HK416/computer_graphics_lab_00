@@ -33,6 +33,9 @@ struct PathTraceOptions {
     // 반딧불이 표본을 자르는 상한.
     float radianceClamp = 8.0F;
     float skyIntensity = 1.0F;
+    // shaders/scene_types.glsl 의 DEBUG_MODE_*. 렌더러가 채운다. 여기 있으면 모드를 바꿀 때
+    // operator== 비교가 달라져 누적이 자동으로 초기화된다.
+    uint32_t debugMode = 0;
 
     bool operator==(const PathTraceOptions&) const = default;
 };

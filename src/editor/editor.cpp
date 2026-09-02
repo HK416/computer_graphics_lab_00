@@ -1018,15 +1018,26 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
 
     static constexpr const char* DEBUG_MODE_NAMES[] = {
         "셰이딩", "meshlet", "노멀", "UV", "깊이", "LOD", "캐스케이드", "그림자", "모션 벡터"};
-    // 디버그 뷰는 mesh.frag 에서만 그린다. 경로 추적은 그 패스를 타지 않는다.
-    ImGui::BeginDisabled(renderer.usePathTracing);
-    int debugMode = static_cast<int>(renderer.debugMode);
-    if (ImGui::Combo("디버그 뷰", &debugMode, DEBUG_MODE_NAMES, IM_ARRAYSIZE(DEBUG_MODE_NAMES))) {
-        renderer.debugMode = static_cast<uint32_t>(debugMode);
+    // 경로 추적은 래스터에 있는 모드를 다 그리지는 못한다. 못 그리는 것만 개별로 잠근다.
+    auto modeUsable = [this](uint32_t mode) {
+        return !renderer.usePathTracing || gfx::pathTraceSupportsDebugMode(mode);
+    };
+    if (ImGui::BeginCombo("디버그 뷰", DEBUG_MODE_NAMES[renderer.debugMode])) {
+        for (uint32_t mode = 0; mode < IM_ARRAYSIZE(DEBUG_MODE_NAMES); ++mode) {
+            bool usable = modeUsable(mode);
+            ImGui::BeginDisabled(!usable);
+            if (ImGui::Selectable(DEBUG_MODE_NAMES[mode], renderer.debugMode == mode)) {
+                renderer.debugMode = mode;
+            }
+            ImGui::EndDisabled();
+            if (!usable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("경로 추적에는 이 값이 없다");
+            }
+        }
+        ImGui::EndCombo();
     }
-    ImGui::EndDisabled();
-    if (renderer.usePathTracing) {
-        ImGui::TextDisabled("디버그 뷰는 래스터 경로에서만 동작한다");
+    if (!modeUsable(renderer.debugMode)) {
+        ImGui::TextDisabled("경로 추적 중에는 셰이딩으로 그린다");
     }
 
     bool vsync = renderer.vsyncEnabled();
