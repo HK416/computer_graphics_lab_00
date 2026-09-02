@@ -70,6 +70,8 @@ struct GpuCamera {
     glm::uvec4 shading;
     // x: 조도 큐브 슬롯, y: 프리필터 큐브 슬롯, z: BRDF 표 슬롯, w: 프리필터 밉 수(0 이면 IBL 꺼짐).
     glm::uvec4 environment;
+    // x: HZB 샘플 슬롯, y: 최대 밉 단계, zw: 0단계 크기.
+    glm::uvec4 hzb;
 };
 
 // shaders/scene_data.glsl 의 MeshletGroup 과 배치가 같아야 한다.
@@ -102,11 +104,10 @@ struct CullPushConstants {
     VkDeviceAddress drawCounts;
     uint32_t instanceCount;
     uint32_t flags;
-    uint32_t hzbTexture;
-    float hzbMaxLevel;
-    float hzbSize[2];
+    uint32_t phase;
     VkDeviceAddress network;
     VkDeviceAddress skinnedBounds;
+    VkDeviceAddress visibility;
 };
 
 struct SkinPushConstants {
@@ -136,8 +137,11 @@ constexpr uint32_t SKIN_GROUP_SIZE = 64;
 
 constexpr uint32_t CULL_FLAG_FRUSTUM = 1;
 constexpr uint32_t CULL_FLAG_CONE = 2;
-constexpr uint32_t CULL_FLAG_OCCLUSION = 4;
 constexpr uint32_t CULL_FLAG_NEURAL_LOD = 8;
+// shaders/culling.glsl 의 CULL_PHASE_* 와 같아야 한다.
+constexpr uint32_t CULL_PHASE_NONE = 0;
+constexpr uint32_t CULL_PHASE_FIRST = 1;
+constexpr uint32_t CULL_PHASE_SECOND = 2;
 // 학습 표본 수. 이보다 많으면 일정 간격으로 건너뛰며 뽑는다.
 constexpr uint32_t MAX_LOD_SAMPLES = 1024;
 constexpr uint32_t BUCKET_COUNT = ALPHA_MODE_COUNT * 2;
@@ -158,7 +162,10 @@ struct ScenePushConstants {
     VkDeviceAddress shadowMatrices;
     uint32_t meshletGroupBase;
     uint32_t debugMode;
+    VkDeviceAddress meshletVisibility;
+    uint32_t cullPhase;
 };
+static_assert(sizeof(ScenePushConstants) <= 128, "푸시 상수는 규격이 보장하는 128 바이트 안에 있어야 한다");
 
 // shaders/depth_only.vert 의 DepthPushConstants 와 배치가 같아야 한다.
 struct DepthPushConstants {
@@ -375,6 +382,7 @@ Renderer::~Renderer() {
     }
     vkDestroyPipeline(context.device, hzbPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, hzbPipelineLayout, nullptr);
+    destroyBuffer(context, meshletVisibilityBuffer);
     vkDestroyPipeline(context.device, cullPipeline, nullptr);
     vkDestroyPipeline(context.device, skinBoundsPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, skinBoundsPipelineLayout, nullptr);
@@ -884,6 +892,24 @@ void Renderer::reserveMeshletGroups(Frame& frame, uint32_t groupCount) {
                                             MemoryLocation::HOST_WRITE,
                                             "meshlet 그룹");
     frame.groupCapacity = capacity;
+}
+
+void Renderer::reserveMeshletVisibility(uint32_t meshletCount) {
+    uint32_t needed = std::max(meshletCount, 32U);
+    if (needed <= meshletVisibilityCapacity) {
+        return;
+    }
+    // 지난 프레임이 아직 읽고 있을 수 있어 장치를 세운다. meshlet 수가 늘어나는 순간에만 일어난다.
+    waitIdle();
+    destroyBuffer(context, meshletVisibilityBuffer);
+    meshletVisibilityCapacity = std::max(needed, meshletVisibilityCapacity * 2);
+    meshletVisibilityBuffer =
+        createBuffer(context,
+                     static_cast<VkDeviceSize>((meshletVisibilityCapacity + 31) / 32) * sizeof(uint32_t),
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     MemoryLocation::DEVICE,
+                     "meshlet 가시성");
+    visibilityNeedsClear = true;
 }
 
 void Renderer::reserveJoints(Frame& frame, uint32_t jointCount) {
@@ -1616,10 +1642,11 @@ void Renderer::recordHzbPass(VkCommandBuffer commandBuffer) {
     vkCmdBindDescriptorSets(
         commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, hzbPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
 
+    // 다음 단계 리덕션과, 마지막에는 2차 패스의 컬 컴퓨트·태스크 셰이더가 읽는다.
     VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
     barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-    barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT;
     barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     dependency.memoryBarrierCount = 1;
@@ -2222,6 +2249,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     bool needMeshletGroups = !(usePathTracing && rayTracer != nullptr);
     uint32_t skinnedVertexCursor = 0;
     uint32_t skinnedMeshletCursor = 0;
+    uint32_t visibilityCursor = 0;
     // 스킨 인스턴스 슬롯과 디스패치 번호. 버퍼 용량이 정해진 뒤 절대 위치를 채운다.
     std::vector<std::pair<uint32_t, uint32_t>> skinnedSlots;
 
@@ -2257,12 +2285,14 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     FrameBatches batches{};
     uint32_t totalGroups = 0;
     uint32_t totalMeshletDraws = 0;
+    uint32_t totalVisibilityBits = 0;
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
         if (!drawable(index)) {
             continue;
         }
         auto [mode, sided] = bucketOf(index);
         ++batches.draws[mode][sided].count;
+        totalVisibilityBits += geometry.mesh(scene.meshOf(index)).meshletCount;
         if (needMeshletGroups) {
             uint32_t groups = groupsFor(index);
             batches.groups[mode][sided].count += groups;
@@ -2276,6 +2306,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     }
     reserveMeshletGroups(frame, totalGroups);
     reserveMeshletDraws(frame, totalMeshletDraws);
+    reserveMeshletVisibility(totalVisibilityBits);
 
     // 조인트 행렬은 (애니메이터, 스킨) 마다 한 번만 올리고 인스턴스는 그 구간의 시작점만 가리킨다.
     std::vector<std::vector<uint32_t>> skinOffsets(scene.animators.size());
@@ -2368,6 +2399,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         instances[slot].skinnedVertexOffset = NO_SKINNED_VERTICES;
         instances[slot].previousSkinnedVertexOffset = NO_SKINNED_VERTICES;
         instances[slot].skinnedMeshletOffset = 0;
+        instances[slot].visibilityBase = visibilityCursor;
+        visibilityCursor += mesh.meshletCount;
         if (jointOffset != NO_JOINTS) {
             uint32_t vertexCount = geometry.meshVertexCount(scene.meshOf(index));
             objectSkinnedBlas[index] = static_cast<uint32_t>(skinDispatches.size());
@@ -2523,6 +2556,10 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                                  1.0F / static_cast<float>(currentRenderExtent.height)};
     camera->inverseViewProjection = glm::inverse(camera->viewProjection);
     camera->previousViewProjection = temporalReset ? unjitteredViewProjection : previousViewProjection;
+    camera->hzb = glm::uvec4{targets.hzbSampledSlot,
+                             static_cast<uint32_t>(targets.hzbStorageSlots.size() - 1),
+                             targets.hzbExtent.width,
+                             targets.hzbExtent.height};
     camera->jitter = glm::vec4{jitterNdc, 0.0F, 0.0F};
     previousViewProjection = unjitteredViewProjection;
     temporalResetThisFrame = temporalReset;
@@ -2545,7 +2582,10 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     return batches;
 }
 
-void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer, const FrameBatches& batches, bool translucentPass) {
+void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer,
+                                  const FrameBatches& batches,
+                                  bool translucentPass,
+                                  uint32_t cullPhase) {
     constexpr VkDeviceSize DRAW_STRIDE = sizeof(VkDrawIndexedIndirectCommand);
     constexpr VkDeviceSize TASK_STRIDE = sizeof(VkDrawMeshTasksIndirectCommandEXT);
 
@@ -2555,6 +2595,15 @@ void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer, const FrameBatc
 
     size_t firstMode = translucentPass ? TRANSLUCENT_MODE : 0;
     size_t lastMode = translucentPass ? TRANSLUCENT_MODE + 1 : TRANSLUCENT_MODE;
+
+    // 태스크 셰이더의 두 패스 판정과 프래그먼트의 컬 패스 디버그 뷰가 읽는다. 두 배치는 푸시 상수
+    // 구간이 같아 어느 쪽으로 밀어도 된다.
+    vkCmdPushConstants(commandBuffer,
+                       meshPipelineLayout,
+                       scenePushStages,
+                       offsetof(ScenePushConstants, cullPhase),
+                       sizeof(uint32_t),
+                       &cullPhase);
 
     for (size_t mode = firstMode; mode < lastMode; ++mode) {
         bool bound = false;
@@ -2690,8 +2739,21 @@ void Renderer::updateLodNetwork(const scene::Scene& scene, Frame& frame, float p
     uploadWeights();
 }
 
-void Renderer::recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches& batches) {
+void Renderer::recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches& batches, uint32_t phase) {
     Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];
+
+    // 1차 패스의 간접 드로우가 아직 명령 버퍼를 읽는 중일 수 있고, 지난 컬 컴퓨트의 비트 쓰기도
+    // 이번 읽기에 앞서야 한다. 개수 버퍼를 지우기 전에 둘 다 끝낸다.
+    VkMemoryBarrier2 drawBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    drawBarrier.srcStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    drawBarrier.srcAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    drawBarrier.dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    drawBarrier.dstAccessMask =
+        VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    VkDependencyInfo drawDependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    drawDependency.memoryBarrierCount = 1;
+    drawDependency.pMemoryBarriers = &drawBarrier;
+    vkCmdPipelineBarrier2(commandBuffer, &drawDependency);
 
     vkCmdFillBuffer(commandBuffer, frame.drawCountBuffer.handle, 0, VK_WHOLE_SIZE, 0);
     if (drawIndexedIndirectCount == nullptr) {
@@ -2717,14 +2779,11 @@ void Renderer::recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches&
     pushConstants.drawCommands = frame.meshletDrawBuffer.address;
     pushConstants.drawCounts = frame.drawCountBuffer.address;
     pushConstants.instanceCount = batches.instanceCount;
-    pushConstants.flags = (frustumCulling ? CULL_FLAG_FRUSTUM : 0U) | (coneCulling ? CULL_FLAG_CONE : 0U) |
-                          (occlusionCulling ? CULL_FLAG_OCCLUSION : 0U);
-    pushConstants.hzbTexture = targets.hzbSampledSlot;
-    pushConstants.hzbMaxLevel = static_cast<float>(targets.hzbStorageSlots.size() - 1);
-    pushConstants.hzbSize[0] = static_cast<float>(targets.hzbExtent.width);
-    pushConstants.hzbSize[1] = static_cast<float>(targets.hzbExtent.height);
+    pushConstants.flags = (frustumCulling ? CULL_FLAG_FRUSTUM : 0U) | (coneCulling ? CULL_FLAG_CONE : 0U);
+    pushConstants.phase = phase;
     pushConstants.network = frame.lodNetworkBuffer.address;
     pushConstants.skinnedBounds = skinnedBoundsBuffer.address;
+    pushConstants.visibility = meshletVisibilityBuffer.address;
     if (useNeuralLod) {
         pushConstants.flags |= CULL_FLAG_NEURAL_LOD;
     }
@@ -3166,11 +3225,40 @@ void Renderer::recordCommands(Frame& frame,
         recordPathTracePass(commandBuffer, frame, scene);
         frameProfiler.end(pathZone, commandBuffer);
     } else {
+        // 오클루전 컬링은 두 패스로 돈다. 1차는 지난 프레임 가시 집합, HZB 구축, 2차는 나머지.
+        // 고전 경로는 GPU 컬링이 없어 한 패스다.
+        bool computeCullPath = useComputeCulling && !useMeshPath();
+        bool twoPhase = occlusionCulling && (useMeshPath() || computeCullPath);
+        uint32_t firstPhase = twoPhase ? CULL_PHASE_FIRST : CULL_PHASE_NONE;
+
+        // 가시성 비트는 프레임을 넘어 살아남는다. 지난 프레임 2차 패스의 쓰기가 이번 읽기에 앞서고,
+        // 새로 잡은 버퍼는 0 으로 채운다.
+        {
+            VkMemoryBarrier2 bitsBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            bitsBarrier.srcStageMask = VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            bitsBarrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            bitsBarrier.dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT | VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT |
+                                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            bitsBarrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                                        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            dependency.memoryBarrierCount = 1;
+            dependency.pMemoryBarriers = &bitsBarrier;
+            vkCmdPipelineBarrier2(commandBuffer, &dependency);
+            if (visibilityNeedsClear) {
+                vkCmdFillBuffer(commandBuffer, meshletVisibilityBuffer.handle, 0, VK_WHOLE_SIZE, 0);
+                bitsBarrier.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+                bitsBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+                vkCmdPipelineBarrier2(commandBuffer, &dependency);
+                visibilityNeedsClear = false;
+            }
+        }
+
         // mesh shader 경로는 태스크 셰이더가 직접 컬링한다. 컬 컴퓨트 결과를 아무도 읽지 않으므로
         // 그때는 디스패치 자체를 하지 않는다.
-        if (useComputeCulling && !useMeshPath()) {
+        if (computeCullPath) {
             uint32_t cullZone = frameProfiler.begin("컬링", commandBuffer);
-            recordCullPass(commandBuffer, batches);
+            recordCullPass(commandBuffer, batches, firstPhase);
             frameProfiler.end(cullZone, commandBuffer);
         }
 
@@ -3188,7 +3276,9 @@ void Renderer::recordCommands(Frame& frame,
                                               frame.lightBuffer.address,
                                               frame.shadowMatrixBuffer.address,
                                               0,
-                                              debugMode};
+                                              debugMode,
+                                              meshletVisibilityBuffer.address,
+                                              firstPhase};
         // 광선 질의 그림자를 쓰면 TLAS 를 집합 1 로 함께 묶고, 장면이 바뀌었으면 먼저 다시 만든다.
         rayQueryPass = useRayQueryShadows && rayQueryShadowsAvailable();
         if (rayQueryPass) {
@@ -3208,14 +3298,9 @@ void Renderer::recordCommands(Frame& frame,
             commandBuffer, sceneLayout, scenePushStages, 0, sizeof(scenePushConstants), &scenePushConstants);
         vkCmdBindIndexBuffer(commandBuffer, geometry.indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
 
-        // 1) 불투명과 컷오프 경로를 HDR 색상 대상에 그린다.
-        uint32_t opaqueZone = frameProfiler.begin("불투명", commandBuffer);
-        // 아무것도 그리지 않은 화소는 변위 0 이다. 하늘은 톤 매핑에서 채워 넣는 균일한 색이라
-        // 되짚을 세부가 없다.
-        std::array<VkRenderingAttachmentInfo, 2> opaqueColor{
-            colorAttachment(targets.color.view, VK_ATTACHMENT_LOAD_OP_CLEAR, {{0.05F, 0.05F, 0.07F, 1.0F}}),
-            colorAttachment(targets.velocity.view, VK_ATTACHMENT_LOAD_OP_CLEAR, {{0.0F, 0.0F, 0.0F, 0.0F}})};
-
+        // 1) 불투명과 컷오프 경로를 HDR 색상 대상에 그린다. 두 패스 컬링이면 1차 뒤에 HZB 를 만들고
+        //    2차가 같은 첨부물에 이어 그린다.
+        // 아무것도 그리지 않은 화소는 변위 0 이다. 하늘 패스가 나중에 그 자리를 채운다.
         VkRenderingAttachmentInfo depthAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         depthAttachment.imageView = targets.depth.view;
         depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
@@ -3223,18 +3308,76 @@ void Renderer::recordCommands(Frame& frame,
         depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         depthAttachment.clearValue.depthStencil.depth = 0.0F;
 
-        VkRenderingInfo opaquePass{VK_STRUCTURE_TYPE_RENDERING_INFO};
-        opaquePass.renderArea.extent = currentRenderExtent;
-        opaquePass.layerCount = 1;
-        opaquePass.colorAttachmentCount = static_cast<uint32_t>(opaqueColor.size());
-        opaquePass.pColorAttachments = opaqueColor.data();
-        opaquePass.pDepthAttachment = &depthAttachment;
+        auto drawOpaque = [&](VkAttachmentLoadOp loadOp, uint32_t phase) {
+            std::array<VkRenderingAttachmentInfo, 2> opaqueColor{
+                colorAttachment(targets.color.view, loadOp, {{0.05F, 0.05F, 0.07F, 1.0F}}),
+                colorAttachment(targets.velocity.view, loadOp, {{0.0F, 0.0F, 0.0F, 0.0F}})};
+            VkRenderingAttachmentInfo depth = depthAttachment;
+            depth.loadOp = loadOp;
 
-        vkCmdBeginRendering(commandBuffer, &opaquePass);
-        setFullViewport(commandBuffer, currentRenderExtent);
-        recordGeometryPass(commandBuffer, batches, false);
-        vkCmdEndRendering(commandBuffer);
+            VkRenderingInfo opaquePass{VK_STRUCTURE_TYPE_RENDERING_INFO};
+            opaquePass.renderArea.extent = currentRenderExtent;
+            opaquePass.layerCount = 1;
+            opaquePass.colorAttachmentCount = static_cast<uint32_t>(opaqueColor.size());
+            opaquePass.pColorAttachments = opaqueColor.data();
+            opaquePass.pDepthAttachment = &depth;
+
+            vkCmdBeginRendering(commandBuffer, &opaquePass);
+            setFullViewport(commandBuffer, currentRenderExtent);
+            recordGeometryPass(commandBuffer, batches, false, phase);
+            vkCmdEndRendering(commandBuffer);
+        };
+
+        uint32_t opaqueZone = frameProfiler.begin("불투명", commandBuffer);
+        drawOpaque(VK_ATTACHMENT_LOAD_OP_CLEAR, firstPhase);
         frameProfiler.end(opaqueZone, commandBuffer);
+
+        if (twoPhase) {
+            // 1차 깊이로 HZB 를 만든다. 지난 프레임에 보였던 것만 그렸으므로 가리개가 적어 보수적이다.
+            uint32_t hzbZone = frameProfiler.begin("HZB", commandBuffer);
+            imageBarrier(commandBuffer,
+                         targets.depth.handle,
+                         VK_IMAGE_ASPECT_DEPTH_BIT,
+                         VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            recordHzbPass(commandBuffer);
+            imageBarrier(commandBuffer,
+                         targets.depth.handle,
+                         VK_IMAGE_ASPECT_DEPTH_BIT,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                         VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+            for (const Image* image : {&targets.color, &targets.velocity}) {
+                imageBarrier(commandBuffer,
+                             image->handle,
+                             VK_IMAGE_ASPECT_COLOR_BIT,
+                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            }
+            frameProfiler.end(hzbZone, commandBuffer);
+
+            // 2) 나머지 중 HZB 로 보이는 것만 이어 그린다. 대개 비어 있거나 가장자리 몇 개다.
+            if (computeCullPath) {
+                uint32_t cullZone = frameProfiler.begin("컬링 2차", commandBuffer);
+                recordCullPass(commandBuffer, batches, CULL_PHASE_SECOND);
+                frameProfiler.end(cullZone, commandBuffer);
+            }
+            uint32_t secondZone = frameProfiler.begin("불투명 2차", commandBuffer);
+            drawOpaque(VK_ATTACHMENT_LOAD_OP_LOAD, CULL_PHASE_SECOND);
+            frameProfiler.end(secondZone, commandBuffer);
+        }
 
         // 2) 아무것도 그려지지 않은 화소를 하늘로 채운다. 톤 매핑이 아니라 여기서 채워야 시간축
         //    업스케일러가 하늘까지 함께 누적하고, 반투명도 하늘 위에 합성된다.
@@ -3340,7 +3483,7 @@ void Renderer::recordCommands(Frame& frame,
 
             vkCmdBeginRendering(commandBuffer, &translucentPass);
             setFullViewport(commandBuffer, currentRenderExtent);
-            recordGeometryPass(commandBuffer, batches, true);
+            recordGeometryPass(commandBuffer, batches, true, CULL_PHASE_NONE);
             vkCmdEndRendering(commandBuffer);
             frameProfiler.end(oitZone, commandBuffer);
 
@@ -3399,7 +3542,7 @@ void Renderer::recordCommands(Frame& frame,
             frameProfiler.end(compositeZone, commandBuffer);
         }
 
-        // 4) 이번 프레임 깊이로 HZB 를 만들어 다음 프레임 컬링에 쓴다.
+        // 4) SSAO 가 이번 프레임 깊이를 읽는다. 결과는 다음 프레임의 셰이딩이 쓴다.
         imageBarrier(commandBuffer,
                      targets.depth.handle,
                      VK_IMAGE_ASPECT_DEPTH_BIT,
@@ -3409,10 +3552,6 @@ void Renderer::recordCommands(Frame& frame,
                      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-        uint32_t hzbZone = frameProfiler.begin("HZB", commandBuffer);
-        recordHzbPass(commandBuffer);
-        frameProfiler.end(hzbZone, commandBuffer);
-        // SSAO 도 같은 깊이를 읽는다. 결과는 다음 프레임의 셰이딩이 쓴다.
         //
         // ponytail: 한 프레임 늦은 깊이라 카메라가 빠르게 움직이면 차폐가 살짝 밀린다. 정확히
         // 하려면 불투명 깊이 선행 패스를 넣고 같은 프레임 안에서 계산해야 한다.

@@ -47,6 +47,10 @@ vec4 debugColor() {
     }
     case DEBUG_MODE_UV:
         return vec4(fract(inUv), 0.0, 1.0);
+    case DEBUG_MODE_CULL_PHASE:
+        return pushConstants.cullPhase == CULL_PHASE_FIRST    ? vec4(0.2, 0.8, 0.2, 1.0)
+               : pushConstants.cullPhase == CULL_PHASE_SECOND ? vec4(0.9, 0.2, 0.2, 1.0)
+                                                              : vec4(0.5, 0.5, 0.5, 1.0);
     case DEBUG_MODE_DEPTH: {
         // reverse-Z 라서 깊이 값이 근평면 근처에 몰린다. 시야 공간 거리로 되돌려 보여준다.
         float viewDepth = pushConstants.camera.item.parameters.x / max(gl_FragCoord.z, 1e-6);

@@ -40,17 +40,24 @@ void main() {
         // 태스크 셰이더 경로에서는 아직 신경망 보정을 쓰지 않는다.
         LodNetwork emptyNetwork;
         // 법선 원뿔은 바인드 포즈 기준이라 스킨 인스턴스는 원뿔 검사만 건너뛴다.
-        bool visible = selectLod(meshlet,
-                                 instance.model,
-                                 pushConstants.camera.item.position.xyz,
-                                 pushConstants.camera.item.parameters.y,
-                                 pushConstants.camera.item.parameters.z,
-                                 pushConstants.camera.item.parameters.w,
-                                 false,
-                                 emptyNetwork) &&
-                       sphereInFrustum(planes, sphere.xyz, sphere.w) &&
-                       (skinned || coneVisible(sphere.xyz, sphere.w, coneAxis, meshlet.cone.w,
-                                               pushConstants.camera.item.position.xyz));
+        Camera camera = pushConstants.camera.item;
+        bool candidate = selectLod(meshlet,
+                                   instance.model,
+                                   camera.position.xyz,
+                                   camera.parameters.y,
+                                   camera.parameters.z,
+                                   camera.parameters.w,
+                                   false,
+                                   emptyNetwork) &&
+                         sphereInFrustum(planes, sphere.xyz, sphere.w) &&
+                         (skinned || coneVisible(sphere.xyz, sphere.w, coneAxis, meshlet.cone.w, camera.position.xyz));
+        // 두 패스 오클루전. cull_meshlets.comp 와 같은 함수를 쓴다.
+        bool visible = twoPhaseVisible(pushConstants.cullPhase,
+                                       pushConstants.meshletVisibility,
+                                       instance.visibilityBase + (meshletIndex - mesh.meshletOffset),
+                                       candidate,
+                                       camera,
+                                       sphere);
         if (visible) {
             payload.meshletIndices[atomicAdd(visibleCount, 1)] = meshletIndex;
         }

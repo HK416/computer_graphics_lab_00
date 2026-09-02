@@ -23,6 +23,10 @@ layout(push_constant) uniform PushConstants {
     // 재질 경로마다 meshlet 그룹 구간이 달라 디스패치 직전에 갱신한다.
     uint meshletGroupBase;
     uint debugMode;
+    // meshlet 가시성 비트와 두 패스 컬링 단계(culling.glsl 의 CULL_PHASE_*). 여기까지 124 바이트라
+    // 규격이 보장하는 128 바이트에 거의 닿는다. 더 늘려야 하면 버퍼 주소로 옮긴다.
+    VisibilityBuffer meshletVisibility;
+    uint cullPhase;
 }
 pushConstants;
 

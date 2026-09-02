@@ -46,6 +46,11 @@ struct Options {
     uint32_t upscaler = 1;
     // 시작할 때 경로 추적을 켠다. 하드웨어가 지원하지 않으면 사유를 남기고 무시한다.
     bool pathTracing = false;
+    // 스크린샷 비교용. 두 패스 오클루전 컬링을 끄거나 mesh shader 경로 대신 컴퓨트 컬링 경로를 쓴다.
+    bool occlusionCulling = true;
+    bool meshShader = true;
+    // 프레임마다 카메라를 이만큼(도) 궤도 회전한다. 정지 화면에서는 드러나지 않는 팝인을 재현한다.
+    float orbitDegreesPerFrame = 0.0F;
     float triangleBudget = 0.0F;
 };
 
@@ -93,6 +98,7 @@ private:
     std::filesystem::path assetRoot;
     std::filesystem::path sceneRoot;
     std::vector<LoadedModel> loadedModels;
+    float orbitDegreesPerFrame = 0.0F;
     Options options;
 };
 

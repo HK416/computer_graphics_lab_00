@@ -43,6 +43,7 @@ inline constexpr uint32_t DEBUG_MODE_UV = 3;
 inline constexpr uint32_t DEBUG_MODE_DEPTH = 4;
 inline constexpr uint32_t DEBUG_MODE_SHADOW = 7;
 inline constexpr uint32_t DEBUG_MODE_VELOCITY = 8;
+inline constexpr uint32_t DEBUG_MODE_CULL_PHASE = 9;
 
 // 경로 추적이 그릴 수 있는 디버그 뷰인지. meshlet 과 LOD 는 하위 가속 구조가 메쉬 단위 LOD 0 이라
 // 개념 자체가 없고, 캐스케이드는 그림자 맵을 읽지 않으며, 모션 벡터는 경로 추적 프레임에 갱신되지
@@ -388,7 +389,9 @@ private:
                            uint32_t sampleCount);
     void recordShadowPass(VkCommandBuffer commandBuffer);
     void recordSsaoPass(VkCommandBuffer commandBuffer, const Frame& frame);
-    void recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches& batches);
+    // phase 는 culling.glsl 의 CULL_PHASE_*.
+    void recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches& batches, uint32_t phase);
+    void reserveMeshletVisibility(uint32_t meshletCount);
     // 스킨 인스턴스의 변형 정점과 meshlet 경계 구를 만든다. 그림자 패스보다 먼저 온다.
     void recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame);
     // 광선 경로가 이번 프레임에 쓸 가속 구조를 최신으로 맞춘다.
@@ -399,7 +402,10 @@ private:
     FrameBatches buildDrawCommands(Frame& frame, const scene::Scene& scene);
     void recordCommands(Frame& frame, uint32_t imageIndex, const FrameBatches& batches, const scene::Scene& scene);
     void recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, const scene::Scene& scene);
-    void recordGeometryPass(VkCommandBuffer commandBuffer, const FrameBatches& batches, bool translucentPass);
+    void recordGeometryPass(VkCommandBuffer commandBuffer,
+                            const FrameBatches& batches,
+                            bool translucentPass,
+                            uint32_t cullPhase);
     void recordUiPass(VkCommandBuffer commandBuffer, uint32_t imageIndex);
     void writeCapture();
 
@@ -509,6 +515,12 @@ private:
     std::vector<uint32_t> objectSkinnedBlas;
     VkPipelineLayout hzbPipelineLayout = VK_NULL_HANDLE;
     VkPipeline hzbPipeline = VK_NULL_HANDLE;
+    // meshlet 가시성 비트. 프레임을 넘어 살아남으므로 프레임별 버퍼가 아니다. 낡은 비트는 1차
+    // 패스의 드로우 낭비만 낳고 정확성은 2차 패스가 보장하므로 인스턴스 슬롯이 재배치돼도 지우지
+    // 않는다. 커질 때만 0 으로 채운다.
+    Buffer meshletVisibilityBuffer;
+    uint32_t meshletVisibilityCapacity = 0;
+    bool visibilityNeedsClear = true;
     PFN_vkCmdDrawIndexedIndirectCount drawIndexedIndirectCount = nullptr;
     VkPipelineLayout postPipelineLayout = VK_NULL_HANDLE;
     VkPipeline compositePipeline = VK_NULL_HANDLE;

@@ -16,18 +16,17 @@ layout(push_constant) uniform CullPushConstants {
     DrawCommandBuffer drawCommands;
     CounterBuffer drawCounts;
     uint instanceCount;
-    uint flags; // bit 0: 절두체, bit 1: 법선 원뿔, bit 2: HZB 오클루전
-    uint hzbTexture;
-    float hzbMaxLevel;
-    vec2 hzbSize;
+    uint flags; // bit 0: 절두체, bit 1: 법선 원뿔, bit 3: 신경망 LOD
+    // culling.glsl 의 CULL_PHASE_*. 오클루전 컬링은 두 패스로만 돈다.
+    uint phase;
     LodNetworkBuffer network;
     // 스킨 인스턴스의 meshlet 경계 구. 변형 정점에서 프레임마다 다시 잰 것이다.
     SkinnedBoundsBuffer skinnedBounds;
+    VisibilityBuffer visibility;
 } cull;
 
 #define CULL_FLAG_FRUSTUM 1u
 #define CULL_FLAG_CONE 2u
-#define CULL_FLAG_OCCLUSION 4u
 #define CULL_FLAG_NEURAL_LOD 8u
 
 void main() {
@@ -54,32 +53,26 @@ void main() {
     for (uint i = gl_LocalInvocationIndex; i < mesh.meshletCount; i += gl_WorkGroupSize.x) {
         Meshlet meshlet = cull.meshlets.items[mesh.meshletOffset + i];
 
-        if (!selectLod(meshlet,
-                       instance.model,
-                       camera.position.xyz,
-                       camera.parameters.y,
-                       camera.parameters.z,
-                       camera.parameters.w,
-                       useNetwork,
-                       network)) {
-            continue;
-        }
-
+        // 2차 패스는 후보에서 떨어진 meshlet 의 비트도 지워야 하므로 판정을 끝까지 모아 한 번에 넘긴다.
+        bool candidate = selectLod(meshlet,
+                                   instance.model,
+                                   camera.position.xyz,
+                                   camera.parameters.y,
+                                   camera.parameters.z,
+                                   camera.parameters.w,
+                                   useNetwork,
+                                   network);
         vec4 localSphere =
             skinned ? cull.skinnedBounds.items[instance.skinnedMeshletOffset + i] : meshlet.boundingSphere;
         vec4 sphere = transformBoundingSphere(instance.model, localSphere);
         if ((cull.flags & CULL_FLAG_FRUSTUM) != 0u && !sphereInFrustum(planes, sphere.xyz, sphere.w)) {
-            continue;
+            candidate = false;
         }
-        if (!skinned && (cull.flags & CULL_FLAG_CONE) != 0u) {
+        if (candidate && !skinned && (cull.flags & CULL_FLAG_CONE) != 0u) {
             vec3 coneAxis = normalize(normalMatrix * meshlet.cone.xyz);
-            if (!coneVisible(sphere.xyz, sphere.w, coneAxis, meshlet.cone.w, camera.position.xyz)) {
-                continue;
-            }
+            candidate = coneVisible(sphere.xyz, sphere.w, coneAxis, meshlet.cone.w, camera.position.xyz);
         }
-
-        if ((cull.flags & CULL_FLAG_OCCLUSION) != 0u &&
-            occludedByHzb(camera.viewProjection, sphere, cull.hzbTexture, cull.hzbSize, cull.hzbMaxLevel)) {
+        if (!twoPhaseVisible(cull.phase, cull.visibility, instance.visibilityBase + i, candidate, camera, sphere)) {
             continue;
         }
 

@@ -44,6 +44,12 @@ int main(int argc, char* argv[]) {
             options.neuralLod = true;
         } else if (argument == "--pathtrace") {
             options.pathTracing = true;
+        } else if (argument == "--no-occlusion") {
+            options.occlusionCulling = false;
+        } else if (argument == "--no-mesh-shader") {
+            options.meshShader = false;
+        } else if (argument == "--orbit" && i + 1 < argc) {
+            options.orbitDegreesPerFrame = static_cast<float>(std::atof(argv[++i]));
         } else if (argument == "--profile") {
             options.profile = true;
         } else if (argument == "--triangle-budget" && i + 1 < argc) {

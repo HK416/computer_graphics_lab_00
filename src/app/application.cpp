@@ -119,6 +119,11 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     if (options.triangleBudget > 0.0F) {
         renderer->triangleBudget = options.triangleBudget;
     }
+    renderer->occlusionCulling = options.occlusionCulling;
+    if (!options.meshShader) {
+        renderer->useMeshShader = false;
+    }
+    orbitDegreesPerFrame = options.orbitDegreesPerFrame;
     renderer->setUiCallback([this](VkCommandBuffer commandBuffer) { editorUi->record(commandBuffer); });
     editorUi->setModelLoader(assetRoot, [this](const std::filesystem::path& path) { loadModel(path); });
     editorUi->setSceneIo(
@@ -460,6 +465,11 @@ void Application::run() {
         uint64_t currentTicks = SDL_GetTicksNS();
         float deltaSeconds = static_cast<float>(currentTicks - previousTicks) / NANOSECONDS_PER_SECOND;
         previousTicks = currentTicks;
+
+        if (orbitDegreesPerFrame != 0.0F) {
+            scenes.active().camera.yawDegrees += orbitDegreesPerFrame;
+            scenes.active().camera.applyOrbit();
+        }
 
         if ((SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) != 0) {
             SDL_Delay(10);

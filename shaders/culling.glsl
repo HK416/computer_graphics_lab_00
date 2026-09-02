@@ -98,12 +98,13 @@ bool selectLod(Meshlet meshlet,
     return own <= threshold && parent > threshold;
 }
 
-// 이전 프레임 HZB 로 가림 여부를 판정한다. 바운딩 상자의 여덟 꼭짓점을 투영해 화면 사각형을 잡고,
-// 그 크기에 맞는 밉 단계에서 가장 먼 깊이를 읽어 비교한다.
-//
-// ponytail: 이전 프레임 깊이만 쓰는 한 패스 방식이라 카메라가 빠르게 움직이면 한 프레임 늦게 나타난다.
-// 완전히 없애려면 이 프레임 깊이로 다시 판정하는 두 패스 방식으로 올려야 한다.
-bool occludedByHzb(mat4 viewProjection, vec4 sphere, uint hzbTexture, vec2 hzbSize, float hzbMaxLevel) {
+// HZB 로 가림 여부를 판정한다. 바운딩 상자의 여덟 꼭짓점을 투영해 화면 사각형을 잡고, 그 크기에
+// 맞는 밉 단계에서 가장 먼 깊이를 읽어 비교한다. HZB 는 이번 프레임 1차 패스의 깊이로 만든 것이다.
+bool occludedByHzb(Camera camera, vec4 sphere) {
+    mat4 viewProjection = camera.viewProjection;
+    uint hzbTexture = camera.hzb.x;
+    float hzbMaxLevel = float(camera.hzb.y);
+    vec2 hzbSize = vec2(camera.hzb.zw);
     vec2 minUv = vec2(1.0e9);
     vec2 maxUv = vec2(-1.0e9);
     float nearestDepth = 0.0;
@@ -134,6 +135,36 @@ bool occludedByHzb(mat4 viewProjection, vec4 sphere, uint hzbTexture, vec2 hzbSi
     farthest = min(farthest, fetchBindlessLod(hzbTexture, vec2(maxUv.x, maxUv.y), level).r);
 
     return nearestDepth < farthest;
+}
+
+// 두 패스 오클루전 컬링. 1차는 지난 프레임에 보였던 meshlet 만 그려 이번 프레임 깊이로 HZB 를
+// 만들고, 2차는 나머지를 그 HZB 로 판정해 새로 보이게 된 것만 그린다. 2차에서 1차 집합도 다시
+// 판정해 비트를 갱신해야 한 번 보인 meshlet 이 영원히 1차에 남지 않는다.
+bool visibilityBit(VisibilityBuffer bits, uint index) {
+    return (bits.items[index >> 5u] & (1u << (index & 31u))) != 0u;
+}
+
+void setVisibilityBit(VisibilityBuffer bits, uint index, bool visible) {
+    uint mask = 1u << (index & 31u);
+    if (visible) {
+        atomicOr(bits.items[index >> 5u], mask);
+    } else {
+        atomicAnd(bits.items[index >> 5u], ~mask);
+    }
+}
+
+// candidate 는 LOD·절두체·원뿔을 통과했는지. 이 meshlet 을 이번 패스에서 그려야 하면 참을 돌려준다.
+bool twoPhaseVisible(uint phase, VisibilityBuffer bits, uint index, bool candidate, Camera camera, vec4 sphere) {
+    if (phase == CULL_PHASE_NONE) {
+        return candidate;
+    }
+    bool was = visibilityBit(bits, index);
+    if (phase == CULL_PHASE_FIRST) {
+        return candidate && was;
+    }
+    bool now = candidate && !occludedByHzb(camera, sphere);
+    setVisibilityBit(bits, index, now);
+    return now && !was;
 }
 
 #endif

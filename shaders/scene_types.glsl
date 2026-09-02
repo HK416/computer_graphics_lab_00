@@ -98,6 +98,8 @@ struct Instance {
     uint previousSkinnedVertexOffset;
     // 변형 정점에서 다시 잰 meshlet 경계 구가 시작하는 위치. 메쉬의 meshlet 순서와 같다.
     uint skinnedMeshletOffset;
+    // 이 인스턴스의 meshlet 가시성 비트가 시작하는 번호. 메쉬의 모든 LOD 단계 meshlet 이 이어진다.
+    uint visibilityBase;
 };
 
 // 태스크 셰이더 워크그룹 하나가 처리할 meshlet 구간.
@@ -129,6 +131,8 @@ struct Camera {
     uvec4 shading;
     // x: 조도 큐브 슬롯, y: 프리필터 큐브 슬롯, z: BRDF 표 슬롯, w: 프리필터 밉 수(0 이면 IBL 꺼짐).
     uvec4 environment;
+    // x: HZB 샘플 슬롯, y: 최대 밉 단계, zw: 0단계 크기. 컬 컴퓨트와 태스크 셰이더가 함께 읽는다.
+    uvec4 hzb;
 };
 
 #define LIGHT_TYPE_DIRECTIONAL 0u
@@ -166,6 +170,13 @@ struct DrawCommand {
 #define DEBUG_MODE_CASCADE 6u
 #define DEBUG_MODE_SHADOW 7u
 #define DEBUG_MODE_VELOCITY 8u
+// 두 패스 컬링에서 이 화소를 어느 패스가 그렸는지. 1차 초록, 2차 빨강, 오클루전 꺼짐 회색.
+#define DEBUG_MODE_CULL_PHASE 9u
+
+// 두 패스 오클루전 컬링의 단계. 컬 컴퓨트·태스크 셰이더가 판정에 쓰고 프래그먼트가 디버그 뷰에 쓴다.
+#define CULL_PHASE_NONE 0u   // 오클루전 끔. 후보면 그린다.
+#define CULL_PHASE_FIRST 1u  // 지난 프레임 가시 집합만.
+#define CULL_PHASE_SECOND 2u // 나머지 중 이번 HZB 로 보이는 것. 비트를 갱신한다.
 
 layout(buffer_reference, scalar) readonly buffer VertexBuffer {
     Vertex items[];
@@ -180,6 +191,10 @@ layout(buffer_reference, scalar) readonly buffer IndexBuffer {
 // 스킨 인스턴스의 meshlet 경계 구. xyz 중심, w 반지름. 모델 공간이라 인스턴스 변환을 곱해 쓴다.
 layout(buffer_reference, scalar) buffer SkinnedBoundsBuffer {
     vec4 items[];
+};
+// meshlet 하나에 비트 하나. 지난 프레임에 보였는지를 프레임을 넘어 남긴다.
+layout(buffer_reference, scalar) buffer VisibilityBuffer {
+    uint items[];
 };
 layout(buffer_reference, scalar) readonly buffer MeshLodBuffer {
     MeshLod items[];

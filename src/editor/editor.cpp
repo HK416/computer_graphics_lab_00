@@ -992,11 +992,12 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     ImGui::SeparatorText("컬링과 LOD");
     ImGui::BeginDisabled(rasterOnly);
     ImGui::Checkbox("컴퓨트 컬링", &renderer.useComputeCulling);
+    // 오클루전은 mesh shader 경로의 태스크 셰이더에도 적용되므로 컴퓨트 컬링 잠금 밖에 둔다.
+    ImGui::Checkbox("HZB 오클루전 컬링 (두 패스)", &renderer.occlusionCulling);
     ImGui::BeginDisabled(!renderer.useComputeCulling);
     ImGui::Checkbox("절두체 컬링", &renderer.frustumCulling);
     ImGui::SameLine();
     ImGui::Checkbox("법선 원뿔 컬링", &renderer.coneCulling);
-    ImGui::Checkbox("HZB 오클루전 컬링", &renderer.occlusionCulling);
     ImGui::EndDisabled();
 
     ImGui::Checkbox("자동 LOD 선정", &renderer.automaticLod);
@@ -1148,7 +1149,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     }
 
     static constexpr const char* DEBUG_MODE_NAMES[] = {
-        "셰이딩", "meshlet", "노멀", "UV", "깊이", "LOD", "캐스케이드", "그림자", "모션 벡터"};
+        "셰이딩", "meshlet", "노멀", "UV", "깊이", "LOD", "캐스케이드", "그림자", "모션 벡터", "컬 패스"};
     // 경로 추적은 래스터에 있는 모드를 다 그리지는 못한다. 못 그리는 것만 개별로 잠근다.
     auto modeUsable = [this](uint32_t mode) {
         return !renderer.usePathTracing || gfx::pathTraceSupportsDebugMode(mode);

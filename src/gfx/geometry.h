@@ -95,6 +95,8 @@ struct GpuInstance {
     uint32_t previousSkinnedVertexOffset;
     // 변형 정점에서 다시 잰 meshlet 경계 구가 시작하는 위치.
     uint32_t skinnedMeshletOffset;
+    // 이 인스턴스의 meshlet 가시성 비트가 시작하는 번호. 메쉬의 모든 LOD 단계 meshlet 이 이어진다.
+    uint32_t visibilityBase;
 };
 
 // 모든 모델의 정점과 인덱스를 하나의 버퍼로 합쳐 간접 그리기 한 번으로 장면 전체를 그릴 수 있게 한다.
