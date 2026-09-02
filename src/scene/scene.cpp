@@ -9,6 +9,65 @@
 
 namespace scene {
 
+namespace {
+
+// 살아남은 오브젝트가 하나도 가리키지 않는 부품을 버리고 첨자를 다시 맞춘다.
+// 애니메이터처럼 여러 오브젝트가 함께 가리키는 부품도 있어 소유가 아니라 참조를 기준으로 센다.
+template <typename T>
+void compactComponents(std::vector<T>& items, std::vector<Object>& objects, int32_t Object::* handle) {
+    std::vector<uint8_t> referenced(items.size(), 0);
+    for (const Object& object : objects) {
+        int32_t slot = object.*handle;
+        if (slot >= 0 && static_cast<size_t>(slot) < items.size()) {
+            referenced[static_cast<size_t>(slot)] = 1;
+        }
+    }
+
+    std::vector<int32_t> remap(items.size(), -1);
+    std::vector<T> kept;
+    kept.reserve(items.size());
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (referenced[i] == 0) {
+            continue;
+        }
+        remap[i] = static_cast<int32_t>(kept.size());
+        kept.push_back(std::move(items[i]));
+    }
+    for (Object& object : objects) {
+        int32_t& slot = object.*handle;
+        slot = slot >= 0 && static_cast<size_t>(slot) < remap.size() ? remap[static_cast<size_t>(slot)] : -1;
+    }
+    items = std::move(kept);
+}
+
+// 복사본들이 가리키는 부품마다 사본을 하나씩 만들고 그것을 가리키게 한다. 같은 부품을 함께
+// 가리키던 것들은 사본에서도 함께 가리킨다. 스킨 모델의 뿌리와 자식이 애니메이터 하나를 공유하는
+// 관계가 복제 뒤에도 유지되어야 하기 때문이다.
+template <typename T>
+void duplicateComponents(std::vector<T>& items,
+                         std::vector<Object>& objects,
+                         const std::vector<int32_t>& objectRemap,
+                         int32_t Object::* handle) {
+    std::vector<int32_t> copyOf(items.size(), -1);
+    for (size_t i = 0; i < objectRemap.size(); ++i) {
+        if (objectRemap[i] < 0) {
+            continue;
+        }
+        int32_t& slot = objects[static_cast<size_t>(objectRemap[i])].*handle;
+        if (slot < 0 || static_cast<size_t>(slot) >= copyOf.size()) {
+            continue;
+        }
+        if (copyOf[static_cast<size_t>(slot)] < 0) {
+            copyOf[static_cast<size_t>(slot)] = static_cast<int32_t>(items.size());
+            T copy = items[static_cast<size_t>(slot)];
+            items.push_back(std::move(copy));
+        }
+        slot = copyOf[static_cast<size_t>(slot)];
+    }
+}
+
+} // namespace
+
 glm::mat4 Transform::matrix() const {
     glm::mat4 result = glm::translate(glm::mat4(1.0F), position);
     result *= glm::mat4_cast(rotation);
@@ -218,6 +277,11 @@ void Scene::removeObject(uint32_t index) {
         }
     }
     objects = std::move(kept);
+
+    // 아무도 가리키지 않게 된 부품은 함께 사라진다. 예전에는 남아 고아가 됐다.
+    compactComponents(meshRenderers, objects, &Object::meshRenderer);
+    compactComponents(animators, objects, &Object::animator);
+    compactComponents(lights, objects, &Object::light);
 }
 
 uint32_t Scene::duplicateObject(uint32_t index) {
@@ -245,6 +309,15 @@ uint32_t Scene::duplicateObject(uint32_t index) {
             copy.parent = remap[static_cast<size_t>(copy.parent)];
         }
     }
+
+    // 부품까지 복제해야 사본이 원본과 독립적으로 편집된다. 예전에는 첨자만 복사되어 조명 하나를
+    // 둘이 나눠 쓰고, 복제한 캐릭터가 원본과 같은 클립·같은 시각으로 붙어 움직였다.
+    //
+    // ponytail: 애니메이터 사본은 스켈레톤과 애니메이션 커브까지 통째로 복사한다. 리그가 큰
+    // 모델을 여러 벌 복제하면 눈에 띌 수 있다. 필요하면 스켈레톤을 공유 포인터로 돌리면 된다.
+    duplicateComponents(meshRenderers, objects, remap, &Object::meshRenderer);
+    duplicateComponents(animators, objects, remap, &Object::animator);
+    duplicateComponents(lights, objects, remap, &Object::light);
     return static_cast<uint32_t>(remap[index]);
 }
 

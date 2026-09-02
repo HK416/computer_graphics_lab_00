@@ -62,6 +62,37 @@ int main() {
     assert(scene.objects[2].parent == 1 && "복제본 사이의 부모 관계도 새 인덱스를 따라야 한다");
     assert(origin(scene, 2).x == 3.0F);
 
+    // 부품은 오브젝트에 묶인다. 복제하면 사본이 제 부품을 갖고, 지우면 아무도 안 가리키는
+    // 부품이 함께 사라진다. 예전에는 첨자만 복사되어 원본과 부품 하나를 나눠 썼다.
+    scene::Scene parts = makeChain();
+    parts.lights.push_back(scene::Light{});
+    parts.objects[1].light = 0;
+    parts.attachMeshRenderer(1, 7);
+
+    uint32_t partsCopy = parts.duplicateObject(1);
+    assert(parts.lights.size() == 2 && "복제본은 제 조명을 가져야 한다");
+    assert(parts.objects[partsCopy].light == 1 && "복제본이 원본 조명을 가리키면 안 된다");
+    assert(parts.meshOf(partsCopy) == 7 && "메쉬 부품도 함께 복제되어야 한다");
+    parts.lights[static_cast<size_t>(parts.objects[partsCopy].light)].intensity = 99.0F;
+    assert(parts.lights[0].intensity != 99.0F && "사본을 고쳐도 원본 조명은 그대로여야 한다");
+
+    parts.removeObject(partsCopy);
+    assert(parts.lights.size() == 1 && "가리키는 오브젝트가 사라지면 조명도 사라진다");
+    assert(parts.objects[1].light == 0 && "남은 오브젝트의 조명 첨자는 새 자리를 가리켜야 한다");
+    assert(parts.meshOf(1) == 7 && "남은 오브젝트의 메쉬 부품은 그대로여야 한다");
+
+    // 하나의 애니메이터를 뿌리와 자식이 함께 가리키는 관계는 복제 뒤에도 유지된다.
+    scene::Scene rig = makeChain();
+    rig.animators.push_back(scene::Animator{});
+    rig.objects[0].animator = 0;
+    rig.objects[1].animator = 0;
+    rig.objects[2].animator = 0;
+    uint32_t rigCopy = rig.duplicateObject(0);
+    assert(rig.animators.size() == 2 && "복제된 사슬 전체가 애니메이터 하나를 새로 가져야 한다");
+    assert(rig.objects[rigCopy].animator == 1);
+    assert(rig.objects[rigCopy + 1].animator == 1 && "사본끼리는 계속 같은 애니메이터를 공유한다");
+    assert(rig.objects[rigCopy + 2].animator == 1);
+
     // 부모가 자식보다 뒤에 있어도 세계 변환이 맞아야 한다.
     scene::Scene reversed;
     scene::Object child;
