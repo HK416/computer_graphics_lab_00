@@ -412,9 +412,8 @@ foreach(test_target
     else()
         target_compile_options(${test_target} PRIVATE -UNDEBUG)
     endif()
-    # 실행 파일과 같은 이유로 테스트에도 UTF-8 매니페스트가 필요하다. 없으면 한글이 섞인 경로를
-    # std::filesystem::path 로 만들 때 시스템 코드 페이지로 변환하다 예외를 던지고, 그 예외가
-    # 테스트 밖으로 나가 terminate 로 죽는다(0xC0000409).
+    # 한글이 섞인 경로를 std::filesystem::path 로 만들 때 시스템 코드 페이지로 변환하다 예외를
+    # 던진다. 실행 파일과 같은 이유로 테스트에도 필요하다.
     if(WIN32)
         target_sources(${test_target} PRIVATE platform/windows/cg_lab.manifest)
     endif()

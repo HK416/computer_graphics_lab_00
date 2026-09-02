@@ -110,7 +110,7 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     renderer->renderScale = options.renderScale;
     renderer->upscaler = static_cast<gfx::Upscaler>(options.upscaler);
     if (options.pathTracing) {
-        // 편집기 체크박스와 같은 게이트를 탄다. 미지원 장치에서 켜면 빈 화면만 나온다.
+        // 편집기 체크박스와 같은 게이트를 탄다.
         if (renderer->pathTracingAvailable()) {
             renderer->usePathTracing = true;
         } else {

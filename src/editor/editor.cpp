@@ -956,8 +956,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
 
     static constexpr const char* DEBUG_MODE_NAMES[] = {
         "셰이딩", "meshlet", "노멀", "UV", "깊이", "LOD", "캐스케이드", "그림자", "모션 벡터"};
-    // 디버그 뷰는 래스터 프래그먼트 셰이더가 그린다. 경로 추적은 mesh.frag 를 타지 않아 고른
-    // 값이 화면에 반영되지 않으므로, 켜 두고 안 먹는 것보다 잠가 두는 편이 낫다.
+    // 디버그 뷰는 mesh.frag 에서만 그린다. 경로 추적은 그 패스를 타지 않는다.
     ImGui::BeginDisabled(renderer.usePathTracing);
     int debugMode = static_cast<int>(renderer.debugMode);
     if (ImGui::Combo("디버그 뷰", &debugMode, DEBUG_MODE_NAMES, IM_ARRAYSIZE(DEBUG_MODE_NAMES))) {

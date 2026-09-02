@@ -142,8 +142,7 @@ void RayTracer::reserveScratch(Buffer& buffer, VkDeviceSize size, const char* de
         return;
     }
     destroyBuffer(context, buffer);
-    // 구축 스크래치는 장치가 정렬을 요구한다. SBT 정렬(shaderGroupBaseAlignment)은 지키면서 이건
-    // 빠져 있었다. VMA 기본 정렬이 우연히 커서 통과하던 것에 기대지 않는다.
+    // 구축 스크래치는 장치가 요구하는 정렬을 지켜야 한다.
     buffer = createBuffer(context,
                           size,
                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -408,9 +407,8 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
         instance.accelerationStructureReference = blasAddress;
         instances.push_back(instance);
     }
-    // 인스턴스가 하나도 없어도 상위 구조를 비워서 다시 세운다. 여기서 그냥 돌아가면 지운 모델이
-    // 담긴 지난 구조가 그대로 남아, 경로 추적과 광선 질의 그림자에 계속 보인다.
-
+    // 인스턴스가 비어도 그냥 돌아가지 않는다. 건너뛰면 지운 모델이 담긴 지난 구조가 그대로 남아
+    // 경로 추적과 광선 질의 그림자에 계속 보인다.
     if (instanceBuffers.size() <= frameSlot) {
         instanceBuffers.resize(frameSlot + 1);
         instanceCapacities.resize(frameSlot + 1, 0);
@@ -469,7 +467,7 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
         write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
         vkUpdateDescriptorSets(context.device, 1, &write, 0, nullptr);
     }
-    // 빈 장면이라 구조를 만들 크기조차 나오지 않으면 세울 것도 추적할 것도 없다.
+    // 빈 장면이면 세울 구조도 추적할 것도 없다.
     if (topLevel.handle == VK_NULL_HANDLE) {
         return;
     }
@@ -528,8 +526,7 @@ void RayTracer::createPipeline() {
     pushConstantRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
                                    VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
     pushConstantRange.size = sizeof(PathTracePushConstants);
-    // bindless.cpp 와 texture.cpp 처럼 장치 한도와 대조한다. 규격 보장 최소치는 128 바이트라
-    // 여유가 넉넉하지 않고, 이 구조체는 앞으로 더 커진다.
+    // 규격 보장 최소치가 128 바이트라 여유가 넉넉하지 않다.
     if (pushConstantRange.size > context.properties.limits.maxPushConstantsSize) {
         core::fatal("경로 추적 푸시 상수가 장치 한도를 넘습니다: {} > {} 바이트",
                     pushConstantRange.size,
