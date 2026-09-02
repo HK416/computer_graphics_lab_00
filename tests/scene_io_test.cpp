@@ -56,18 +56,19 @@ scene::Scene makeScene() {
     scene::Object child;
     child.name = "몸통";
     child.parent = 0;
-    child.meshIndex = 1; // 첫 모델의 두 번째 메쉬
     child.animator = 0;
-    child.skin = 0;
     child.transform.position = glm::vec3{0.0F, 1.0F, 0.0F};
     child.transform.scale = glm::vec3{2.0F};
     scene.objects.push_back(std::move(child));
+    // 첫 모델의 두 번째 메쉬, 스킨 0.
+    scene.attachMeshRenderer(1, 1, 0);
 
     scene::Object helmet;
     helmet.name = "헬멧";
-    helmet.meshIndex = 3; // 두 번째 모델의 두 번째 메쉬
     helmet.visible = false;
     scene.objects.push_back(std::move(helmet));
+    // 두 번째 모델의 두 번째 메쉬.
+    scene.attachMeshRenderer(2, 3);
 
     scene::Object light;
     light.name = "스폿광";
@@ -110,6 +111,7 @@ int main() {
     assert(std::abs(light.outerConeDegrees - 41.0F) < 1e-5F);
     assert(!light.castsShadow);
     assert(loaded.scene.objects[3].light == 0);
+    assert(loaded.scene.skinOf(1) == 0 && "스킨 번호가 메쉬 부품에 실려 돌아와야 한다");
 
     assert(loaded.animatorModels[0] == 0 && "애니메이터는 어느 모델에서 왔는지 기억해야 한다");
     assert(loaded.scene.animators[0].clip == 2);
@@ -134,8 +136,9 @@ int main() {
 
     // 한 번 더 돌려도 같은 문자열이어야 한다.
     scene::Scene rebuilt = loaded.scene;
-    rebuilt.objects[1].meshIndex = 1;
-    rebuilt.objects[2].meshIndex = 3;
+    // 메쉬 번호만 되꽂는다. 스킨은 이미 부품에 실려 왔으므로 그대로 둔다.
+    rebuilt.attachMeshRenderer(1, 1, rebuilt.skinOf(1));
+    rebuilt.attachMeshRenderer(2, 3, rebuilt.skinOf(2));
     assert(scene::writeScene(rebuilt, table) == text && "왕복해도 같은 파일이 나와야 한다");
 
     std::printf("장면 저장/불러오기 자체 점검 통과\n");

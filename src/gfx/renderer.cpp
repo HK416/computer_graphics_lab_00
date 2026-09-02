@@ -1692,11 +1692,11 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
     bool hasBounds = false;
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
         const scene::Object& object = scene.objects[index];
-        if (object.meshIndex >= geometry.meshCount() || !scene.visibleCached(index)) {
+        if (scene.meshOf(index) >= geometry.meshCount() || !scene.visibleCached(index)) {
             continue;
         }
         const glm::mat4& world = scene.world(index);
-        glm::vec4 sphere = geometry.mesh(object.meshIndex).boundingSphere;
+        glm::vec4 sphere = geometry.mesh(scene.meshOf(index)).boundingSphere;
         glm::vec3 center = glm::vec3(world * glm::vec4{glm::vec3(sphere), 1.0F});
         float scale = std::sqrt(std::max({glm::dot(glm::vec3(world[0]), glm::vec3(world[0])),
                                           glm::dot(glm::vec3(world[1]), glm::vec3(world[1])),
@@ -1848,20 +1848,20 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     uint32_t skinnedVertexCursor = 0;
 
     // 재질 경로와 면 방향 조합마다 명령이 연속 구간을 이루도록 두 번 순회한다.
-    auto bucketOf = [this](const scene::Object& object) {
-        const asset::Material& material = geometry.material(geometry.mesh(object.meshIndex).materialIndex);
+    auto bucketOf = [this, &scene](uint32_t index) {
+        const asset::Material& material = geometry.material(geometry.mesh(scene.meshOf(index)).materialIndex);
         return std::pair<size_t, size_t>{static_cast<size_t>(material.alphaMode), material.doubleSided ? 1U : 0U};
     };
-    auto lodFor = [this](const scene::Object& object) -> const GpuMeshLod& {
-        const GpuMesh& mesh = geometry.mesh(object.meshIndex);
+    auto lodFor = [this, &scene](uint32_t index) -> const GpuMeshLod& {
+        const GpuMesh& mesh = geometry.mesh(scene.meshOf(index));
         return geometry.lod(mesh.lodOffset + std::min(lodLevel, mesh.lodCount - 1));
     };
-    auto groupsFor = [&lodFor](const scene::Object& object) {
-        return (lodFor(object).meshletCount + MESHLET_GROUP_SIZE - 1) / MESHLET_GROUP_SIZE;
+    auto groupsFor = [&lodFor](uint32_t index) {
+        return (lodFor(index).meshletCount + MESHLET_GROUP_SIZE - 1) / MESHLET_GROUP_SIZE;
     };
     // 조상이 숨겨져 있으면 자식도 그리지 않는다. 변환만 담는 노드는 메쉬가 없어 걸러진다.
     auto drawable = [this, &scene](uint32_t index) {
-        return scene.visibleCached(index) && scene.objects[index].meshIndex < geometry.meshCount();
+        return scene.visibleCached(index) && scene.meshOf(index) < geometry.meshCount();
     };
 
     FrameBatches batches{};
@@ -1872,13 +1872,13 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
             continue;
         }
         const scene::Object& object = scene.objects[index];
-        auto [mode, sided] = bucketOf(object);
+        auto [mode, sided] = bucketOf(index);
         ++batches.draws[mode][sided].count;
-        uint32_t groups = groupsFor(object);
+        uint32_t groups = groupsFor(index);
         batches.groups[mode][sided].count += groups;
         totalGroups += groups;
         // 컴퓨트 컬링은 모든 단계의 meshlet 을 후보로 보므로 상한도 전체 개수로 잡는다.
-        uint32_t candidates = geometry.mesh(object.meshIndex).meshletCount;
+        uint32_t candidates = geometry.mesh(scene.meshOf(index)).meshletCount;
         batches.meshletDraws[mode][sided].count += candidates;
         totalMeshletDraws += candidates;
         ++batches.instanceCount;
@@ -1916,13 +1916,15 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     std::ranges::copy(reusePreviousJoints ? previousJointMatrices : jointMatrices,
                       static_cast<glm::mat4*>(frame.previousJointBuffer.mapped));
     previousJointMatrices.swap(jointMatrices);
-    auto jointOffsetFor = [&skinOffsets](const scene::Object& object) {
-        if (object.animator < 0 || object.skin < 0) {
+    auto jointOffsetFor = [&skinOffsets, &scene](uint32_t index) {
+        int32_t animator = scene.objects[index].animator;
+        int32_t skin = scene.skinOf(index);
+        // 부품이 오브젝트와 함께 사라질 수 있으므로 첨자를 그대로 믿지 않는다.
+        if (animator < 0 || skin < 0 || static_cast<size_t>(animator) >= skinOffsets.size()) {
             return NO_JOINTS;
         }
-        const std::vector<uint32_t>& offsets = skinOffsets[static_cast<size_t>(object.animator)];
-        return static_cast<size_t>(object.skin) < offsets.size() ? offsets[static_cast<size_t>(object.skin)]
-                                                                 : NO_JOINTS;
+        const std::vector<uint32_t>& offsets = skinOffsets[static_cast<size_t>(animator)];
+        return static_cast<size_t>(skin) < offsets.size() ? offsets[static_cast<size_t>(skin)] : NO_JOINTS;
     };
 
     uint32_t drawOffset = 0;
@@ -1957,11 +1959,11 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
             continue;
         }
         const scene::Object& object = scene.objects[index];
-        auto [mode, sided] = bucketOf(object);
+        auto [mode, sided] = bucketOf(index);
         uint32_t slot = drawCursors[mode][sided]++;
 
-        const GpuMesh& mesh = geometry.mesh(object.meshIndex);
-        const GpuMeshLod& lod = lodFor(object);
+        const GpuMesh& mesh = geometry.mesh(scene.meshOf(index));
+        const GpuMeshLod& lod = lodFor(index);
         const glm::mat4& model = scene.world(index);
         objectInstanceSlots[index] = slot;
 
@@ -1969,21 +1971,21 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         instances[slot].previousModel = temporalReset ? model : previousWorld[index];
         instances[slot].normalMatrix = glm::mat4(glm::inverseTranspose(glm::mat3(model)));
         instanceBounds[slot] = transformBoundingSphere(model, mesh.boundingSphere);
-        instances[slot].meshIndex = object.meshIndex;
+        instances[slot].meshIndex = scene.meshOf(index);
         instances[slot].bucket = static_cast<uint32_t>(mode * 2 + sided);
         instances[slot].bucketBase = batches.meshletDraws[mode][sided].first;
-        uint32_t jointOffset = jointOffsetFor(object);
+        uint32_t jointOffset = jointOffsetFor(index);
         instances[slot].jointOffset = jointOffset;
 
         // 스킨 인스턴스는 변형 정점을 따로 뽑아 두고, 그 구간으로 자기 하위 가속 구조를 세운다.
         // 같은 메쉬를 여러 오브젝트가 서로 다른 포즈로 쓸 수 있어 오브젝트마다 하나씩 잡는다.
         uint32_t skinnedVertexOffset = NO_SKINNED_VERTICES;
         if (rayTracedFrame && jointOffset != NO_JOINTS) {
-            uint32_t vertexCount = geometry.meshVertexCount(object.meshIndex);
+            uint32_t vertexCount = geometry.meshVertexCount(scene.meshOf(index));
             skinnedVertexOffset = skinnedVertexCursor;
             skinnedVertexCursor += vertexCount;
             objectSkinnedBlas[index] = static_cast<uint32_t>(skinnedInstances.size());
-            skinnedInstances.push_back(SkinnedInstance{object.meshIndex, skinnedVertexOffset});
+            skinnedInstances.push_back(SkinnedInstance{scene.meshOf(index), skinnedVertexOffset});
             skinDispatches.push_back(SkinDispatch{static_cast<uint32_t>(mesh.vertexOffset),
                                                   skinnedVertexOffset,
                                                   jointOffset,
@@ -1998,7 +2000,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         // 셰이더는 gl_InstanceIndex 로 인스턴스 배열을 참조한다.
         draws[slot].firstInstance = slot;
 
-        for (uint32_t group = 0; group < groupsFor(object); ++group) {
+        for (uint32_t group = 0; group < groupsFor(index); ++group) {
             uint32_t groupSlot = groupCursors[mode][sided]++;
             uint32_t first = group * MESHLET_GROUP_SIZE;
             groups[groupSlot].instanceIndex = slot;
@@ -2206,9 +2208,9 @@ void Renderer::updateLodNetwork(const scene::Scene& scene, Frame& frame, float p
     }
 
     uint32_t candidateCount = 0;
-    for (const scene::Object& object : scene.objects) {
-        if (object.visible && object.meshIndex < geometry.meshCount()) {
-            candidateCount += geometry.mesh(object.meshIndex).meshletCount;
+    for (uint32_t index = 0; index < scene.objects.size(); ++index) {
+        if (scene.objects[index].visible && scene.meshOf(index) < geometry.meshCount()) {
+            candidateCount += geometry.mesh(scene.meshOf(index)).meshletCount;
         }
     }
     if (candidateCount == 0) {
@@ -2222,11 +2224,12 @@ void Renderer::updateLodNetwork(const scene::Scene& scene, Frame& frame, float p
 
     glm::vec3 cameraPosition = scene.camera.position;
     uint32_t candidateIndex = 0;
-    for (const scene::Object& object : scene.objects) {
-        if (!object.visible || object.meshIndex >= geometry.meshCount()) {
+    for (uint32_t index = 0; index < scene.objects.size(); ++index) {
+        const scene::Object& object = scene.objects[index];
+        if (!object.visible || scene.meshOf(index) >= geometry.meshCount()) {
             continue;
         }
-        const GpuMesh& mesh = geometry.mesh(object.meshIndex);
+        const GpuMesh& mesh = geometry.mesh(scene.meshOf(index));
         glm::mat4 model = object.transform.matrix();
         float modelScale = std::sqrt(std::max({glm::dot(glm::vec3(model[0]), glm::vec3(model[0])),
                                                glm::dot(glm::vec3(model[1]), glm::vec3(model[1])),

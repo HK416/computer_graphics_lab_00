@@ -44,12 +44,11 @@ void frameCamera(scene::Scene& scene, const gfx::GeometryStore& geometry) {
     glm::vec3 maximum{std::numeric_limits<float>::lowest()};
     bool found = false;
     for (uint32_t i = 0; i < scene.objects.size(); ++i) {
-        const scene::Object& object = scene.objects[i];
-        if (object.meshIndex >= geometry.meshCount()) {
+        if (scene.meshOf(i) >= geometry.meshCount()) {
             continue;
         }
         glm::mat4 world = scene.worldMatrix(i);
-        glm::vec4 sphere = geometry.mesh(object.meshIndex).boundingSphere;
+        glm::vec4 sphere = geometry.mesh(scene.meshOf(i)).boundingSphere;
         glm::vec3 center = glm::vec3(world * glm::vec4{glm::vec3(sphere), 1.0F});
         // 비균등 스케일은 가장 긴 축으로 보수적으로 잡는다.
         float scale = std::sqrt(std::max({glm::dot(glm::vec3(world[0]), glm::vec3(world[0])),
@@ -299,13 +298,13 @@ void Application::instantiateModel(uint32_t modelIndex, scene::Scene& scene) {
         scene::Object object;
         object.name = instance.name;
         object.parent = root;
-        object.meshIndex = entry.meshBase + instance.meshIndex;
         object.transform = scene::Transform::fromMatrix(instance.transform);
         if (instance.skin >= 0) {
             object.animator = animator;
-            object.skin = instance.skin;
         }
         scene.objects.push_back(std::move(object));
+        scene.attachMeshRenderer(
+            static_cast<uint32_t>(scene.objects.size() - 1), entry.meshBase + instance.meshIndex, instance.skin);
     }
 
     // 바인드 포즈라도 조인트 행렬이 있어야 스킨 메쉬가 제자리에 선다.
@@ -341,10 +340,10 @@ void Application::saveScene(const std::filesystem::path& path) {
             table.meshCount.push_back(loadedModels[modelIndex].meshCount);
         }
     };
-    for (const scene::Object& object : active.objects) {
+    for (uint32_t object = 0; object < active.objects.size(); ++object) {
+        uint32_t mesh = active.meshOf(object);
         for (uint32_t i = 0; i < loadedModels.size(); ++i) {
-            if (object.meshIndex >= loadedModels[i].meshBase &&
-                object.meshIndex < loadedModels[i].meshBase + loadedModels[i].meshCount) {
+            if (mesh >= loadedModels[i].meshBase && mesh < loadedModels[i].meshBase + loadedModels[i].meshCount) {
                 useModel(i);
                 break;
             }
@@ -404,7 +403,9 @@ void Application::openScene(const std::filesystem::path& path) {
     for (size_t i = 0; i < created.objects.size(); ++i) {
         int32_t model = loaded.objectModels[i];
         if (model >= 0 && static_cast<size_t>(model) < modelIndices.size()) {
-            created.objects[i].meshIndex = loadedModels[modelIndices[model]].meshBase + loaded.objectLocalMeshes[i];
+            created.attachMeshRenderer(static_cast<uint32_t>(i),
+                                       loadedModels[modelIndices[model]].meshBase + loaded.objectLocalMeshes[i],
+                                       created.skinOf(static_cast<uint32_t>(i)));
         }
     }
     for (size_t i = 0; i < created.animators.size(); ++i) {

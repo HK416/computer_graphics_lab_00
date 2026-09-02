@@ -146,7 +146,8 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
     document["animators"] = animators;
 
     json objects = json::array();
-    for (const Object& object : scene.objects) {
+    for (uint32_t objectIndex = 0; objectIndex < scene.objects.size(); ++objectIndex) {
+        const Object& object = scene.objects[objectIndex];
         json entry{{"name", object.name},
                    {"parent", object.parent},
                    {"position", toJson(object.transform.position)},
@@ -155,13 +156,14 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
                    {"visible", object.visible}};
         int32_t model = -1;
         uint32_t localMesh = 0;
-        if (object.meshIndex != INVALID_MESH && locateMesh(models, object.meshIndex, model, localMesh)) {
+        uint32_t mesh = scene.meshOf(objectIndex);
+        if (mesh != INVALID_MESH && locateMesh(models, mesh, model, localMesh)) {
             entry["model"] = model;
             entry["mesh"] = localMesh;
         }
         if (object.animator >= 0) {
             entry["animator"] = object.animator;
-            entry["skin"] = object.skin;
+            entry["skin"] = scene.skinOf(objectIndex);
         }
         if (object.light >= 0) {
             entry["light"] = object.light;
@@ -254,11 +256,16 @@ SceneFile readScene(const std::string& text) {
         object.transform.scale = toVec3(entry.value("scale", json{}), glm::vec3{1.0F});
         object.visible = entry.value("visible", true);
         object.animator = entry.value("animator", -1);
-        object.skin = entry.value("skin", -1);
         object.light = entry.value("light", -1);
+        auto skin = entry.value("skin", -1);
         file.scene.objects.push_back(std::move(object));
         file.objectModels.push_back(entry.value("model", -1));
         file.objectLocalMeshes.push_back(entry.value("mesh", 0U));
+        // 전역 메쉬 번호는 모델을 올린 뒤에야 정해진다. 부품만 미리 붙여 스킨을 담아 둔다.
+        if (file.objectModels.back() >= 0 || skin >= 0) {
+            file.scene.attachMeshRenderer(
+                static_cast<uint32_t>(file.scene.objects.size() - 1), INVALID_MESH, skin);
+        }
     }
     return file;
 }

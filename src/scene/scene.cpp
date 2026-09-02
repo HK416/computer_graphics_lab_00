@@ -160,6 +160,33 @@ bool Scene::isDescendant(uint32_t candidate, uint32_t ancestor) const {
     return false;
 }
 
+int32_t Scene::attachMeshRenderer(uint32_t index, uint32_t mesh, int32_t skin) {
+    Object& object = objects[index];
+    if (object.meshRenderer < 0 || static_cast<size_t>(object.meshRenderer) >= meshRenderers.size()) {
+        object.meshRenderer = static_cast<int32_t>(meshRenderers.size());
+        meshRenderers.push_back(MeshRenderer{mesh, skin});
+    } else {
+        meshRenderers[static_cast<size_t>(object.meshRenderer)] = MeshRenderer{mesh, skin};
+    }
+    return object.meshRenderer;
+}
+
+uint32_t Scene::meshOf(uint32_t index) const {
+    int32_t slot = objects[index].meshRenderer;
+    if (slot < 0 || static_cast<size_t>(slot) >= meshRenderers.size()) {
+        return INVALID_MESH;
+    }
+    return meshRenderers[static_cast<size_t>(slot)].mesh;
+}
+
+int32_t Scene::skinOf(uint32_t index) const {
+    int32_t slot = objects[index].meshRenderer;
+    if (slot < 0 || static_cast<size_t>(slot) >= meshRenderers.size()) {
+        return -1;
+    }
+    return meshRenderers[static_cast<size_t>(slot)].skin;
+}
+
 void Scene::removeObject(uint32_t index) {
     std::vector<bool> doomed(objects.size(), false);
     doomed[index] = true;

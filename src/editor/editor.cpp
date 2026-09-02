@@ -390,10 +390,10 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
                 float radius = std::max(geometry.mesh(meshIndex).boundingSphere.w, 0.1F);
                 scene::Object object;
                 object.name = geometry.meshName(meshIndex);
-                object.meshIndex = meshIndex;
                 object.transform.position = active.camera.position + active.camera.forward() * (radius * 3.0F);
                 active.objects.push_back(std::move(object));
                 selectedObject = static_cast<int>(active.objects.size()) - 1;
+                active.attachMeshRenderer(static_cast<uint32_t>(selectedObject), meshIndex);
             }
         }
         ImGui::EndPopup();
@@ -562,9 +562,10 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         }
     }
 
-    if (object.meshIndex < geometry.meshCount() &&
+    uint32_t selectedMesh = active.meshOf(static_cast<uint32_t>(selectedObject));
+    if (selectedMesh < geometry.meshCount() &&
         ImGui::CollapsingHeader("메쉬와 재질", ImGuiTreeNodeFlags_DefaultOpen)) {
-        const gfx::GpuMesh& mesh = geometry.mesh(object.meshIndex);
+        const gfx::GpuMesh& mesh = geometry.mesh(selectedMesh);
         ImGui::Text("삼각형 %u", mesh.indexCount / 3);
         ImGui::Text("바운딩 반지름 %.3f", mesh.boundingSphere.w);
 
@@ -1050,8 +1051,8 @@ void Editor::focusSelected(scene::Scene& active, const gfx::GeometryStore& geome
     glm::mat4 world = active.worldMatrix(index);
     glm::vec3 center = glm::vec3(world[3]);
     float radius = 1.0F;
-    if (active.objects[index].meshIndex < geometry.meshCount()) {
-        glm::vec4 sphere = geometry.mesh(active.objects[index].meshIndex).boundingSphere;
+    if (active.meshOf(index) < geometry.meshCount()) {
+        glm::vec4 sphere = geometry.mesh(active.meshOf(index)).boundingSphere;
         center = glm::vec3(world * glm::vec4{glm::vec3(sphere), 1.0F});
         // 비균등 스케일은 가장 긴 축으로 보수적으로 잡는다.
         radius = sphere.w * std::sqrt(std::max({glm::dot(glm::vec3(world[0]), glm::vec3(world[0])),

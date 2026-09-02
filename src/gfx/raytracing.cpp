@@ -377,15 +377,15 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
     instances.reserve(sceneToTrace.objects.size());
 
     for (uint32_t index = 0; index < sceneToTrace.objects.size(); ++index) {
-        const scene::Object& object = sceneToTrace.objects[index];
+        uint32_t mesh = sceneToTrace.meshOf(index);
         if (index >= instanceSlots.size() || instanceSlots[index] == INVALID_INSTANCE_SLOT ||
-            object.meshIndex >= bottomLevels.size()) {
+            mesh >= bottomLevels.size()) {
             continue;
         }
         // 스킨 오브젝트는 이번 프레임의 포즈로 다시 세운 구조를 가리킨다. 바인드 포즈 구조를
         // 그대로 두면 화면에서만 움직이고 광선은 서 있는 몸을 맞힌다.
         uint32_t skinnedSlot = index < skinnedBlasSlots.size() ? skinnedBlasSlots[index] : NO_SKINNED_BLAS;
-        VkDeviceAddress blasAddress = bottomLevels[object.meshIndex].address;
+        VkDeviceAddress blasAddress = bottomLevels[mesh].address;
         if (skinnedSlot != NO_SKINNED_BLAS && skinnedSlot < skinnedBottomLevels.size() &&
             skinnedBottomLevels[skinnedSlot].handle != VK_NULL_HANDLE) {
             blasAddress = skinnedBottomLevels[skinnedSlot].address;
@@ -401,7 +401,7 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
         instance.mask = 0xFF;
         // 래스터가 vkCmdSetCullMode 로 하는 것과 같은 판단이다. 양면 재질만 컬링을 끈다.
         instance.flags = 0;
-        if (geometry.material(geometry.mesh(object.meshIndex).materialIndex).doubleSided) {
+        if (geometry.material(geometry.mesh(mesh).materialIndex).doubleSided) {
             instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         }
         instance.accelerationStructureReference = blasAddress;

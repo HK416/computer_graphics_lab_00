@@ -73,19 +73,26 @@ struct Light {
     bool operator==(const Light&) const = default;
 };
 
+// 오브젝트가 그리는 메쉬. 부품이라 오브젝트가 첨자로 가리킨다.
+struct MeshRenderer {
+    // GeometryStore 의 전역 메쉬 인덱스.
+    uint32_t mesh = INVALID_MESH;
+    // 이 메쉬가 쓰는 스켈레톤의 스킨 번호. 스킨이 없으면 -1.
+    int32_t skin = -1;
+
+    bool operator==(const MeshRenderer&) const = default;
+};
+
 struct Object {
     std::string name;
     // 부모 기준 지역 변환. 세계 변환은 Scene::worldMatrix 가 부모를 거슬러 올라가 만든다.
     Transform transform;
     // Scene::objects 인덱스. 뿌리면 -1.
     int32_t parent = -1;
-    // GeometryStore 의 전역 메쉬 인덱스. 변환만 담는 노드면 INVALID_MESH.
-    uint32_t meshIndex = INVALID_MESH;
     bool visible = true;
-    // Scene::animators 인덱스와 그 스켈레톤의 스킨 번호. 없으면 -1.
+    // 붙어 있는 부품의 첨자. 없으면 -1. 종류마다 Scene 이 배열을 따로 들고 있다.
+    int32_t meshRenderer = -1;
     int32_t animator = -1;
-    int32_t skin = -1;
-    // Scene::lights 인덱스. 조명이 아니면 -1.
     int32_t light = -1;
 };
 
@@ -108,6 +115,7 @@ struct Environment {
 struct Scene {
     std::string name;
     std::vector<Object> objects;
+    std::vector<MeshRenderer> meshRenderers;
     std::vector<Animator> animators;
     std::vector<Light> lights;
     Camera camera;
@@ -145,6 +153,13 @@ struct Scene {
     glm::mat4 worldMatrix(uint32_t index) const;
     // 조상 중 하나라도 숨겨져 있으면 보이지 않는다.
     bool visibleInTree(uint32_t index) const;
+
+    // 메쉬 부품을 붙이고 그 첨자를 돌려준다. 이미 붙어 있으면 값만 바꾼다.
+    int32_t attachMeshRenderer(uint32_t index, uint32_t mesh, int32_t skin = -1);
+    // 오브젝트가 그리는 전역 메쉬 번호. 메쉬 부품이 없으면 INVALID_MESH.
+    uint32_t meshOf(uint32_t index) const;
+    // 그 메쉬가 쓰는 스킨 번호. 없으면 -1.
+    int32_t skinOf(uint32_t index) const;
 
     // candidate 가 ancestor 자신이거나 그 자손인지. 순환하는 부모 관계를 막는 데 쓴다.
     bool isDescendant(uint32_t candidate, uint32_t ancestor) const;
