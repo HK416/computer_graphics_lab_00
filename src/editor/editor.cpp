@@ -302,12 +302,16 @@ void Editor::drawHierarchyNode(scene::Scene& active, int index) {
     if (!hasChildren) {
         flags |= ImGuiTreeNodeFlags_Leaf;
     }
-    if (selectedObject == index) {
+    if (isSelected(index)) {
         flags |= ImGuiTreeNodeFlags_Selected;
     }
     bool open = ImGui::TreeNodeEx("##node", flags, "%s", object.name.c_str());
     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
-        selectedObject = index;
+        if (ImGui::GetIO().KeyCtrl) {
+            toggleSelect(index);
+        } else {
+            selectOnly(index);
+        }
     }
 
     // 끌어다 놓아 부모를 바꾼다. 실제 적용은 순회가 끝난 뒤에 한다.
@@ -347,7 +351,7 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
             bool selected = i == scenes.current();
             if (ImGui::Selectable(scenes.at(i).name.c_str(), selected)) {
                 scenes.setActive(i);
-                selectedObject = -1;
+                clearSelection();
             }
         }
         ImGui::EndCombo();
@@ -396,7 +400,7 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
     ImGui::Separator();
 
     scene::Scene& active = scenes.active();
-    bool hasSelection = selectedObject >= 0 && selectedObject < static_cast<int>(active.objects.size());
+    bool anySelected = hasSelection();
 
     if (ImGui::Button("추가")) {
         ImGui::OpenPopup("메쉬 선택");
@@ -420,14 +424,28 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
         ImGui::OpenPopup("모델 선택");
     }
     ImGui::SameLine();
-    ImGui::BeginDisabled(!hasSelection);
+    ImGui::BeginDisabled(!anySelected);
     if (ImGui::Button("복제")) {
-        selectedObject = static_cast<int>(active.duplicateObject(static_cast<uint32_t>(selectedObject)));
+        // 여러 개를 고른 채 복제하면 각각 복제하고 사본들을 새 선택으로 삼는다.
+        std::vector<int> copies;
+        for (int selected : selection) {
+            if (selected >= 0 && selected < static_cast<int>(active.objects.size())) {
+                copies.push_back(static_cast<int>(active.duplicateObject(static_cast<uint32_t>(selected))));
+            }
+        }
+        selection = std::move(copies);
     }
     ImGui::SameLine();
-    if (ImGui::Button("삭제") || (hasSelection && ImGui::IsKeyPressed(ImGuiKey_Delete))) {
-        active.removeObject(static_cast<uint32_t>(selectedObject));
-        selectedObject = -1;
+    if (ImGui::Button("삭제") || (anySelected && ImGui::IsKeyPressed(ImGuiKey_Delete))) {
+        // 하나씩 지우면 첫 삭제가 인덱스를 밀어 나머지가 엉뚱한 것을 가리킨다. 한 번에 넘긴다.
+        std::vector<uint32_t> doomed;
+        for (int selected : selection) {
+            if (selected >= 0) {
+                doomed.push_back(static_cast<uint32_t>(selected));
+            }
+        }
+        active.removeObjects(doomed);
+        clearSelection();
     }
     ImGui::EndDisabled();
 
@@ -442,8 +460,8 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
                 object.name = geometry.meshName(meshIndex);
                 object.transform.position = active.camera.position + active.camera.forward() * (radius * 3.0F);
                 active.objects.push_back(std::move(object));
-                selectedObject = static_cast<int>(active.objects.size()) - 1;
-                active.attachMeshRenderer(static_cast<uint32_t>(selectedObject), meshIndex);
+                selectOnly(static_cast<int>(active.objects.size()) - 1);
+                active.attachMeshRenderer(static_cast<uint32_t>(primarySelection()), meshIndex);
             }
         }
         ImGui::EndPopup();
@@ -470,7 +488,7 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
                 object.transform.rotation = glm::quatLookAt(active.camera.forward(), glm::vec3{0.0F, 1.0F, 0.0F});
             }
             active.objects.push_back(std::move(object));
-            selectedObject = static_cast<int>(active.objects.size()) - 1;
+            selectOnly(static_cast<int>(active.objects.size()) - 1);
         }
         ImGui::EndPopup();
     }
@@ -535,6 +553,7 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         return;
     }
 
+    int selectedObject = primarySelection();
     if (selectedObject < 0 || selectedObject >= static_cast<int>(active.objects.size())) {
         ImGui::TextDisabled("선택된 오브젝트가 없습니다");
         ImGui::End();
@@ -659,8 +678,8 @@ void Editor::buildSceneView(scene::Scene& active) {
     ImVec2 imageSize = ImGui::GetItemRectSize();
 
     gizmoUsing = false;
-    bool hasSelection = selectedObject >= 0 && selectedObject < static_cast<int>(active.objects.size());
-    if (hasSelection && imageSize.x > 1.0F && imageSize.y > 1.0F) {
+    bool anySelected = hasSelection();
+    if (anySelected && imageSize.x > 1.0F && imageSize.y > 1.0F) {
         if (!active.camera.isLooking()) {
             if (ImGui::IsKeyPressed(ImGuiKey_W)) {
                 gizmoOperation = ImGuizmo::TRANSLATE;
@@ -679,11 +698,10 @@ void Editor::buildSceneView(scene::Scene& active) {
         glm::mat4 view = active.camera.viewMatrix();
         glm::mat4 projection = active.camera.gizmoProjectionMatrix(aspect);
 
-        scene::Object& object = active.objects[static_cast<size_t>(selectedObject)];
-        // 기즈모는 세계 공간에서 조작하므로 부모 변환을 씌웠다가 결과에서 다시 걷어낸다.
-        glm::mat4 parentWorld =
-            object.parent >= 0 ? active.worldMatrix(static_cast<uint32_t>(object.parent)) : glm::mat4{1.0F};
-        glm::mat4 model = parentWorld * object.transform.matrix();
+        // 기즈모는 기준 오브젝트 자리에 서고, 끌어서 생긴 차이를 선택 전체에 똑같이 먹인다.
+        auto primary = static_cast<uint32_t>(primarySelection());
+        glm::mat4 pivotBefore = active.worldMatrix(primary);
+        glm::mat4 model = pivotBefore;
 
         // Ctrl 을 누르면 스냅을 건다. 조작 종류마다 단위가 다르다.
         glm::vec3 snapValue{0.25F};
@@ -701,7 +719,38 @@ void Editor::buildSceneView(scene::Scene& active) {
                                  glm::value_ptr(model),
                                  nullptr,
                                  snap)) {
-            object.transform = scene::Transform::fromMatrix(glm::inverse(parentWorld) * model);
+            glm::mat4 delta = model * glm::inverse(pivotBefore);
+
+            // 조상이 함께 선택돼 있으면 그쪽에서 이미 옮겨진다. 여기서 또 먹이면 두 배로 움직인다.
+            auto ancestorSelected = [this, &active](int index) {
+                int parent = active.objects[static_cast<size_t>(index)].parent;
+                while (parent >= 0) {
+                    if (isSelected(parent)) {
+                        return true;
+                    }
+                    parent = active.objects[static_cast<size_t>(parent)].parent;
+                }
+                return false;
+            };
+
+            // 옮기기 전에 세계 변환을 모두 재어 둔다. 하나를 고치면 그 자손의 세계 변환이 따라
+            // 움직여, 순회 도중에 재면 뒤쪽이 어긋난다.
+            std::vector<std::pair<uint32_t, glm::mat4>> targets;
+            for (int selected : selection) {
+                if (selected < 0 || selected >= static_cast<int>(active.objects.size()) ||
+                    ancestorSelected(selected)) {
+                    continue;
+                }
+                auto index = static_cast<uint32_t>(selected);
+                targets.emplace_back(index, delta * active.worldMatrix(index));
+            }
+            for (const auto& [index, world] : targets) {
+                int parent = active.objects[static_cast<size_t>(index)].parent;
+                glm::mat4 parentWorld =
+                    parent >= 0 ? active.worldMatrix(static_cast<uint32_t>(parent)) : glm::mat4{1.0F};
+                active.objects[static_cast<size_t>(index)].transform =
+                    scene::Transform::fromMatrix(glm::inverse(parentWorld) * world);
+            }
         }
         gizmoUsing = ImGuizmo::IsUsing();
     }
@@ -713,7 +762,12 @@ void Editor::buildSceneView(scene::Scene& active) {
         ImVec2 mouse = ImGui::GetMousePos();
         glm::vec2 uv{(mouse.x - imagePosition.x) / imageSize.x, (mouse.y - imagePosition.y) / imageSize.y};
         scene::Ray ray = active.camera.screenToRay(uv, imageSize.x / imageSize.y);
-        selectedObject = pickObject(active, *geometryStore, ray);
+        int picked = pickObject(active, *geometryStore, ray);
+        if (ImGui::GetIO().KeyCtrl) {
+            toggleSelect(picked);
+        } else {
+            selectOnly(picked);
+        }
     }
 
     // 조작 도구 선택은 장면 뷰 위에 겹쳐 둔다.
@@ -1112,6 +1166,7 @@ void Editor::buildConsole() {
 
 // F 키로 선택한 오브젝트를 궤도 중심으로 삼는다. 텍스트를 입력하는 중에는 받지 않는다.
 void Editor::focusSelected(scene::Scene& active, const gfx::GeometryStore& geometry) {
+    int selectedObject = primarySelection();
     if (selectedObject < 0 || static_cast<size_t>(selectedObject) >= active.objects.size()) {
         return;
     }
@@ -1168,7 +1223,7 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
         std::filesystem::path path = std::exchange(pendingSceneOpen, {});
         if (sceneOpener) {
             sceneOpener(path);
-            selectedObject = -1;
+            clearSelection();
         }
     }
 
@@ -1179,6 +1234,30 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
 
 // 되돌리기 기록은 한 번에 하나씩 쌓는다. 기즈모를 끄는 동안이나 슬라이더를 잡고 있는 동안에는
 // 담지 않고, 손을 뗀 뒤 한 덩어리로 담는다. 그렇지 않으면 끌기 한 번이 수십 개의 기록이 된다.
+bool Editor::isSelected(int index) const {
+    return std::find(selection.begin(), selection.end(), index) != selection.end();
+}
+
+void Editor::selectOnly(int index) {
+    selection.clear();
+    if (index >= 0) {
+        selection.push_back(index);
+    }
+}
+
+void Editor::toggleSelect(int index) {
+    if (index < 0) {
+        return;
+    }
+    auto found = std::find(selection.begin(), selection.end(), index);
+    if (found != selection.end()) {
+        selection.erase(found);
+    } else {
+        // 뒤에 붙여 방금 고른 것이 기준이 되게 한다.
+        selection.push_back(index);
+    }
+}
+
 void Editor::updateHistory(scene::Scene& active, size_t sceneIndex) {
     // 기록이 너무 길어지면 애니메이터 스켈레톤 사본이 쌓여 메모리를 먹는다.
     constexpr size_t MAX_HISTORY = 64;
@@ -1207,7 +1286,7 @@ void Editor::updateHistory(scene::Scene& active, size_t sceneIndex) {
         history.undoStack.pop_back();
         history.baseline = active.capture();
         // 오브젝트 번호가 통째로 달라질 수 있어 선택은 놓는다.
-        selectedObject = -1;
+        clearSelection();
         return;
     }
     if (wantRedo && !history.redoStack.empty()) {
@@ -1215,7 +1294,7 @@ void Editor::updateHistory(scene::Scene& active, size_t sceneIndex) {
         active.restore(history.redoStack.back());
         history.redoStack.pop_back();
         history.baseline = active.capture();
-        selectedObject = -1;
+        clearSelection();
         return;
     }
 

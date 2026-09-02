@@ -89,7 +89,17 @@ private:
     };
     std::vector<History> histories;
 
-    int selectedObject = -1;
+    // 선택된 오브젝트들. 마지막 항목이 기준(primary)이라 인스펙터와 기즈모가 그것을 쓴다.
+    std::vector<int> selection;
+
+    bool hasSelection() const { return !selection.empty(); }
+    int primarySelection() const { return selection.empty() ? -1 : selection.back(); }
+    bool isSelected(int index) const;
+    // index 가 음수면 선택을 비운다.
+    void selectOnly(int index);
+    void toggleSelect(int index);
+    // 지우거나 다시 열어 인덱스가 통째로 달라졌을 때.
+    void clearSelection() { selection.clear(); }
     // 계층 순회 도중 부모를 바꾸면 그리기가 어긋나므로 순회가 끝난 뒤에 적용한다.
     int pendingChild = -1;
     int pendingParent = -1;

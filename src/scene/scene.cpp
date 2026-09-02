@@ -295,8 +295,19 @@ int32_t Scene::skinOf(uint32_t index) const {
 }
 
 void Scene::removeObject(uint32_t index) {
+    removeObjects(std::vector<uint32_t>{index});
+}
+
+void Scene::removeObjects(const std::vector<uint32_t>& indices) {
+    if (indices.empty()) {
+        return;
+    }
     std::vector<bool> doomed(objects.size(), false);
-    doomed[index] = true;
+    for (uint32_t index : indices) {
+        if (index < objects.size()) {
+            doomed[index] = true;
+        }
+    }
     // 부모가 배열에서 항상 앞선다는 보장이 없어 더 번지지 않을 때까지 훑는다.
     for (bool spreading = true; spreading;) {
         spreading = false;

@@ -186,6 +186,9 @@ struct Scene {
     bool isDescendant(uint32_t candidate, uint32_t ancestor) const;
     // 대상과 그 자손을 모두 지운다. 남은 오브젝트의 부모 인덱스는 다시 맞춘다.
     void removeObject(uint32_t index);
+    // 여러 개를 한 번에 지운다. 하나씩 지우면 첫 번째 삭제가 인덱스를 밀어 나머지가 엉뚱한
+    // 오브젝트를 가리킨다. 자손 관계로 겹쳐도 안전하다.
+    void removeObjects(const std::vector<uint32_t>& indices);
     // 대상과 그 자손을 복제하고 새로 만든 뿌리의 인덱스를 돌려준다.
     uint32_t duplicateObject(uint32_t index);
 
