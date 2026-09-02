@@ -401,18 +401,19 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
         instance.accelerationStructureReference = blasAddress;
         instances.push_back(instance);
     }
-    if (instances.empty()) {
-        return;
-    }
+    // 인스턴스가 하나도 없어도 상위 구조를 비워서 다시 세운다. 여기서 그냥 돌아가면 지운 모델이
+    // 담긴 지난 구조가 그대로 남아, 경로 추적과 광선 질의 그림자에 계속 보인다.
 
     if (instanceBuffers.size() <= frameSlot) {
         instanceBuffers.resize(frameSlot + 1);
         instanceCapacities.resize(frameSlot + 1, 0);
     }
     Buffer& instanceBuffer = instanceBuffers[frameSlot];
-    if (instances.size() > instanceCapacities[frameSlot]) {
+    // 비어 있어도 구축 입력 주소는 유효해야 하므로 최소 한 칸은 잡아 둔다.
+    const auto neededInstances = std::max<uint32_t>(static_cast<uint32_t>(instances.size()), 1);
+    if (neededInstances > instanceCapacities[frameSlot]) {
         destroyBuffer(context, instanceBuffer);
-        instanceCapacities[frameSlot] = static_cast<uint32_t>(instances.size()) * 2;
+        instanceCapacities[frameSlot] = neededInstances * 2;
         instanceBuffer =
             createBuffer(context,
                          static_cast<VkDeviceSize>(instanceCapacities[frameSlot]) *
@@ -421,7 +422,10 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
                          MemoryLocation::HOST_WRITE,
                          "가속 구조 인스턴스");
     }
-    std::memcpy(instanceBuffer.mapped, instances.data(), instances.size() * sizeof(VkAccelerationStructureInstanceKHR));
+    if (!instances.empty()) {
+        std::memcpy(
+            instanceBuffer.mapped, instances.data(), instances.size() * sizeof(VkAccelerationStructureInstanceKHR));
+    }
 
     VkAccelerationStructureGeometryKHR geometryInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
     geometryInfo.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
@@ -457,6 +461,10 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
         write.descriptorCount = 1;
         write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
         vkUpdateDescriptorSets(context.device, 1, &write, 0, nullptr);
+    }
+    // 빈 장면이라 구조를 만들 크기조차 나오지 않으면 세울 것도 추적할 것도 없다.
+    if (topLevel.handle == VK_NULL_HANDLE) {
+        return;
     }
     reserveScratch(scratchBuffer, std::max<VkDeviceSize>(sizes.buildScratchSize, 256), "가속 구조 스크래치");
 
