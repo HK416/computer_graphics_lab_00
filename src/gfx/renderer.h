@@ -42,13 +42,14 @@ inline constexpr uint32_t DEBUG_MODE_NORMAL = 2;
 inline constexpr uint32_t DEBUG_MODE_UV = 3;
 inline constexpr uint32_t DEBUG_MODE_DEPTH = 4;
 inline constexpr uint32_t DEBUG_MODE_SHADOW = 7;
+inline constexpr uint32_t DEBUG_MODE_VELOCITY = 8;
 
 // 경로 추적이 그릴 수 있는 디버그 뷰인지. meshlet 과 LOD 는 하위 가속 구조가 메쉬 단위 LOD 0 이라
 // 개념 자체가 없고, 캐스케이드는 그림자 맵을 읽지 않으며, 모션 벡터는 경로 추적 프레임에 갱신되지
 // 않는다.
 inline bool pathTraceSupportsDebugMode(uint32_t mode) {
     return mode == DEBUG_MODE_SHADED || mode == DEBUG_MODE_NORMAL || mode == DEBUG_MODE_UV ||
-           mode == DEBUG_MODE_DEPTH || mode == DEBUG_MODE_SHADOW;
+           mode == DEBUG_MODE_DEPTH || mode == DEBUG_MODE_SHADOW || mode == DEBUG_MODE_VELOCITY;
 }
 inline constexpr uint32_t ALPHA_MODE_COUNT = 3;
 
@@ -148,6 +149,8 @@ struct RenderTargets {
     uint32_t colorSlot = 0;
     uint32_t tonemappedSlot = 0;
     uint32_t velocitySlot = 0;
+    // 경로 추적이 모션 벡터를 직접 쓸 때 쓰는 rg16f 스토리지 슬롯.
+    uint32_t velocityStorageSlot = 0;
     uint32_t upscaledColorSlot = 0;
     uint32_t upscaledColorStorageSlot = 0;
     uint32_t accumulationSlot = 0;

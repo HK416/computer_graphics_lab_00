@@ -29,6 +29,30 @@ vec3 skyRadiance(vec3 direction) {
 // 올리지 않았으므로 적중 셰이더가 알파를 보고 통과 여부를 정한다.
 const uint PATH_RAY_FLAGS = gl_RayFlagsCullBackFacingTrianglesEXT;
 
+// 화면 UV 단위 모션 벡터. mesh_shading.glsl 의 motionVector 와 같은 규약(지난 - 이번)이다.
+vec2 screenVelocity(vec3 worldPosition, vec3 previousWorldPosition) {
+    Camera camera = pathTrace.camera.item;
+    vec4 currentClip = camera.viewProjection * vec4(worldPosition, 1.0);
+    vec4 previousClip = camera.previousViewProjection * vec4(previousWorldPosition, 1.0);
+    if (currentClip.w <= 0.0 || previousClip.w <= 0.0) {
+        return vec2(0.0);
+    }
+    vec2 current = currentClip.xy / currentClip.w - camera.jitter.xy;
+    return (previousClip.xy / previousClip.w - current) * 0.5;
+}
+
+// 하늘은 방향 벡터를 지난 시점으로 되쏘아 카메라 회전분만 담는다. sky.frag 와 같은 식이다.
+vec2 skyVelocity(vec3 direction) {
+    Camera camera = pathTrace.camera.item;
+    vec4 currentClip = camera.viewProjection * vec4(camera.position.xyz + direction, 1.0);
+    vec4 previousClip = camera.previousViewProjection * vec4(direction, 0.0);
+    if (currentClip.w <= 0.0 || previousClip.w <= 0.0) {
+        return vec2(0.0);
+    }
+    vec2 current = currentClip.xy / currentClip.w - camera.jitter.xy;
+    return (previousClip.xy / previousClip.w - current) * 0.5;
+}
+
 // 다음 사건 추정. 장면 조명 하나를 균등하게 골라 그림자 광선을 쏜다.
 vec3 nextEventEstimation(Surface surface, inout uint seed) {
     uint lightCount = pathTrace.camera.item.shading.x;
@@ -134,6 +158,7 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed, out PrimaryHit prim
     primary.albedo = vec3(0.0);
     primary.uv = vec2(0.0);
     primary.roughness = 0.0;
+    primary.velocity = vec2(0.0);
     primary.hitDistance = -1.0;
     primary.visibility = -1.0;
     bool useNextEvent = (pathTrace.flags & PATH_FLAG_NEXT_EVENT) != 0u;
@@ -144,6 +169,9 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed, out PrimaryHit prim
 
         if (payload.missed) {
             radiance += throughput * skyRadiance(direction);
+            if (bounce == 0u) {
+                primary.velocity = skyVelocity(direction);
+            }
             break;
         }
 
@@ -164,6 +192,7 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed, out PrimaryHit prim
             primary.uv = payload.uv;
             primary.roughness = payload.roughness;
             primary.hitDistance = payload.hitDistance;
+            primary.velocity = screenVelocity(payload.position, payload.previousPosition);
             if (pathTrace.debugMode == DEBUG_MODE_SHADOW) {
                 primary.visibility = firstLightVisibility(surface.position, surface.normal);
             }
@@ -207,6 +236,11 @@ vec3 debugColor(PrimaryHit primary) {
         // 래스터는 시야 축 거리를 쓰지만 여기서는 광선 거리를 그대로 쓴다. 축 거리보다 크거나
         // 같아 화면 가장자리만 아주 조금 멀게 나온다.
         return vec3(primary.hitDistance / (primary.hitDistance + 10.0));
+    case DEBUG_MODE_VELOCITY: {
+        // 픽셀 단위 변위를 8 픽셀에서 포화시켜 본다. 정지 화면은 회색이다. mesh.frag 와 같다.
+        vec2 pixels = primary.velocity * pathTrace.camera.item.viewport.xy / 8.0;
+        return vec3(clamp(pixels * 0.5 + 0.5, 0.0, 1.0), 0.5);
+    }
     case DEBUG_MODE_SHADOW:
         // 그림자를 만드는 조명이 없으면 자홍색으로 알린다. 래스터 경로와 같은 관례다.
         return primary.visibility < 0.0 ? vec3(1.0, 0.0, 1.0) : vec3(primary.visibility);
@@ -250,4 +284,9 @@ void main() {
     vec4 previous = imageLoad(bindlessStorageImagesRgba[nonuniformEXT(pathTrace.accumulationImage)], pixel);
     vec4 accumulated = pathTrace.sampleCount == 0 ? vec4(radiance, 1.0) : previous + vec4(radiance, 1.0);
     imageStore(bindlessStorageImagesRgba[nonuniformEXT(pathTrace.accumulationImage)], pixel, accumulated);
+
+    // 래스터 경로가 불투명 패스에서 하는 일을 여기서 대신한다. 경로 추적 프레임은 그 패스를
+    // 돌지 않아 지난 프레임 값이 그대로 남아 있었다.
+    imageStore(bindlessStorageImagesRg16[nonuniformEXT(pathTrace.velocityImage)], pixel,
+               vec4(primary.velocity, 0.0, 0.0));
 }

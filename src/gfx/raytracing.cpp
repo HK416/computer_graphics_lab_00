@@ -32,7 +32,7 @@ struct PathTracePushConstants {
     VkDeviceAddress camera;
     VkDeviceAddress lights;
     uint32_t accumulationImage;
-    uint32_t outputImage;
+    uint32_t velocityImage;
     uint32_t frameIndex;
     uint32_t sampleCount;
     uint32_t maxBounces;
@@ -644,7 +644,7 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
                       VkDeviceAddress lightAddress,
                       VkDeviceAddress skinnedVertexAddress,
                       uint32_t accumulationImage,
-                      uint32_t outputImage,
+                      uint32_t velocityImage,
                       uint32_t frameIndex,
                       uint32_t sampleCount,
                       const PathTraceOptions& options) {
@@ -659,7 +659,7 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
     pushConstants.camera = cameraAddress;
     pushConstants.lights = lightAddress;
     pushConstants.accumulationImage = accumulationImage;
-    pushConstants.outputImage = outputImage;
+    pushConstants.velocityImage = velocityImage;
     pushConstants.frameIndex = frameIndex;
     pushConstants.sampleCount = sampleCount;
     pushConstants.maxBounces = options.maxBounces;

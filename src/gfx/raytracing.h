@@ -86,7 +86,8 @@ public:
                VkDeviceAddress lightAddress,
                VkDeviceAddress skinnedVertexAddress,
                uint32_t accumulationImage,
-               uint32_t outputImage,
+               // 화면 UV 모션 벡터를 쓸 rg16f 스토리지 슬롯.
+               uint32_t velocityImage,
                uint32_t frameIndex,
                uint32_t sampleCount,
                const PathTraceOptions& options);

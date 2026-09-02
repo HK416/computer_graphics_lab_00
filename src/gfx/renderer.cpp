@@ -476,7 +476,8 @@ void Renderer::createRenderTargets() {
     ImageDesc velocityDesc;
     velocityDesc.extent = extent;
     velocityDesc.format = VELOCITY_FORMAT;
-    velocityDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    velocityDesc.usage =
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
     targets.velocity = createImage(context, velocityDesc, "모션 벡터");
 
     ImageDesc accumulationDesc = colorDesc;
@@ -588,6 +589,7 @@ void Renderer::createRenderTargets() {
         targets.depthSlot = bindless.add(targets.depth.view, postSampler);
         targets.tonemappedSlot = bindless.add(targets.tonemapped.view, postSampler);
         targets.velocitySlot = bindless.add(targets.velocity.view, postSampler);
+        targets.velocityStorageSlot = bindless.addStorageImageRg16(targets.velocity.view);
         // 컴퓨트가 쓰고 프래그먼트가 읽으므로 계속 GENERAL 에 둔다.
         targets.upscaledColorSlot = bindless.add(targets.upscaledColor.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
         targets.upscaledColorStorageSlot = bindless.addStorageImageRgba16(targets.upscaledColor.view);
@@ -614,6 +616,7 @@ void Renderer::createRenderTargets() {
         bindless.update(targets.depthSlot, targets.depth.view, postSampler);
         bindless.update(targets.tonemappedSlot, targets.tonemapped.view, postSampler);
         bindless.update(targets.velocitySlot, targets.velocity.view, postSampler);
+        bindless.updateStorageImageRg16(targets.velocityStorageSlot, targets.velocity.view);
         bindless.update(targets.upscaledColorSlot, targets.upscaledColor.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
         bindless.updateStorageImageRgba16(targets.upscaledColorStorageSlot, targets.upscaledColor.view);
         bindless.update(targets.hzbSampledSlot, targets.hzb.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
@@ -2408,6 +2411,16 @@ void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, 
 
     // 표본 상한에 닿으면 더 쏘지 않고 쌓아 둔 결과를 그대로 보여준다.
     if (pathTrace.maxSamples == 0 || pathSampleCount < pathTrace.maxSamples) {
+        // 광선 생성 셰이더가 모든 화소를 덮어쓰므로 지난 내용은 버려도 된다.
+        imageBarrier(commandBuffer,
+                     targets.velocity.handle,
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_IMAGE_LAYOUT_GENERAL,
+                     VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                     0,
+                     VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         rayTracer->trace(commandBuffer,
                          currentRenderExtent,
                          frame.cameraBuffer.address,
@@ -2415,11 +2428,20 @@ void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, 
                          frame.lightBuffer.address,
                          skinnedVertexBuffer.address,
                          targets.pathAccumulationStorageSlot,
-                         0,
+                         targets.velocityStorageSlot,
                          static_cast<uint32_t>(frameIndex),
                          pathSampleCount,
                          pathTrace);
         ++pathSampleCount;
+        imageBarrier(commandBuffer,
+                     targets.velocity.handle,
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_GENERAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     }
 
     imageBarrier(commandBuffer,
@@ -2891,17 +2913,18 @@ void Renderer::recordCommands(Frame& frame,
     // 5) 시간축 업스케일러는 톤 매핑 앞에서 선형 HDR 을 받아 표시 해상도로 늘린다. 노출과 톤
     //    곡선이 흔들려도 히스토리가 따라 흔들리지 않으려면 이 순서여야 한다. 공간 업스케일은
     //    톤 매핑 뒤에서 도므로 여기서 두 경로가 갈린다.
-    // 경로 추적 프레임은 불투명 패스를 돌지 않아 모션 벡터가 그대로 남는다. 어느 경로든 읽기
-    // 좋은 레이아웃으로 맞춰야 디버그 뷰어가 파괴된 레이아웃을 참조하지 않는다.
-    imageBarrier(commandBuffer,
-                 targets.velocity.handle,
-                 VK_IMAGE_ASPECT_COLOR_BIT,
-                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    // 경로 추적은 광선 생성 셰이더가 모션 벡터를 직접 쓰고 레이아웃도 그쪽에서 맞춘다.
+    if (!pathTracing) {
+        imageBarrier(commandBuffer,
+                     targets.velocity.handle,
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    }
     imageBarrier(commandBuffer,
                  targets.color.handle,
                  VK_IMAGE_ASPECT_COLOR_BIT,

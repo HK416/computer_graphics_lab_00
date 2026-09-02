@@ -11,6 +11,8 @@ struct PathPayload {
     vec3 emissive;
     vec3 normal;
     vec3 position;
+    // 지난 프레임의 세계 위치. 모션 벡터에만 쓴다.
+    vec3 previousPosition;
     // 디버그 뷰와 가이드 버퍼만 쓴다. 경로 자체는 필요로 하지 않는다.
     vec2 uv;
     float metallic;
@@ -25,6 +27,8 @@ struct PrimaryHit {
     vec3 albedo;
     vec2 uv;
     float roughness;
+    // 화면 UV 단위 모션 벡터. 래스터와 같은 규약(지난 프레임 - 이번 프레임)이다.
+    vec2 velocity;
     // 카메라에서의 거리. 아무것도 못 맞히면 음수.
     float hitDistance;
     // 첫 그림자 조명의 가시성. 조명이 없으면 음수.
@@ -46,7 +50,8 @@ layout(push_constant) uniform PathTracePushConstants {
     CameraBuffer camera;
     LightBuffer lights;
     uint accumulationImage;
-    uint outputImage;
+    // 화면 UV 모션 벡터를 쓸 rg16f 스토리지 슬롯.
+    uint velocityImage;
     uint frameIndex;
     uint sampleCount;
     uint maxBounces;

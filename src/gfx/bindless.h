@@ -36,6 +36,9 @@ public:
     // 시간축 업스케일의 히스토리와 출력처럼 rgba16f 로 쓰는 스토리지 이미지.
     uint32_t addStorageImageRgba16(VkImageView view);
     void updateStorageImageRgba16(uint32_t slot, VkImageView view);
+    // 경로 추적이 모션 벡터를 쓰는 rg16f 스토리지 이미지.
+    uint32_t addStorageImageRg16(VkImageView view);
+    void updateStorageImageRg16(uint32_t slot, VkImageView view);
     // 큐브맵을 굽는 컴퓨트가 쓰는 rgba16f 2D 배열 스토리지. 면을 층으로 다룬다.
     uint32_t addStorageArray(VkImageView view);
     void updateStorageArray(uint32_t slot, VkImageView view);
@@ -63,6 +66,7 @@ private:
     uint32_t storageCount = 0;
     uint32_t storageRgbaCount = 0;
     uint32_t storageRgba16Count = 0;
+    uint32_t storageRg16Count = 0;
     uint32_t storageArrayCount = 0;
     uint32_t arrayCapacity = 0;
     uint32_t arrayCount = 0;

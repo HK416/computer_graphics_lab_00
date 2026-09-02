@@ -30,6 +30,9 @@ void main() {
     vec2 uv = v0.uv * weights.x + v1.uv * weights.y + v2.uv * weights.z;
 
     vec3 worldPosition = (instance.model * vec4(localPosition, 1.0)).xyz;
+    // ponytail: 스킨 인스턴스의 변형 정점은 이번 프레임 포즈만 있어, 지난 포즈의 변형은 반영하지
+    // 못하고 강체 이동만 담는다. 지난 포즈 정점을 따로 뽑아 두면 정확해진다.
+    vec3 previousWorldPosition = (instance.previousModel * vec4(localPosition, 1.0)).xyz;
     mat3 normalMatrix = mat3(instance.normalMatrix);
     vec3 worldNormal = normalize(normalMatrix * localNormal);
 
@@ -75,6 +78,7 @@ void main() {
     payload.metallic = clamp(metallic, 0.0, 1.0);
     // 완전한 거울은 GGX 표본의 분모를 0 으로 만든다. 래스터 경로와 같은 하한을 쓴다.
     payload.roughness = clamp(roughness, 0.03, 1.0);
+    payload.previousPosition = previousWorldPosition;
     payload.uv = uv;
     payload.hitDistance = gl_HitTEXT;
     payload.missed = false;

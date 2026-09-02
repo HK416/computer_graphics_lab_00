@@ -16,6 +16,8 @@ layout(set = 0, binding = 5) uniform textureCube bindlessCubes[];
 layout(set = 0, binding = 6, rgba16f) uniform image2DArray bindlessStorageArrays[];
 // 시간축 업스케일의 히스토리와 출력.
 layout(set = 0, binding = 7, rgba16f) uniform image2D bindlessStorageImagesRgba16[];
+// 경로 추적이 쓰는 화면 UV 모션 벡터. 래스터는 색상 첨부물로 쓰지만 광선 경로는 스토리지로 쓴다.
+layout(set = 0, binding = 8, rg16f) uniform image2D bindlessStorageImagesRg16[];
 
 vec4 sampleBindless(uint slot, vec2 uv) {
     uint imageIndex = slot & 0x00FFFFFFu;
