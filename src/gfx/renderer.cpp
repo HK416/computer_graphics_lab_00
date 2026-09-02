@@ -511,6 +511,10 @@ void Renderer::setVsync(bool enabled) {
 
 void Renderer::updateRenderExtent() {
     float scale = std::clamp(renderScale, 0.25F, 2.0F);
+    // DLSS 는 렌더가 표시보다 크면 기능 생성이 InvalidParameter 로 거부된다. 배율을 1 로 자른다.
+    if (upscaler == Upscaler::DLSS || upscaler == Upscaler::DLSS_RR) {
+        scale = std::min(scale, 1.0F);
+    }
     VkExtent2D scaled{std::max(static_cast<uint32_t>(static_cast<float>(currentDisplayExtent.width) * scale), 1U),
                       std::max(static_cast<uint32_t>(static_cast<float>(currentDisplayExtent.height) * scale), 1U)};
     if (scaled.width == currentRenderExtent.width && scaled.height == currentRenderExtent.height) {
@@ -553,6 +557,8 @@ void Renderer::updateUpscaler() {
     if (!isTemporal(wanted)) {
         return;
     }
+    // DLSS 로 바꾸면 배율 상한이 달라진다. 컨텍스트를 만들기 전에 렌더 해상도를 그 상한에 맞춘다.
+    updateRenderExtent();
     temporalUpscaler = createUpscaler(wanted, context, bindless);
     if (temporalUpscaler == nullptr) {
         // 편집기는 쓸 수 없는 방식을 고르지 못하게 하지만 실행 인자로는 들어올 수 있다.
