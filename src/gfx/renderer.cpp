@@ -80,11 +80,14 @@ struct GpuMeshletGroup {
     uint32_t padding;
 };
 
+// shaders/hzb_reduce.comp 의 푸시 상수와 배치가 같아야 한다.
 struct HzbPushConstants {
     uint32_t sourceTexture;
     uint32_t destinationStorage;
     int32_t sourceSize[2];
     int32_t destinationSize[2];
+    // 원본 슬롯에서 읽을 밉 단계. 깊이 버퍼는 0, HZB 는 바로 위 단계다.
+    float sourceLevel;
 };
 
 constexpr VkFormat HZB_FORMAT = VK_FORMAT_R32_SFLOAT;
@@ -299,6 +302,8 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& 
     samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    // HZB 는 밉 단계를 명시적으로 골라 읽는다. maxLod 가 0 이면 전부 밉 0 으로 잘린다.
+    samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
     VK_CHECK(vkCreateSampler(context.device, &samplerInfo, nullptr, &postSampler));
 
     samplerInfo.magFilter = VK_FILTER_LINEAR;
@@ -1629,6 +1634,7 @@ void Renderer::recordHzbPass(VkCommandBuffer commandBuffer) {
         HzbPushConstants pushConstants{};
         // 0단계는 깊이 버퍼에서, 나머지는 바로 위 단계에서 줄인다.
         pushConstants.sourceTexture = level == 0 ? targets.depthSlot : targets.hzbSampledSlot;
+        pushConstants.sourceLevel = level == 0 ? 0.0F : static_cast<float>(level - 1);
         pushConstants.destinationStorage = targets.hzbStorageSlots[level];
         pushConstants.sourceSize[0] = static_cast<int32_t>(sourceWidth);
         pushConstants.sourceSize[1] = static_cast<int32_t>(sourceHeight);

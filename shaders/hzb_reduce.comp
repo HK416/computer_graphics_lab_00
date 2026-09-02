@@ -12,12 +12,14 @@ layout(push_constant) uniform ReducePushConstants {
     uint destinationStorage; // 쓰기용 스토리지 이미지 슬롯
     ivec2 sourceSize;
     ivec2 destinationSize;
+    // 원본 슬롯에서 읽을 밉 단계. HZB 전체 밉 뷰 하나를 슬롯으로 쓰므로 단계를 직접 골라야 한다.
+    float sourceLevel;
 } pushConstants;
 
 float fetchSource(ivec2 coordinate) {
     ivec2 clamped = clamp(coordinate, ivec2(0), pushConstants.sourceSize - 1);
     vec2 uv = (vec2(clamped) + 0.5) / vec2(pushConstants.sourceSize);
-    return fetchBindlessLod(pushConstants.sourceTexture, uv, 0.0).r;
+    return fetchBindlessLod(pushConstants.sourceTexture, uv, pushConstants.sourceLevel).r;
 }
 
 void main() {
