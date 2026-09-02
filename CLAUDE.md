@@ -75,6 +75,47 @@ cmake --preset debug -DCG_LAB_DLSS_SDK=<NVIDIA/DLSS 경로>   # 주지 않으면
 
 include 순서는 clang-format 이 재그룹핑으로 강제한다: 짝꿍 헤더 → C/C++ 표준 → 서드파티 → 프로젝트.
 
+## 작업 절차
+
+기능 하나가 한 단계다. 단계마다 아래를 순서대로 밟고 커밋한다.
+
+1. **구현 → 빌드 → 테스트 → 스크린샷 검증.** Vulkan 코드는 테스트가 없으므로 `--screenshot` 으로 전후를
+   비교한다. 동작이 바뀌지 않아야 하는 리팩터링은 `cmp` 로 바이트 동일까지 확인한다.
+2. **포맷과 린트.** 바뀐 `.cpp`/`.h` 에 clang-format 과 clang-tidy 를 돌린다. PATH 의 clang-format 은
+   pip 로 깔린 18 이라 VS 의 22 와 결과가 갈릴 수 있다. **VS 것을 절대 경로로 부른다.**
+
+   ```sh
+   "C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/Llvm/x64/bin/clang-format.exe" -i <파일...>
+   "C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/Llvm/x64/bin/clang-tidy.exe" -p build/release <파일.cpp...>
+   ```
+
+3. **줄 끝과 인코딩.** 소스는 전부 LF + UTF-8(BOM 없음)이다. `.gitattributes` 와 `.editorconfig` 가
+   강제하지만 Windows 도구가 어기기 쉬우니 커밋 전에 확인한다.
+
+   ```sh
+   git ls-files --eol | grep -i crlf          # 비어야 한다
+   grep -rlP '^\xEF\xBB\xBF' src shaders       # 비어야 한다
+   ```
+
+4. **코드 리뷰.** 커밋 전에 diff 를 한 번 리뷰(에이전트 또는 사람)하고 지적을 반영한다.
+5. **커밋.** 제목은 한국어 한 줄, 필요하면 본문. `Co-Authored-By` 같은 꼬릿말은 적지 않는다.
+
+빌드는 VS 개발자 환경이 필요하다. PowerShell 에서:
+
+```powershell
+cmd /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat`" >nul && cmake --build --preset release"
+```
+
+### 설계 원칙
+
+이 저장소는 **mesh shader 경로와 하드웨어 광선 추적의 융합**을 살피기 위한 것이다. 기능을 넣을 때:
+
+- 재질 평가, 표면 복원, 환경광, 안개처럼 «표면이 어떻게 보이는가»를 정하는 코드는 **두 경로가 같은
+  `.glsl` 함수를 쓴다.** 한쪽에만 넣거나 복사해 두 벌로 만들지 않는다.
+- 정점 변형(스키닝)처럼 두 경로가 함께 읽는 자원은 한 번만 만들어 양쪽이 같은 버퍼를 본다.
+- 래스터 전용 기능이라도 경로 추적 모드에서 어떻게 되는지(꺼지는지, 같은 결과를 내는지)를 정하고 편집기에
+  드러낸다.
+
 ## 구조
 
 `src/main.cpp` 가 인자를 파싱해 `app::Application` 을 띄운다. 계층은 `app` → `editor`/`gfx`/`scene`/

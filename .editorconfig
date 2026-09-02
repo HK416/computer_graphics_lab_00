@@ -1,0 +1,16 @@
+# 소스는 전부 UTF-8(BOM 없음) + LF 다. .gitattributes 가 저장소 쪽을, 이 파일이 편집기 쪽을 맡는다.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.{yml,yaml,json}]
+indent_size = 2
