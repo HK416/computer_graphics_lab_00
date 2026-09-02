@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <vector>
 
 #include <spdlog/spdlog.h>
 
@@ -95,8 +96,8 @@ BindlessTextures::BindlessTextures(Context& context) : context(context) {
     VkDescriptorBindingFlags commonFlags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
                                            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
                                            VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
-    std::array<VkDescriptorBindingFlags, 8> bindingFlags{
-        commonFlags, commonFlags, commonFlags, commonFlags, commonFlags, commonFlags, commonFlags, commonFlags};
+    // 바인딩 수와 반드시 같아야 한다. 하나라도 빠지면 검증 레이어가 배치 생성을 거부한다.
+    std::vector<VkDescriptorBindingFlags> bindingFlags(bindings.size(), commonFlags);
     VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
     flagsInfo.bindingCount = static_cast<uint32_t>(bindingFlags.size());
