@@ -925,6 +925,29 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::TextDisabled("이 거리 안쪽만 광선으로 판정하고 바깥은 그림자 맵을 쓴다");
     }
 
+    ImGui::SeparatorText("광선 반사");
+    bool reflectionReady = rayQueryReady && renderer.useIbl;
+    ImGui::BeginDisabled(!reflectionReady);
+    ImGui::Checkbox("광선 반사", &renderer.useReflections);
+    ImGui::BeginDisabled(!renderer.useReflections);
+    ImGui::SliderFloat("거칠기 상한", &renderer.reflectionRoughnessCutoff, 0.03F, 1.0F, "%.2f");
+    ImGui::SliderFloat("반사 세기", &renderer.reflectionIntensity, 0.0F, 2.0F, "%.2f");
+    int reflectionSamples = static_cast<int>(renderer.reflectionMaxSamples);
+    if (ImGui::SliderInt("누적 상한", &reflectionSamples, 1, 64)) {
+        renderer.reflectionMaxSamples = static_cast<uint32_t>(reflectionSamples);
+    }
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    if (rasterOnly) {
+        ImGui::TextDisabled("경로 추적이 반사를 직접 계산한다");
+    } else if (!rayQueryReady) {
+        ImGui::TextDisabled("이 장치는 광선 질의를 지원하지 않는다");
+    } else if (!renderer.useIbl) {
+        ImGui::TextDisabled("IBL 이 꺼져 있으면 스페큘러 항이 없어 반사도 쉰다");
+    } else {
+        ImGui::TextDisabled("거칠기 상한 이하의 불투명 표면만 추적한다. 픽셀당 광선 하나, 시간축 누적");
+    }
+
     ImGui::SeparatorText("환경 (IBL)");
     scene::Environment& env = active.environment;
     ImGui::Checkbox("IBL 사용", &renderer.useIbl);
@@ -1156,8 +1179,18 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::TextDisabled("경로 추적은 래스터 파이프라인을 타지 않는다");
     }
 
-    static constexpr const char* DEBUG_MODE_NAMES[] = {
-        "셰이딩", "meshlet", "노멀", "UV", "깊이", "LOD", "캐스케이드", "그림자", "모션 벡터", "컬 패스"};
+    static constexpr const char* DEBUG_MODE_NAMES[] = {"셰이딩",
+                                                       "meshlet",
+                                                       "노멀",
+                                                       "UV",
+                                                       "깊이",
+                                                       "LOD",
+                                                       "캐스케이드",
+                                                       "그림자",
+                                                       "모션 벡터",
+                                                       "컬 패스",
+                                                       "반사 원본",
+                                                       "반사 누적"};
     // 경로 추적은 래스터에 있는 모드를 다 그리지는 못한다. 못 그리는 것만 개별로 잠근다.
     auto modeUsable = [this](uint32_t mode) {
         return !renderer.usePathTracing || gfx::pathTraceSupportsDebugMode(mode);

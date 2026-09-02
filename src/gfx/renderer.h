@@ -44,6 +44,8 @@ inline constexpr uint32_t DEBUG_MODE_DEPTH = 4;
 inline constexpr uint32_t DEBUG_MODE_SHADOW = 7;
 inline constexpr uint32_t DEBUG_MODE_VELOCITY = 8;
 inline constexpr uint32_t DEBUG_MODE_CULL_PHASE = 9;
+inline constexpr uint32_t DEBUG_MODE_REFLECTION_RAW = 10;
+inline constexpr uint32_t DEBUG_MODE_REFLECTION = 11;
 
 // 경로 추적이 그릴 수 있는 디버그 뷰인지. meshlet 과 LOD 는 하위 가속 구조가 메쉬 단위 LOD 0 이라
 // 개념 자체가 없고, 캐스케이드는 그림자 맵을 읽지 않으며, 모션 벡터는 경로 추적 프레임에 갱신되지
@@ -170,6 +172,17 @@ struct RenderTargets {
     std::vector<uint32_t> bloomStorageSlots;
     // 밉마다 선형 샘플러로 읽는 슬롯. 업샘플 텐트 필터가 이중 선형 보간을 필요로 한다.
     std::vector<uint32_t> bloomSampledSlots;
+
+    // 광선 반사. 이번 프레임 추적 결과와 시간축 누적 히스토리(더블 버퍼). 컴퓨트가 쓰고 읽으므로
+    // 계속 GENERAL 이다.
+    Image reflectionRaw;
+    std::array<Image, 2> reflectionHistory;
+    uint32_t reflectionRawSlot = 0;
+    uint32_t reflectionRawStorageSlot = 0;
+    std::array<uint32_t, 2> reflectionHistorySlots{};
+    std::array<uint32_t, 2> reflectionHistoryStorageSlots{};
+    // 반사 컴퓨트가 HDR 색상에 직접 더할 때 쓰는 rgba16f 스토리지 슬롯.
+    uint32_t colorStorageSlot = 0;
 
     // 경로 추적 누적 버퍼. 카메라가 멈춰 있는 동안 표본을 쌓는다.
     Image pathAccumulation;
@@ -392,6 +405,9 @@ private:
     void createShadowPipeline();
     void createSsaoPipelines();
     void createBloomPipelines();
+    // 광선 질의 컴퓨트로 반사를 추적하고 시간축으로 누적해 색상에 더한다. 광선 질의가 있을 때만 만든다.
+    void createReflectionPipelines();
+    void recordReflectionPass(VkCommandBuffer commandBuffer, const Frame& frame);
     // Bloom 밉 사슬과 자동 노출. 톤 매핑이 읽을 이미지를 원본으로 받는다.
     void recordPostEffects(VkCommandBuffer commandBuffer,
                            const scene::PostProcess& post,
@@ -428,6 +444,11 @@ private:
     VkSampler postSampler = VK_NULL_HANDLE;
     // Bloom 처럼 보간이 필요한 후처리가 쓴다. 밉을 명시적으로 고르므로 maxLod 를 열어 둔다.
     VkSampler linearSampler = VK_NULL_HANDLE;
+    VkPipelineLayout reflectionPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline reflectionTracePipeline = VK_NULL_HANDLE;
+    VkPipeline reflectionResolvePipeline = VK_NULL_HANDLE;
+    // 지난 프레임에 반사 히스토리를 남겼는지. 아니면 이번 해결은 히스토리를 버린다.
+    bool reflectionHistoryValid = false;
     VkPipelineLayout bloomPipelineLayout = VK_NULL_HANDLE;
     VkPipeline bloomDownsamplePipeline = VK_NULL_HANDLE;
     VkPipeline bloomUpsamplePipeline = VK_NULL_HANDLE;

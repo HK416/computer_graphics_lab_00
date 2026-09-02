@@ -141,8 +141,9 @@ cmd /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliar
 
 `Renderer::drawFrame` → `buildLights` → `buildDrawCommands` → `recordCommands`. 기록 순서:
 
-환경 맵 굽기(설정이 바뀔 때만) → 그림자 패스 → [경로 추적] **또는** [컬 컴퓨트 → 스킨 컴퓨트/가속 구조
-→ 불투명 → 하늘 → OIT → 합성 → HZB → SSAO] → 시간축 업스케일 → 톤 매핑 → 공간 업스케일 → UI.
+환경 맵 굽기(설정이 바뀔 때만) → 스킨 컴퓨트(변형 정점·meshlet 경계) → 그림자 패스 → [경로 추적]
+**또는** [컬(1차) → 불투명(1차) → HZB → 컬(2차) → 불투명(2차) → 하늘 → 광선 반사 → OIT → 합성 → SSAO]
+→ Bloom·자동 노출 → 시간축 업스케일 → 톤 매핑 → 공간 업스케일 → UI.
 
 업스케일 두 방식이 톤 매핑을 사이에 두고 갈리는 이유와 시간축 경로가 요구하는 지터/모션 벡터/하늘
 배관은 README 의 «업스케일» 절에 있다.
@@ -154,7 +155,7 @@ cmd /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliar
   샘플러로 인코딩된다. 번호 공간이 배열마다 별개라 섞어 쓰면 안 된다.
 - 나머지 버퍼는 전부 **buffer device address** 로 푸시 상수에 실린다
   (`shaders/scene_data.glsl` 의 `PushConstants`, `shaders/scene_types.glsl` 의 `buffer_reference` 타입).
-- 집합 1 은 광선 질의 그림자 변종이 TLAS 를 묶을 때만 쓴다.
+- 집합 1 은 광선 질의 그림자 변종과 반사 컴퓨트가 TLAS 를 묶을 때만 쓴다.
 
 ### CPU/GPU 배치가 묶인 자리
 

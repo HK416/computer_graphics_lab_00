@@ -1,0 +1,255 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_ray_query : require
+
+#include "bindless.glsl"
+#include "fog.glsl"
+#include "lighting.glsl"
+#include "material.glsl"
+#include "ray_query.glsl"
+#include "sampling.glsl"
+#include "scene_types.glsl"
+
+// 광선 반사. 불투명 패스가 남긴 깊이·노멀·거칠기에서 픽셀마다 GGX 반사 방향 하나를 뽑아 광선
+// 질의로 추적하고(STAGE 0), 모션 벡터로 지난 프레임 결과를 되짚어 누적한 뒤 스페큘러 가중치를 곱해
+// HDR 색상에 더한다(STAGE 1). 히트 표면의 재질과 조명은 경로 추적 적중 셰이더와 같은 함수를 쓴다.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(constant_id = 0) const uint STAGE = 0;
+
+// 경로 추적기와 같은 상위 가속 구조. 집합 1 로 묶여 있다.
+layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevel;
+
+layout(push_constant) uniform ReflectPushConstants {
+    VertexBuffer vertices;
+    VertexBuffer skinnedVertices;
+    IndexBuffer indices;
+    MeshBuffer meshes;
+    InstanceBuffer instances;
+    MaterialBuffer materials;
+    MeshLodBuffer lods;
+    CameraBuffer camera;
+    LightBuffer lights;
+    uint normalRoughnessTexture;
+    uint weightTexture;
+    uint depthTexture;
+    uint velocityTexture;
+    // 이번 프레임 추적 결과. 추적이 쓰고 해결이 읽는다.
+    uint rawTexture;
+    uint rawStorage;
+    // 누적 히스토리. 지난 것을 읽고 이번 것을 쓴다. 알파에 쌓인 표본 수가 들어 있다.
+    uint historyTexture;
+    uint historyStorage;
+    // 반사를 더할 HDR 색상(rgba16f 스토리지).
+    uint colorStorage;
+    uint frameIndex;
+    uint maxSamples;
+    // 1 이면 히스토리를 버린다. 여기까지 124 바이트다.
+    uint reset;
+    uint debugMode;
+} push;
+
+// 히트 표면을 직접광 한 표본 + 환경광으로 셰이딩한다. 재귀는 없다.
+vec3 shadeHit(Camera camera, vec3 origin, vec3 direction, float hitDistance, uint instanceIndex, uint primitive, vec2 barycentrics, inout uint seed) {
+    HitSurface hit = interpolateHit(push.instances,
+                                    push.meshes,
+                                    push.lods,
+                                    push.vertices,
+                                    push.skinnedVertices,
+                                    push.indices,
+                                    instanceIndex,
+                                    primitive,
+                                    barycentrics);
+    Material material = push.materials.items[hit.materialIndex];
+    vec3 normal = perturbNormal(material, hit.normal, hit.tangent, hit.tangentSign, hit.uv);
+    if (dot(normal, direction) > 0.0) {
+        normal = -normal;
+    }
+    MaterialSample sampled = sampleMaterial(material, hit.uv);
+
+    Surface surface;
+    surface.position = hit.position;
+    surface.normal = normal;
+    surface.view = -direction;
+    surface.albedo = sampled.albedo;
+    surface.metallic = sampled.metallic;
+    surface.roughness = sampled.roughness;
+
+    vec3 color = sampled.emissive;
+    // 직접광은 조명 하나를 균등하게 골라 그림자 광선 하나로 판정한다. 경로 추적의 다음 사건 추정과
+    // 같은 식이라 시간축 누적이 평균을 맞춘다.
+    uint lightCount = camera.shading.x;
+    if (lightCount > 0u) {
+        uint index = min(uint(randomFloat(seed) * float(lightCount)), lightCount - 1u);
+        Light light = push.lights.items[index];
+        vec3 lightDirection;
+        float distanceToLight;
+        vec3 radiance = sampleLightRadiance(light, surface.position, lightDirection, distanceToLight);
+        if (radiance != vec3(0.0) && dot(surface.normal, lightDirection) > 0.0) {
+            float visibility = rayQueryVisibility(
+                topLevel, surface.position, surface.normal, lightDirection, min(distanceToLight - 1e-3, 1e4));
+            color += evaluateBrdf(surface, lightDirection, radiance) * visibility * float(lightCount);
+        }
+    }
+    color += environmentLight(camera, surface, sampled.occlusion, true);
+    return applyFog(camera, color, origin, direction, hitDistance);
+}
+
+vec3 traceReflection(Camera camera, vec3 origin, vec3 normal, vec3 direction, float roughness, inout uint seed) {
+    rayQueryEXT query;
+    // 단면 재질은 후면을 컬링해 래스터와 같은 면만 보이게 한다. 컷오프·반투명 재질은 가속 구조에
+    // 불투명으로 올라가지 않아 후보로 온다.
+    rayQueryInitializeEXT(
+        query, topLevel, gl_RayFlagsCullBackFacingTrianglesEXT, 0xFFu, origin + normal * 1.0e-3, 1.0e-4, direction, 1.0e4);
+    while (rayQueryProceedEXT(query)) {
+        if (rayQueryGetIntersectionTypeEXT(query, false) != gl_RayQueryCandidateIntersectionTriangleEXT) {
+            continue;
+        }
+        uint instanceIndex = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, false));
+        Instance instance = push.instances.items[instanceIndex];
+        Mesh mesh = push.meshes.items[instance.meshIndex];
+        Material material = push.materials.items[mesh.materialIndex];
+        // ponytail: 반투명은 그냥 통과시킨다. 유리 뒤의 반사가 유리를 무시한다.
+        if (material.alphaMode != ALPHA_MODE_CUTOFF) {
+            continue;
+        }
+        vec2 uv = interpolateHitUv(push.instances,
+                                   push.meshes,
+                                   push.lods,
+                                   push.vertices,
+                                   push.skinnedVertices,
+                                   push.indices,
+                                   instanceIndex,
+                                   uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, false)),
+                                   rayQueryGetIntersectionBarycentricsEXT(query, false));
+        if (materialAlpha(material, uv) >= material.emissiveAndCutoff.w) {
+            rayQueryConfirmIntersectionEXT(query);
+        }
+    }
+
+    if (rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+        // 미스는 프리필터 큐브맵을 거칠기에 맞춰 읽는다. 스페큘러 IBL 이 보던 것과 같은 하늘이다.
+        uvec4 environment = camera.environment;
+        vec3 sky = sampleBindlessCubeLod(environment.y, direction, roughness * float(environment.w - 1u)).rgb;
+        return applyFog(camera, sky, origin, direction, 1.0e30);
+    }
+    return shadeHit(camera,
+                    origin,
+                    direction,
+                    rayQueryGetIntersectionTEXT(query, true),
+                    uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, true)),
+                    uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, true)),
+                    rayQueryGetIntersectionBarycentricsEXT(query, true),
+                    seed);
+}
+
+void traceStage(ivec2 pixel, ivec2 size) {
+    Camera camera = push.camera.item;
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
+    float depth = sampleBindless(push.depthTexture, uv).r;
+    vec4 normalRoughness = sampleBindless(push.normalRoughnessTexture, uv);
+    vec3 weight = sampleBindless(push.weightTexture, uv).rgb;
+
+    vec4 result = vec4(0.0);
+    if (depth > 0.0 && any(greaterThan(weight, vec3(0.0)))) {
+        vec3 position = worldFromDepth(camera, uv, depth);
+        vec3 normal = normalize(normalRoughness.xyz);
+        float roughness = normalRoughness.w;
+        vec3 view = normalize(camera.position.xyz - position);
+        uint seed = pcgHash(uint(pixel.x) + uint(pixel.y) * uint(size.x) + push.frameIndex * 9781u);
+
+        vec3 halfway = sampleGgxHalfVector(normal, roughness, seed);
+        vec3 direction = reflect(-view, halfway);
+        if (dot(direction, normal) <= 0.0) {
+            // 표면 아래로 들어가는 표본은 거울 방향으로 대신한다. 가장자리에서 검은 점이 생기지 않는다.
+            direction = reflect(-view, normal);
+        }
+        // 반딧불이 표본이 누적을 오래 흔들지 않도록 잘라 낸다.
+        result.rgb = min(traceReflection(camera, position, normal, direction, roughness, seed), vec3(8.0));
+    }
+    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(push.rawStorage)], pixel, result);
+}
+
+// 휘도와 색차를 나눠 가두면 밝은 반사가 색을 덜 물들인다. taau.comp 와 같은 식이다.
+vec3 rgbToYCoCg(vec3 color) {
+    return vec3(0.25 * color.r + 0.5 * color.g + 0.25 * color.b,
+                0.5 * color.r - 0.5 * color.b,
+                -0.25 * color.r + 0.5 * color.g - 0.25 * color.b);
+}
+
+vec3 yCoCgToRgb(vec3 color) {
+    return vec3(color.x + color.y - color.z, color.x + color.z, color.x - color.y - color.z);
+}
+
+void resolveStage(ivec2 pixel, ivec2 size) {
+    Camera camera = push.camera.item;
+    vec2 texel = 1.0 / vec2(size);
+    vec2 uv = (vec2(pixel) + 0.5) * texel;
+    vec4 normalRoughness = sampleBindless(push.normalRoughnessTexture, uv);
+    vec3 weight = sampleBindless(push.weightTexture, uv).rgb;
+    vec3 current = sampleBindless(push.rawTexture, uv).rgb;
+
+    if (all(equal(weight, vec3(0.0)))) {
+        imageStore(bindlessStorageImagesRgba16[nonuniformEXT(push.historyStorage)], pixel, vec4(0.0));
+        return;
+    }
+
+    // 3x3 이웃의 평균과 분산으로 히스토리를 가둔다. 깊이·노멀 비교 없이도 잔상이 크게 남지 않는다.
+    vec3 moment1 = vec3(0.0);
+    vec3 moment2 = vec3(0.0);
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            vec2 tapUv = clamp(uv + vec2(x, y) * texel, vec2(0.0), vec2(1.0));
+            vec3 ycocg = rgbToYCoCg(sampleBindless(push.rawTexture, tapUv).rgb);
+            moment1 += ycocg;
+            moment2 += ycocg * ycocg;
+        }
+    }
+    vec3 mean = moment1 / 9.0;
+    vec3 sigma = sqrt(max(moment2 / 9.0 - mean * mean, vec3(0.0)));
+
+    vec2 motion = sampleBindless(push.velocityTexture, uv).rg;
+    vec2 historyUv = uv + motion;
+    bool hasHistory = push.reset == 0u && all(greaterThanEqual(historyUv, vec2(0.0))) &&
+                      all(lessThanEqual(historyUv, vec2(1.0)));
+
+    vec3 result = current;
+    float samples = 1.0;
+    if (hasHistory) {
+        vec4 history = sampleBindless(push.historyTexture, historyUv);
+        vec3 clamped = clamp(rgbToYCoCg(history.rgb), mean - 1.25 * sigma, mean + 1.25 * sigma);
+        // 거울에 가까울수록 히스토리를 짧게 쓴다. 시점이 바뀌면 반사가 바로 따라와야 한다.
+        //
+        // ponytail: 히트 거리로 반사의 시차를 되짚지 않는다. 카메라가 옆으로 움직이면 매끈한 면의
+        // 반사가 한두 프레임 끌린다. rawStorage 의 알파에 거리를 담아 가상 점을 재투영하면 된다.
+        float limit = mix(4.0, float(push.maxSamples), normalRoughness.w);
+        samples = min(history.a + 1.0, limit);
+        result = mix(yCoCgToRgb(clamped), current, 1.0 / samples);
+    }
+    result = max(result, vec3(0.0));
+    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(push.historyStorage)], pixel, vec4(result, samples));
+
+    vec4 color = imageLoad(bindlessStorageImagesRgba16[nonuniformEXT(push.colorStorage)], pixel);
+    if (push.debugMode == DEBUG_MODE_REFLECTION_RAW) {
+        color.rgb = current;
+    } else if (push.debugMode == DEBUG_MODE_REFLECTION) {
+        color.rgb = result;
+    } else {
+        color.rgb += result * weight * camera.jitter.w;
+    }
+    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(push.colorStorage)], pixel, color);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(push.camera.item.viewport.xy);
+    if (pixel.x >= size.x || pixel.y >= size.y) {
+        return;
+    }
+    if (STAGE == 0u) {
+        traceStage(pixel, size);
+    } else {
+        resolveStage(pixel, size);
+    }
+}

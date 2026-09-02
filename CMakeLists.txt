@@ -97,6 +97,7 @@ set(shader_sources
     shaders/brdf_lut.comp
     shaders/ssao.comp
     shaders/ssao_blur.comp
+    shaders/reflect.comp
     shaders/cull_meshlets.comp
     shaders/skin.comp
     shaders/skin_bounds.comp

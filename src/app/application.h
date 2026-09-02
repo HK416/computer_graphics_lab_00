@@ -49,6 +49,8 @@ struct Options {
     // 스크린샷 비교용. 두 패스 오클루전 컬링을 끄거나 mesh shader 경로 대신 컴퓨트 컬링 경로를 쓴다.
     bool occlusionCulling = true;
     bool meshShader = true;
+    // 시작할 때 광선 반사를 켠다. 광선 질의가 없으면 렌더러가 스스로 끈다.
+    bool reflections = false;
     // 프레임마다 카메라를 이만큼(도) 궤도 회전한다. 정지 화면에서는 드러나지 않는 팝인을 재현한다.
     float orbitDegreesPerFrame = 0.0F;
     float triangleBudget = 0.0F;

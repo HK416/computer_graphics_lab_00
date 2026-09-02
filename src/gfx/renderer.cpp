@@ -214,6 +214,33 @@ struct TonemapPushConstants {
     uint32_t autoExposure;
 };
 
+// shaders/reflect.comp 의 푸시 상수와 배치가 같아야 한다.
+struct ReflectPushConstants {
+    VkDeviceAddress vertices;
+    VkDeviceAddress skinnedVertices;
+    VkDeviceAddress indices;
+    VkDeviceAddress meshes;
+    VkDeviceAddress instances;
+    VkDeviceAddress materials;
+    VkDeviceAddress lods;
+    VkDeviceAddress camera;
+    VkDeviceAddress lights;
+    uint32_t normalRoughnessTexture;
+    uint32_t weightTexture;
+    uint32_t depthTexture;
+    uint32_t velocityTexture;
+    uint32_t rawTexture;
+    uint32_t rawStorage;
+    uint32_t historyTexture;
+    uint32_t historyStorage;
+    uint32_t colorStorage;
+    uint32_t frameIndex;
+    uint32_t maxSamples;
+    uint32_t reset;
+    uint32_t debugMode;
+};
+static_assert(sizeof(ReflectPushConstants) <= 128, "푸시 상수는 규격이 보장하는 128 바이트 안에 있어야 한다");
+
 // shaders/bloom_downsample.comp, bloom_upsample.comp 와 배치가 같아야 한다.
 struct BloomPushConstants {
     uint32_t sourceTexture;
@@ -344,6 +371,7 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& 
     createMeshPipelines();
     createPostPipelines();
     createBloomPipelines();
+    createReflectionPipelines();
     createCullPipeline();
     createSkinPipeline();
     createShadowPipeline();
@@ -393,6 +421,9 @@ Renderer::~Renderer() {
     vkDestroyPipelineLayout(context.device, skinPipelineLayout, nullptr);
     destroyBuffer(context, skinnedBoundsBuffer);
     destroyBuffer(context, skinnedVertexBuffer);
+    vkDestroyPipeline(context.device, reflectionResolvePipeline, nullptr);
+    vkDestroyPipeline(context.device, reflectionTracePipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, reflectionPipelineLayout, nullptr);
     vkDestroyPipeline(context.device, exposurePipeline, nullptr);
     vkDestroyPipelineLayout(context.device, exposurePipelineLayout, nullptr);
     vkDestroyPipeline(context.device, histogramPipeline, nullptr);
@@ -445,6 +476,9 @@ Renderer::~Renderer() {
     destroyImage(context, targets.ssao);
     destroyImage(context, targets.ssaoRaw);
     destroyImage(context, targets.pathAccumulation);
+    destroyImage(context, targets.reflectionHistory[1]);
+    destroyImage(context, targets.reflectionHistory[0]);
+    destroyImage(context, targets.reflectionRaw);
     destroyImage(context, targets.guideDepth);
     destroyImage(context, targets.guideRoughness);
     destroyImage(context, targets.guideNormal);
@@ -603,6 +637,16 @@ void Renderer::createRenderTargets() {
     revealageDesc.format = OIT_REVEALAGE_FORMAT;
     targets.oitRevealage = createImage(context, revealageDesc, "OIT 잔여 투과율");
 
+    destroyImage(context, targets.reflectionRaw);
+    destroyImage(context, targets.reflectionHistory[0]);
+    destroyImage(context, targets.reflectionHistory[1]);
+    ImageDesc reflectionDesc = colorDesc;
+    reflectionDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    targets.reflectionRaw = createImage(context, reflectionDesc, "반사 원본");
+    targets.reflectionHistory[0] = createImage(context, reflectionDesc, "반사 누적 0");
+    targets.reflectionHistory[1] = createImage(context, reflectionDesc, "반사 누적 1");
+    reflectionHistoryValid = false;
+
     destroyImage(context, targets.pathAccumulation);
     ImageDesc pathAccumulationDesc = colorDesc;
     pathAccumulationDesc.format = ACCUMULATION_FORMAT;
@@ -760,6 +804,16 @@ void Renderer::createRenderTargets() {
         targets.guideSpecularAlbedoSlot = bindless.add(targets.guideSpecularAlbedo.view, postSampler);
         targets.guideRoughnessStorageSlot = bindless.addStorageImage(targets.guideRoughness.view);
         targets.guideDepthStorageSlot = bindless.addStorageImage(targets.guideDepth.view);
+        targets.colorStorageSlot = bindless.addStorageImageRgba16(targets.color.view);
+        targets.reflectionRawSlot = bindless.add(targets.reflectionRaw.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        targets.reflectionRawStorageSlot = bindless.addStorageImageRgba16(targets.reflectionRaw.view);
+        for (size_t i = 0; i < 2; ++i) {
+            // 히스토리는 되짚은 자리를 이중 선형으로 읽으므로 선형 샘플러다.
+            targets.reflectionHistorySlots[i] =
+                bindless.add(targets.reflectionHistory[i].view, linearSampler, VK_IMAGE_LAYOUT_GENERAL);
+            targets.reflectionHistoryStorageSlots[i] =
+                bindless.addStorageImageRgba16(targets.reflectionHistory[i].view);
+        }
         targets.pathAccumulationStorageSlot = bindless.addStorageImageRgba(targets.pathAccumulation.view);
         targets.pathAccumulationSampledSlot =
             bindless.add(targets.pathAccumulation.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
@@ -799,6 +853,17 @@ void Renderer::createRenderTargets() {
         bindless.update(targets.guideSpecularAlbedoSlot, targets.guideSpecularAlbedo.view, postSampler);
         bindless.updateStorageImage(targets.guideRoughnessStorageSlot, targets.guideRoughness.view);
         bindless.updateStorageImage(targets.guideDepthStorageSlot, targets.guideDepth.view);
+        bindless.updateStorageImageRgba16(targets.colorStorageSlot, targets.color.view);
+        bindless.update(targets.reflectionRawSlot, targets.reflectionRaw.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        bindless.updateStorageImageRgba16(targets.reflectionRawStorageSlot, targets.reflectionRaw.view);
+        for (size_t i = 0; i < 2; ++i) {
+            bindless.update(targets.reflectionHistorySlots[i],
+                            targets.reflectionHistory[i].view,
+                            linearSampler,
+                            VK_IMAGE_LAYOUT_GENERAL);
+            bindless.updateStorageImageRgba16(targets.reflectionHistoryStorageSlots[i],
+                                              targets.reflectionHistory[i].view);
+        }
         bindless.updateStorageImageRgba(targets.pathAccumulationStorageSlot, targets.pathAccumulation.view);
         bindless.update(
             targets.pathAccumulationSampledSlot, targets.pathAccumulation.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
@@ -1597,6 +1662,156 @@ void Renderer::recordPostEffects(VkCommandBuffer commandBuffer,
                   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                   VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    frameProfiler.end(zone, commandBuffer);
+}
+
+void Renderer::createReflectionPipelines() {
+    if (!rayQueryShadowsAvailable()) {
+        return;
+    }
+    VkPushConstantRange range{};
+    range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    range.size = sizeof(ReflectPushConstants);
+    std::array<VkDescriptorSetLayout, 2> sets{bindless.layout(), rayTracer->accelerationLayout()};
+    VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.setLayoutCount = static_cast<uint32_t>(sets.size());
+    layoutInfo.pSetLayouts = sets.data();
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &range;
+    VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &reflectionPipelineLayout));
+
+    // 추적과 해결은 한 셰이더의 특수화 상수로 갈린다.
+    VkShaderModule module = createShaderModule(context.device, "reflect.comp.spv");
+    uint32_t stage = 0;
+    VkSpecializationMapEntry entry{0, 0, sizeof(uint32_t)};
+    VkSpecializationInfo specialization{};
+    specialization.mapEntryCount = 1;
+    specialization.pMapEntries = &entry;
+    specialization.dataSize = sizeof(stage);
+    specialization.pData = &stage;
+    VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    info.stage = shaderStage(VK_SHADER_STAGE_COMPUTE_BIT, module);
+    info.stage.pSpecializationInfo = &specialization;
+    info.layout = reflectionPipelineLayout;
+    VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &info, nullptr, &reflectionTracePipeline));
+    stage = 1;
+    VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &info, nullptr, &reflectionResolvePipeline));
+    vkDestroyShaderModule(context.device, module, nullptr);
+}
+
+void Renderer::recordReflectionPass(VkCommandBuffer commandBuffer, const Frame& frame) {
+    uint32_t zone = frameProfiler.begin("반사", commandBuffer);
+
+    // 깊이와 모션 벡터는 읽기 전용으로, 색상은 컴퓨트가 더할 수 있게 스토리지 레이아웃으로 옮긴다.
+    imageBarrier(commandBuffer,
+                 targets.depth.handle,
+                 VK_IMAGE_ASPECT_DEPTH_BIT,
+                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    imageBarrier(commandBuffer,
+                 targets.velocity.handle,
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    imageBarrier(commandBuffer,
+                 targets.color.handle,
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_GENERAL,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+    auto memoryBarrier = [&](VkAccessFlags2 sourceAccess, VkAccessFlags2 destinationAccess) {
+        VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barrier.srcAccessMask = sourceAccess;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barrier.dstAccessMask = destinationAccess;
+        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dependency.memoryBarrierCount = 1;
+        dependency.pMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(commandBuffer, &dependency);
+    };
+    // 지난 프레임 해결이 쓴 히스토리를 이번에 읽고, 지난 프레임이 읽던 원본을 이번에 덮어쓴다.
+    memoryBarrier(VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+    size_t write = frameIndex & 1;
+    size_t read = write ^ 1;
+    ReflectPushConstants pushConstants{};
+    pushConstants.vertices = geometry.vertexBuffer.address;
+    pushConstants.skinnedVertices = skinnedVertexBuffer.address;
+    pushConstants.indices = geometry.indexBuffer.address;
+    pushConstants.meshes = geometry.meshBuffer.address;
+    pushConstants.instances = frame.instanceBuffer.address;
+    pushConstants.materials = geometry.materialBuffer.address;
+    pushConstants.lods = geometry.lodBuffer.address;
+    pushConstants.camera = frame.cameraBuffer.address;
+    pushConstants.lights = frame.lightBuffer.address;
+    pushConstants.normalRoughnessTexture = targets.guideNormalSlot;
+    pushConstants.weightTexture = targets.guideSpecularAlbedoSlot;
+    pushConstants.depthTexture = targets.depthSlot;
+    pushConstants.velocityTexture = targets.velocitySlot;
+    pushConstants.rawTexture = targets.reflectionRawSlot;
+    pushConstants.rawStorage = targets.reflectionRawStorageSlot;
+    pushConstants.historyTexture = targets.reflectionHistorySlots[read];
+    pushConstants.historyStorage = targets.reflectionHistoryStorageSlots[write];
+    pushConstants.colorStorage = targets.colorStorageSlot;
+    pushConstants.frameIndex = static_cast<uint32_t>(frameIndex);
+    pushConstants.maxSamples = std::max(reflectionMaxSamples, 1U);
+    pushConstants.reset = reflectionHistoryValid && !temporalResetThisFrame ? 0U : 1U;
+    pushConstants.debugMode = debugMode;
+
+    std::array<VkDescriptorSet, 2> sets{bindless.set(), rayTracer->accelerationSet()};
+    vkCmdBindDescriptorSets(commandBuffer,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
+                            reflectionPipelineLayout,
+                            0,
+                            static_cast<uint32_t>(sets.size()),
+                            sets.data(),
+                            0,
+                            nullptr);
+    vkCmdPushConstants(
+        commandBuffer, reflectionPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+    uint32_t groupsX = (currentRenderExtent.width + 7) / 8;
+    uint32_t groupsY = (currentRenderExtent.height + 7) / 8;
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, reflectionTracePipeline);
+    vkCmdDispatch(commandBuffer, groupsX, groupsY, 1);
+    memoryBarrier(VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, reflectionResolvePipeline);
+    vkCmdDispatch(commandBuffer, groupsX, groupsY, 1);
+    reflectionHistoryValid = true;
+
+    // 색상은 다시 첨부물로, 깊이도 다시 첨부물로. 반투명 패스가 둘 다 이어 쓴다.
+    imageBarrier(commandBuffer,
+                 targets.color.handle,
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_GENERAL,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    imageBarrier(commandBuffer,
+                 targets.depth.handle,
+                 VK_IMAGE_ASPECT_DEPTH_BIT,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
     frameProfiler.end(zone, commandBuffer);
 }
 
@@ -3187,20 +3402,24 @@ void Renderer::recordCommands(Frame& frame,
                      0,
                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-        imageBarrier(commandBuffer,
-                     targets.bloom.handle,
-                     VK_IMAGE_ASPECT_COLOR_BIT,
-                     VK_IMAGE_LAYOUT_UNDEFINED,
-                     VK_IMAGE_LAYOUT_GENERAL,
-                     VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                     0,
-                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        for (const Image* image :
+             {&targets.bloom, &targets.reflectionRaw, &targets.reflectionHistory[0], &targets.reflectionHistory[1]}) {
+            imageBarrier(commandBuffer,
+                         image->handle,
+                         VK_IMAGE_ASPECT_COLOR_BIT,
+                         VK_IMAGE_LAYOUT_UNDEFINED,
+                         VK_IMAGE_LAYOUT_GENERAL,
+                         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                         0,
+                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        }
         postTargetsNeedInit = false;
     }
 
     bool pathTracing = usePathTracing && rayTracer != nullptr;
     rayQueryPass = false;
+    bool velocityReadable = false;
 
     // 환경 맵은 설정이 바뀔 때만 다시 굽는다. 래스터와 경로 추적이 같은 환경을 본다.
     {
@@ -3310,8 +3529,10 @@ void Renderer::recordCommands(Frame& frame,
                                               debugMode,
                                               meshletVisibilityBuffer.address,
                                               firstPhase};
-        // 광선 질의 그림자를 쓰면 TLAS 를 집합 1 로 함께 묶고, 장면이 바뀌었으면 먼저 다시 만든다.
-        rayQueryPass = useRayQueryShadows && rayQueryShadowsAvailable();
+        // 광선 질의 그림자나 반사를 쓰면 TLAS 를 집합 1 로 함께 묶고, 장면이 바뀌었으면 먼저 다시
+        // 만든다. 반사만 켜도 광선 질의 변종 프래그먼트가 돌지만, ambient.w 가 0 이라 그림자는
+        // 그림자 맵을 그대로 쓴다.
+        rayQueryPass = (useRayQueryShadows || reflectionsActive()) && rayQueryShadowsAvailable();
         if (rayQueryPass) {
             updateAccelerationStructures(commandBuffer, scene);
             rayQueryPass = rayTracer->ready();
@@ -3495,6 +3716,15 @@ void Renderer::recordCommands(Frame& frame,
             frameProfiler.end(skyZone, commandBuffer);
         }
 
+        // 3) 광선 반사. 불투명 깊이·노멀로 추적해 색상에 더한다. 하늘이 먼저 채워져 있어야 반사가
+        //    되짚는 히스토리와 색상이 맞고, 반투명은 이 위에 합성된다.
+        if (reflectionsActive() && rayQueryPass) {
+            recordReflectionPass(commandBuffer, frame);
+            velocityReadable = true;
+        } else {
+            reflectionHistoryValid = false;
+        }
+
         if (hasTranslucent) {
             // 2) 반투명은 누적과 잔여 투과율 대상에 순서 독립으로 기록한다.
             uint32_t oitZone = frameProfiler.begin("OIT", commandBuffer);
@@ -3625,8 +3855,9 @@ void Renderer::recordCommands(Frame& frame,
     // 5) 시간축 업스케일러는 톤 매핑 앞에서 선형 HDR 을 받아 표시 해상도로 늘린다. 노출과 톤
     //    곡선이 흔들려도 히스토리가 따라 흔들리지 않으려면 이 순서여야 한다. 공간 업스케일은
     //    톤 매핑 뒤에서 도므로 여기서 두 경로가 갈린다.
-    // 경로 추적은 광선 생성 셰이더가 모션 벡터를 직접 쓰고 레이아웃도 그쪽에서 맞춘다.
-    if (!pathTracing) {
+    // 경로 추적은 광선 생성 셰이더가 모션 벡터를 직접 쓰고 레이아웃도 그쪽에서 맞춘다. 반사 패스가
+    // 돌았으면 거기서 이미 읽기 전용으로 옮겼다.
+    if (!pathTracing && !velocityReadable) {
         imageBarrier(commandBuffer,
                      targets.velocity.handle,
                      VK_IMAGE_ASPECT_COLOR_BIT,

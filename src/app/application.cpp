@@ -120,6 +120,7 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
         renderer->triangleBudget = options.triangleBudget;
     }
     renderer->occlusionCulling = options.occlusionCulling;
+    renderer->useReflections = options.reflections;
     if (!options.meshShader) {
         renderer->useMeshShader = false;
     }
