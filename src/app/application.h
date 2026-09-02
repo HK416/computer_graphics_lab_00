@@ -44,6 +44,8 @@ struct Options {
     float renderScale = 1.0F;
     // 0 통과, 1 내장 공간 업스케일
     uint32_t upscaler = 1;
+    // 시작할 때 경로 추적을 켠다. 하드웨어가 지원하지 않으면 사유를 남기고 무시한다.
+    bool pathTracing = false;
     float triangleBudget = 0.0F;
 };
 

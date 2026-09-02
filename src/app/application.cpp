@@ -109,6 +109,14 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     renderer->profiler().enabled = options.profile;
     renderer->renderScale = options.renderScale;
     renderer->upscaler = static_cast<gfx::Upscaler>(options.upscaler);
+    if (options.pathTracing) {
+        // 편집기 체크박스와 같은 게이트를 탄다. 미지원 장치에서 켜면 빈 화면만 나온다.
+        if (renderer->pathTracingAvailable()) {
+            renderer->usePathTracing = true;
+        } else {
+            spdlog::warn("이 장치는 경로 추적을 지원하지 않아 --pathtrace 를 무시한다");
+        }
+    }
     if (options.triangleBudget > 0.0F) {
         renderer->triangleBudget = options.triangleBudget;
     }
