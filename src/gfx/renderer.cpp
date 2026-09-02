@@ -1855,8 +1855,20 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         const GpuMesh& mesh = geometry.mesh(scene.meshOf(index));
         return geometry.lod(mesh.lodOffset + std::min(lodLevel, mesh.lodCount - 1));
     };
-    auto groupsFor = [&lodFor](uint32_t index) {
-        return (lodFor(index).meshletCount + MESHLET_GROUP_SIZE - 1) / MESHLET_GROUP_SIZE;
+    // 자동 선정은 GPU 가 DAG 전체에서 고르므로 모든 단계의 meshlet 을 후보로 올려야 한다. 한
+    // 단계만 올리면 오차가 "부모를 그려라"로 판정될 때 그 부모가 후보에 없어 아무것도 그려지지
+    // 않고 구멍이 남는다. 렌더 배율을 낮추면 투영 오차가 함께 줄어 이 판정이 쉽게 나온다.
+    // 고정 단계일 때는 GPU 가 그 단계만 통과시키므로 그 범위만 올린다.
+    auto meshletRangeFor = [this, &scene](uint32_t index) {
+        const GpuMesh& mesh = geometry.mesh(scene.meshOf(index));
+        if (automaticLod) {
+            return std::pair<uint32_t, uint32_t>{mesh.meshletOffset, mesh.meshletCount};
+        }
+        const GpuMeshLod& fixed = geometry.lod(mesh.lodOffset + std::min(lodLevel, mesh.lodCount - 1));
+        return std::pair<uint32_t, uint32_t>{fixed.meshletOffset, fixed.meshletCount};
+    };
+    auto groupsFor = [&meshletRangeFor](uint32_t index) {
+        return (meshletRangeFor(index).second + MESHLET_GROUP_SIZE - 1) / MESHLET_GROUP_SIZE;
     };
     // 조상이 숨겨져 있으면 자식도 그리지 않는다. 변환만 담는 노드는 메쉬가 없어 걸러진다.
     auto drawable = [this, &scene](uint32_t index) {
@@ -1997,12 +2009,13 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         // 셰이더는 gl_InstanceIndex 로 인스턴스 배열을 참조한다.
         draws[slot].firstInstance = slot;
 
+        auto [meshletBase, meshletTotal] = meshletRangeFor(index);
         for (uint32_t group = 0; group < groupsFor(index); ++group) {
             uint32_t groupSlot = groupCursors[mode][sided]++;
             uint32_t first = group * MESHLET_GROUP_SIZE;
             groups[groupSlot].instanceIndex = slot;
-            groups[groupSlot].firstMeshlet = lod.meshletOffset + first;
-            groups[groupSlot].meshletCount = std::min(MESHLET_GROUP_SIZE, lod.meshletCount - first);
+            groups[groupSlot].firstMeshlet = meshletBase + first;
+            groups[groupSlot].meshletCount = std::min(MESHLET_GROUP_SIZE, meshletTotal - first);
             groups[groupSlot].padding = 0;
         }
     }
