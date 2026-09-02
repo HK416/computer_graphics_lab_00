@@ -243,6 +243,9 @@ public:
         VkImageLayout layout;
         VkExtent2D extent;
         const char* sliceLabel = nullptr;
+        // 지금 렌더 모드에서 이번 프레임에 실제로 채워지는 대상인지. 아니면 내용이 낡았거나
+        // 레이아웃이 달라 보여 주면 안 된다.
+        bool available = true;
     };
     std::vector<TargetView> targetViews() const;
     VkImageView presentView() const { return targets.present.view; }
@@ -464,6 +467,8 @@ private:
     Buffer exposureBuffer;
     // 참이면 다음 자동 노출은 적응 없이 목표 값으로 바로 간다.
     bool exposureNeedsReset = true;
+    // 이번 프레임에 Bloom 밉 사슬을 채웠는지. 타깃 뷰어가 낡은 밉을 보여 주지 않게 한다.
+    bool bloomActive = false;
     VkExtent2D currentDisplayExtent{};
     VkExtent2D currentRenderExtent{};
     uint64_t generation = 0;

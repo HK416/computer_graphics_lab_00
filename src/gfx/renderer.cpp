@@ -569,23 +569,35 @@ std::vector<Renderer::TargetView> Renderer::targetViews() const {
     constexpr VkImageLayout READ_ONLY = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     constexpr VkImageLayout GENERAL = VK_IMAGE_LAYOUT_GENERAL;
     VkExtent2D render = currentRenderExtent;
+    // 어느 대상이 이번 프레임에 채워지는지는 recordCommands 의 분기와 같아야 한다. 경로 추적은
+    // 래스터 패스를 통째로 건너뛰어 깊이·모션 벡터·HZB 가 낡거나 다른 레이아웃에 남는다.
+    bool pathTracing = usePathTracing && rayTracer != nullptr;
+    bool temporal = temporalReady() && (!pathTracing || rayReconstructionActive());
+    bool raster = !pathTracing;
+    bool occlusion = raster && occlusionCulling && (useMeshPath() || useComputeCulling);
     std::vector<TargetView> views{
-        {"색상 (HDR)", {targets.color.view}, READ_ONLY, render},
-        {"그림자 아틀라스", targets.shadowLayerViews, READ_ONLY, {SHADOW_MAP_SIZE, SHADOW_MAP_SIZE}, "층"},
-        {"SSAO", {targets.ssao.view}, GENERAL, targets.ssaoExtent},
-        {"톤 매핑", {targets.tonemapped.view}, READ_ONLY, render},
         {"표시 (업스케일)", {targets.present.view}, READ_ONLY, currentDisplayExtent},
-        {"깊이", {targets.depth.view}, READ_ONLY, render},
-        {"모션 벡터", {targets.velocity.view}, READ_ONLY, render},
-        {"시간축 업스케일 (HDR)", {targets.upscaledColor.view}, GENERAL, currentDisplayExtent},
+        {"색상 (HDR)", {targets.color.view}, READ_ONLY, render, nullptr, raster},
+        {"경로 추적 누적", {targets.pathAccumulation.view}, GENERAL, render, nullptr, pathTracing},
+        {"톤 매핑", {targets.tonemapped.view}, READ_ONLY, render, nullptr, !temporal},
+        {"시간축 업스케일 (HDR)", {targets.upscaledColor.view}, GENERAL, currentDisplayExtent, nullptr, temporal},
+        {"깊이", {targets.depth.view}, READ_ONLY, render, nullptr, raster},
+        {"모션 벡터", {targets.velocity.view}, READ_ONLY, render, nullptr, raster},
+        {"그림자 아틀라스",
+         targets.shadowLayerViews,
+         READ_ONLY,
+         {SHADOW_MAP_SIZE, SHADOW_MAP_SIZE},
+         "층",
+         raster && shadowsEnabled && !shadowViews.empty()},
+        {"SSAO", {targets.ssao.view}, GENERAL, targets.ssaoExtent, nullptr, raster && useSsao},
         // HZB 와 Bloom 은 컴퓨트가 쓰고 읽으므로 계속 GENERAL 이고, 밉을 골라 본다.
-        {"HZB", targets.hzbMipViews, GENERAL, targets.hzbExtent, "밉"},
-        {"Bloom", targets.bloomMipViews, GENERAL, targets.bloomExtent, "밉"},
-        {"반사 원본", {targets.reflectionRaw.view}, GENERAL, render},
+        {"HZB", targets.hzbMipViews, GENERAL, targets.hzbExtent, "밉", occlusion},
+        {"Bloom", targets.bloomMipViews, GENERAL, targets.bloomExtent, "밉", bloomActive},
+        {"반사 원본", {targets.reflectionRaw.view}, GENERAL, render, nullptr, reflectionsActive()},
     };
     if (oitTargetsValid) {
-        views.push_back({"OIT 누적", {targets.oitAccumulation.view}, READ_ONLY, render});
-        views.push_back({"OIT 잔여 투과율", {targets.oitRevealage.view}, READ_ONLY, render});
+        views.push_back({"OIT 누적", {targets.oitAccumulation.view}, READ_ONLY, render, nullptr, raster});
+        views.push_back({"OIT 잔여 투과율", {targets.oitRevealage.view}, READ_ONLY, render, nullptr, raster});
     }
     return views;
 }
@@ -1523,6 +1535,7 @@ void Renderer::recordPostEffects(VkCommandBuffer commandBuffer,
                                  VkExtent2D sourceExtent,
                                  uint32_t sampleCount) {
     bool useBloom = post.bloomIntensity > 0.0F;
+    bloomActive = useBloom;
     if (!useBloom && !post.autoExposure) {
         // 다음에 켜면 옛 값에서 느리게 옮겨 가지 않고 바로 맞춘다.
         exposureNeedsReset = true;

@@ -677,7 +677,9 @@ void Editor::buildSceneView(scene::Scene& active) {
             presentIndex = i;
         }
     }
-    if (selectedTarget < 0 || selectedTarget >= targetCount) {
+    // 렌더 모드가 바뀌어 고른 대상이 더는 채워지지 않으면 표시 이미지로 돌아간다.
+    if (selectedTarget < 0 || selectedTarget >= targetCount ||
+        !targets[static_cast<size_t>(selectedTarget)].available) {
         selectedTarget = presentIndex;
     }
     const gfx::Renderer::TargetView& target = targets[static_cast<size_t>(selectedTarget)];
@@ -805,9 +807,15 @@ void Editor::buildSceneView(scene::Scene& active) {
     ImGui::SetNextItemWidth(160.0F);
     if (ImGui::BeginCombo("##target", target.name)) {
         for (int i = 0; i < targetCount; ++i) {
-            if (ImGui::Selectable(targets[static_cast<size_t>(i)].name, selectedTarget == i)) {
+            const gfx::Renderer::TargetView& candidate = targets[static_cast<size_t>(i)];
+            ImGui::BeginDisabled(!candidate.available);
+            if (ImGui::Selectable(candidate.name, selectedTarget == i)) {
                 selectedTarget = i;
                 selectedSlice = 0;
+            }
+            ImGui::EndDisabled();
+            if (!candidate.available && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("지금 렌더 모드에서는 채워지지 않는 대상이다");
             }
         }
         ImGui::EndCombo();
