@@ -1,6 +1,7 @@
 #ifndef MESH_SHADING_GLSL
 #define MESH_SHADING_GLSL
 
+#include "fog.glsl"
 #include "ibl.glsl"
 #include "lighting.glsl"
 #include "scene_data.glsl"
@@ -132,6 +133,14 @@ vec4 shadeSurface() {
     float ambientOcclusion = occlusion * screenSpaceOcclusion();
     color += environmentLight(surface, ambientOcclusion);
     color += emissive;
+
+    // 안개는 카메라에서 표면까지의 구간에 건다. 반투명도 같은 식으로 잠긴다.
+    vec3 cameraPosition = pushConstants.camera.item.position.xyz;
+    color = applyFog(pushConstants.camera.item,
+                     color,
+                     cameraPosition,
+                     -surface.view,
+                     length(inWorldPosition - cameraPosition));
 
     float alpha = ALPHA_MODE_VARIANT == ALPHA_MODE_TRANSLUCENT ? baseColor.a : 1.0;
     return vec4(color, alpha);

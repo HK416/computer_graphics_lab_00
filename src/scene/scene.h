@@ -125,6 +125,11 @@ struct PostProcess {
     // 자동 노출이 고를 수 있는 EV100 범위.
     float exposureMinEv = -4.0F;
     float exposureMaxEv = 12.0F;
+    // 지수 높이 안개. 밀도가 0 이면 끈다. 기준 높이에서 밀도가 가장 크고 위로 갈수록 감쇠한다.
+    glm::vec3 fogColor{0.62F, 0.70F, 0.80F};
+    float fogDensity = 0.0F;
+    float fogHeight = 0.0F;
+    float fogFalloff = 0.5F;
 
     bool operator==(const PostProcess&) const = default;
 };

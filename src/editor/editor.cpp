@@ -872,6 +872,14 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     ImGui::DragFloatRange2("EV 범위", &post.exposureMinEv, &post.exposureMaxEv, 0.1F, -10.0F, 20.0F, "%.1f");
     ImGui::EndDisabled();
 
+    ImGui::SeparatorText("높이 안개");
+    ImGui::SliderFloat("안개 밀도", &post.fogDensity, 0.0F, 2.0F, "%.3f", ImGuiSliderFlags_Logarithmic);
+    ImGui::BeginDisabled(post.fogDensity <= 0.0F);
+    ImGui::ColorEdit3("안개 색", glm::value_ptr(post.fogColor));
+    ImGui::DragFloat("안개 높이", &post.fogHeight, 0.05F, -100.0F, 100.0F, "%.2f");
+    ImGui::SliderFloat("높이 감쇠", &post.fogFalloff, 0.0F, 5.0F, "%.2f");
+    ImGui::EndDisabled();
+
     // 경로 추적은 래스터 패스를 통째로 건너뛴다. 거기 딸린 설정은 눌러도 아무 일이 없으므로
     // 디버그 뷰와 같은 이유로 잠근다.
     bool rasterOnly = renderer.usePathTracing;

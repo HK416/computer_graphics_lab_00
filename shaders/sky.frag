@@ -2,6 +2,7 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 
+#include "fog.glsl"
 #include "scene_types.glsl"
 
 layout(location = 0) in vec2 inUv;
@@ -22,7 +23,9 @@ void main() {
     // 화면 좌표에서 카메라를 지나는 광선 방향. 지터가 들어간 시점 변환의 역이라 화소 중심과 맞는다.
     vec4 far = camera.inverseViewProjection * vec4(inUv * 2.0 - 1.0, 1.0, 1.0);
     vec3 direction = normalize(far.xyz / far.w - camera.position.xyz);
-    outColor = vec4(sampleBindlessCube(pushConstants.environmentCube, direction).rgb, 1.0);
+    vec3 sky = sampleBindlessCube(pushConstants.environmentCube, direction).rgb;
+    // 하늘은 무한 원거리다. 위를 보면 안개 적분이 수렴하고 지평선 아래는 완전히 잠긴다.
+    outColor = vec4(applyFog(camera, sky, camera.position.xyz, direction, 1.0e30), 1.0);
 
     // 하늘은 무한 원거리라 카메라 회전만 남는다. 방향 벡터를 지난 시점으로 되쏘면 그 회전분이 나온다.
     // 지터가 든 역변환으로 방향을 구했으므로 현재 NDC 는 정확히 (uv*2-1 - 지터)다.

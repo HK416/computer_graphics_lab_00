@@ -124,7 +124,11 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
                         {"autoExposure", scene.post.autoExposure},
                         {"adaptationSpeed", scene.post.adaptationSpeed},
                         {"exposureMinEv", scene.post.exposureMinEv},
-                        {"exposureMaxEv", scene.post.exposureMaxEv}};
+                        {"exposureMaxEv", scene.post.exposureMaxEv},
+                        {"fogColor", toJson(scene.post.fogColor)},
+                        {"fogDensity", scene.post.fogDensity},
+                        {"fogHeight", scene.post.fogHeight},
+                        {"fogFalloff", scene.post.fogFalloff}};
 
     json lights = json::array();
     for (const Light& light : scene.lights) {
@@ -235,6 +239,10 @@ SceneFile readScene(const std::string& text) {
     postTarget.adaptationSpeed = post.value("adaptationSpeed", postTarget.adaptationSpeed);
     postTarget.exposureMinEv = post.value("exposureMinEv", postTarget.exposureMinEv);
     postTarget.exposureMaxEv = post.value("exposureMaxEv", postTarget.exposureMaxEv);
+    postTarget.fogColor = toVec3(post.value("fogColor", json{}), postTarget.fogColor);
+    postTarget.fogDensity = post.value("fogDensity", postTarget.fogDensity);
+    postTarget.fogHeight = post.value("fogHeight", postTarget.fogHeight);
+    postTarget.fogFalloff = post.value("fogFalloff", postTarget.fogFalloff);
 
     for (const json& entry : document.value("lights", json::array())) {
         Light light;

@@ -2,6 +2,7 @@
 #extension GL_EXT_nonuniform_qualifier : require
 
 #include "bindless.glsl"
+#include "fog.glsl"
 #include "lighting.glsl"
 #include "pathtrace_common.glsl"
 
@@ -280,7 +281,14 @@ void main() {
         vec3 direction = normalize(farPoint.xyz / farPoint.w - origin);
 
         // 반딧불이 표본이 누적을 오래 흔들지 않도록 잘라 낸다.
-        radiance += min(tracePath(origin, direction, seed, primary), vec3(pathTrace.radianceClamp));
+        vec3 pathRadiance = min(tracePath(origin, direction, seed, primary), vec3(pathTrace.radianceClamp));
+        // 안개는 래스터와 같은 함수로 1차 구간에만 건다.
+        //
+        // ponytail: 2차 이후 바운스와 그림자 광선은 안개를 모른다. 간접광이 조금 밝게 나온다.
+        // 광선은 근평면에서 출발하므로 래스터와 같은 카메라 기준 거리로 되돌린다.
+        float nearOffset = length(origin - camera.position.xyz);
+        float fogDistance = primary.hitDistance < 0.0 ? 1.0e30 : primary.hitDistance + nearOffset;
+        radiance += applyFog(camera, pathRadiance, camera.position.xyz, direction, fogDistance);
     }
     radiance /= float(samplesPerFrame);
 

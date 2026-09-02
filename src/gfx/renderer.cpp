@@ -72,6 +72,9 @@ struct GpuCamera {
     glm::uvec4 environment;
     // x: HZB 샘플 슬롯, y: 최대 밉 단계, zw: 0단계 크기.
     glm::uvec4 hzb;
+    // 높이 안개. rgb 색, w 밀도. fogParameters 는 x 기준 높이, y 감쇠.
+    glm::vec4 fog;
+    glm::vec4 fogParameters;
 };
 
 // shaders/scene_data.glsl 의 MeshletGroup 과 배치가 같아야 한다.
@@ -2561,6 +2564,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                              targets.hzbExtent.width,
                              targets.hzbExtent.height};
     camera->jitter = glm::vec4{jitterNdc, 0.0F, 0.0F};
+    camera->fog = glm::vec4{scene.post.fogColor, scene.post.fogDensity};
+    camera->fogParameters = glm::vec4{scene.post.fogHeight, scene.post.fogFalloff, 0.0F, 0.0F};
     previousViewProjection = unjitteredViewProjection;
     temporalResetThisFrame = temporalReset;
 
@@ -2569,9 +2574,12 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     // 경로 추적이 그릴 수 있는 디버그 뷰만 넘긴다. 편집기가 고른 값은 그대로 두어 래스터로
     // 돌아갔을 때 이어지게 한다. 이 대입이 traceInputsChanged 를 통해 누적을 초기화한다.
     pathTrace.debugMode = pathTraceSupportsDebugMode(debugMode) ? debugMode : 0U;
-    bool traceInputsChanged = pathTrace != lastPathTrace || useIbl != lastUseIbl;
+    bool traceInputsChanged = pathTrace != lastPathTrace || useIbl != lastUseIbl || camera->fog != lastFog ||
+                              camera->fogParameters != lastFogParameters;
     lastPathTrace = pathTrace;
     lastUseIbl = useIbl;
+    lastFog = camera->fog;
+    lastFogParameters = camera->fogParameters;
     if (camera->viewProjection != lastViewProjection || sceneChangedThisFrame || traceInputsChanged) {
         lastViewProjection = camera->viewProjection;
         pathSampleCount = 0;

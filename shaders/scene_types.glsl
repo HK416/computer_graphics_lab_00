@@ -133,6 +133,10 @@ struct Camera {
     uvec4 environment;
     // x: HZB 샘플 슬롯, y: 최대 밉 단계, zw: 0단계 크기. 컬 컴퓨트와 태스크 셰이더가 함께 읽는다.
     uvec4 hzb;
+    // 높이 안개. rgb 색, w 기준 높이에서의 밀도(0 이면 끔).
+    vec4 fog;
+    // x 기준 높이, y 높이 감쇠. zw 는 예약.
+    vec4 fogParameters;
 };
 
 #define LIGHT_TYPE_DIRECTIONAL 0u
