@@ -30,9 +30,15 @@ void main() {
     vec2 uv = v0.uv * weights.x + v1.uv * weights.y + v2.uv * weights.z;
 
     vec3 worldPosition = (instance.model * vec4(localPosition, 1.0)).xyz;
-    // ponytail: 스킨 인스턴스의 변형 정점은 이번 프레임 포즈만 있어, 지난 포즈의 변형은 반영하지
-    // 못하고 강체 이동만 담는다. 지난 포즈 정점을 따로 뽑아 두면 정확해진다.
-    vec3 previousWorldPosition = (instance.previousModel * vec4(localPosition, 1.0)).xyz;
+    // 스킨 인스턴스는 지난 포즈의 변형 정점이 따로 있어 모션 벡터가 관절 움직임까지 담는다.
+    vec3 previousLocalPosition = localPosition;
+    if (skinned) {
+        uint previousBase = instance.previousSkinnedVertexOffset;
+        previousLocalPosition = source.items[previousBase + pathTrace.indices.items[base]].position * weights.x +
+                                source.items[previousBase + pathTrace.indices.items[base + 1]].position * weights.y +
+                                source.items[previousBase + pathTrace.indices.items[base + 2]].position * weights.z;
+    }
+    vec3 previousWorldPosition = (instance.previousModel * vec4(previousLocalPosition, 1.0)).xyz;
     mat3 normalMatrix = mat3(instance.normalMatrix);
     vec3 worldNormal = normalize(normalMatrix * localNormal);
 

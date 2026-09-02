@@ -21,6 +21,8 @@ layout(push_constant) uniform CullPushConstants {
     float hzbMaxLevel;
     vec2 hzbSize;
     LodNetworkBuffer network;
+    // 스킨 인스턴스의 meshlet 경계 구. 변형 정점에서 프레임마다 다시 잰 것이다.
+    SkinnedBoundsBuffer skinnedBounds;
 } cull;
 
 #define CULL_FLAG_FRUSTUM 1u
@@ -41,12 +43,10 @@ void main() {
     vec4 planes[5];
     extractFrustumPlanes(camera.viewProjection, planes);
 
-    // 스키닝 인스턴스의 meshlet 경계와 법선 원뿔은 바인드 포즈 기준이라 포즈가 바뀌면 맞지 않는다.
-    // 잘못 버려 구멍이 나는 쪽이 더 눈에 띄므로 컬링만 건너뛴다. LOD 선정은 오차 구의 상대 크기만
+    // 스킨 인스턴스는 경계 구를 변형 정점에서 다시 잰 것으로 바꿔 절두체와 오클루전을 검사한다.
+    // 법선 원뿔은 바인드 포즈 기준이라 스킨에서는 건너뛴다. LOD 선정은 오차 구의 상대 크기만
     // 쓰므로 그대로 두어도 같은 그룹이 같은 판정을 받아 틈이 생기지 않는다.
-    //
-    // ponytail: 스키닝 후 경계를 매 프레임 다시 계산해 올리면 컬링을 되살릴 수 있다.
-    bool skinned = instance.jointOffset != NO_JOINTS;
+    bool skinned = instance.skinnedVertexOffset != NO_SKINNED_VERTICES;
     bool useNetwork = (cull.flags & CULL_FLAG_NEURAL_LOD) != 0u;
     LodNetwork network = cull.network.item;
     mat3 normalMatrix = mat3(instance.normalMatrix);
@@ -65,8 +65,10 @@ void main() {
             continue;
         }
 
-        vec4 sphere = transformBoundingSphere(instance.model, meshlet.boundingSphere);
-        if (!skinned && (cull.flags & CULL_FLAG_FRUSTUM) != 0u && !sphereInFrustum(planes, sphere.xyz, sphere.w)) {
+        vec4 localSphere =
+            skinned ? cull.skinnedBounds.items[instance.skinnedMeshletOffset + i] : meshlet.boundingSphere;
+        vec4 sphere = transformBoundingSphere(instance.model, localSphere);
+        if ((cull.flags & CULL_FLAG_FRUSTUM) != 0u && !sphereInFrustum(planes, sphere.xyz, sphere.w)) {
             continue;
         }
         if (!skinned && (cull.flags & CULL_FLAG_CONE) != 0u) {
@@ -76,7 +78,7 @@ void main() {
             }
         }
 
-        if (!skinned && (cull.flags & CULL_FLAG_OCCLUSION) != 0u &&
+        if ((cull.flags & CULL_FLAG_OCCLUSION) != 0u &&
             occludedByHzb(camera.viewProjection, sphere, cull.hzbTexture, cull.hzbSize, cull.hzbMaxLevel)) {
             continue;
         }

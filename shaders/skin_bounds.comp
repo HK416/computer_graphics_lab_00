@@ -1,0 +1,74 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+#include "scene_types.glsl"
+
+// 스킨 인스턴스의 meshlet 경계 구를 변형 정점에서 다시 구한다. 워크그룹 하나가 meshlet 하나를
+// 맡는다. 바인드 포즈 경계로는 팔을 든 캐릭터가 잘못 버려지므로 포즈마다 새로 잰다.
+// 법선 원뿔은 다시 구하지 않는다. 컬링 쪽이 스킨 인스턴스의 원뿔 검사만 건너뛴다.
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform SkinBoundsPushConstants {
+    VertexBuffer skinnedVertices;
+    MeshletBuffer meshlets;
+    SkinnedBoundsBuffer bounds;
+    // 메쉬의 첫 meshlet 과 개수. 모든 LOD 단계를 포함한다.
+    uint meshletOffset;
+    uint meshletCount;
+    // 메쉬의 첫 정점(전역 번호). meshlet 의 전역 정점 번호를 변형 정점 구간의 지역 번호로 바꾼다.
+    uint meshVertexOffset;
+    uint skinnedVertexOffset;
+    uint boundsOffset;
+} push;
+
+shared vec3 minima[64];
+shared vec3 maxima[64];
+shared float distances[64];
+
+void main() {
+    uint local = gl_LocalInvocationIndex;
+    uint index = gl_WorkGroupID.x;
+    if (index >= push.meshletCount) {
+        return;
+    }
+    Meshlet meshlet = push.meshlets.items[push.meshletOffset + index];
+    uint base = push.skinnedVertexOffset + (meshlet.vertexOffset - push.meshVertexOffset);
+
+    vec3 minimum = vec3(1e30);
+    vec3 maximum = vec3(-1e30);
+    for (uint i = local; i < meshlet.vertexCount; i += 64u) {
+        vec3 position = push.skinnedVertices.items[base + i].position;
+        minimum = min(minimum, position);
+        maximum = max(maximum, position);
+    }
+    minima[local] = minimum;
+    maxima[local] = maximum;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (local < stride) {
+            minima[local] = min(minima[local], minima[local + stride]);
+            maxima[local] = max(maxima[local], maxima[local + stride]);
+        }
+        barrier();
+    }
+
+    // 상자 중심을 구 중심으로 삼고 가장 먼 정점까지를 반지름으로 한다. 최소 포함 구는 아니지만
+    // 보수적이고 한 패스로 끝난다.
+    vec3 center = (minima[0] + maxima[0]) * 0.5;
+    float farthest = 0.0;
+    for (uint i = local; i < meshlet.vertexCount; i += 64u) {
+        farthest = max(farthest, distance(push.skinnedVertices.items[base + i].position, center));
+    }
+    distances[local] = farthest;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (local < stride) {
+            distances[local] = max(distances[local], distances[local + stride]);
+        }
+        barrier();
+    }
+    if (local == 0u) {
+        push.bounds.items[push.boundsOffset + index] = vec4(center, distances[0]);
+    }
+}

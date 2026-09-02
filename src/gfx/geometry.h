@@ -88,9 +88,13 @@ struct GpuInstance {
     uint32_t bucketBase;
     // 프레임 조인트 버퍼에서 이 인스턴스의 조인트 행렬이 시작하는 위치. 스킨이 없으면 NO_JOINTS.
     uint32_t jointOffset;
-    // 스킨 컴퓨트가 이 인스턴스의 변형 정점을 써 둔 위치. 래스터 경로는 정점 셰이더에서 직접
-    // 스키닝하므로 쓰지 않고, 가속 구조를 세우는 광선 경로만 본다. 없으면 NO_SKINNED_VERTICES.
+    // 스킨 컴퓨트가 이 인스턴스의 변형 정점을 써 둔 위치. 래스터와 광선 경로가 모두 여기서 정점을
+    // 읽는다. 없으면 NO_SKINNED_VERTICES.
     uint32_t skinnedVertexOffset;
+    // 지난 프레임 포즈의 변형 정점. 지난 포즈가 없으면 skinnedVertexOffset 과 같다.
+    uint32_t previousSkinnedVertexOffset;
+    // 변형 정점에서 다시 잰 meshlet 경계 구가 시작하는 위치.
+    uint32_t skinnedMeshletOffset;
 };
 
 // 모든 모델의 정점과 인덱스를 하나의 버퍼로 합쳐 간접 그리기 한 번으로 장면 전체를 그릴 수 있게 한다.

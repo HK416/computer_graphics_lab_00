@@ -103,6 +103,7 @@ struct CullPushConstants {
     float hzbMaxLevel;
     float hzbSize[2];
     VkDeviceAddress network;
+    VkDeviceAddress skinnedBounds;
 };
 
 struct SkinPushConstants {
@@ -113,6 +114,18 @@ struct SkinPushConstants {
     uint32_t destinationOffset;
     uint32_t jointOffset;
     uint32_t vertexCount;
+};
+
+// shaders/skin_bounds.comp 의 푸시 상수와 배치가 같아야 한다.
+struct SkinBoundsPushConstants {
+    VkDeviceAddress skinnedVertices;
+    VkDeviceAddress meshlets;
+    VkDeviceAddress bounds;
+    uint32_t meshletOffset;
+    uint32_t meshletCount;
+    uint32_t meshVertexOffset;
+    uint32_t skinnedVertexOffset;
+    uint32_t boundsOffset;
 };
 
 // skin.comp 의 local_size_x 와 같아야 한다.
@@ -136,8 +149,8 @@ struct ScenePushConstants {
     VkDeviceAddress meshletTriangles;
     VkDeviceAddress vertexMeshlets;
     VkDeviceAddress meshletGroups;
-    VkDeviceAddress joints;
-    VkDeviceAddress previousJoints;
+    VkDeviceAddress skinnedVertices;
+    VkDeviceAddress skinnedBounds;
     VkDeviceAddress lights;
     VkDeviceAddress shadowMatrices;
     uint32_t meshletGroupBase;
@@ -149,7 +162,7 @@ struct DepthPushConstants {
     glm::mat4 viewProjection;
     VkDeviceAddress vertices;
     VkDeviceAddress instances;
-    VkDeviceAddress joints;
+    VkDeviceAddress skinnedVertices;
     VkDeviceAddress meshes;
     VkDeviceAddress materials;
 };
@@ -358,8 +371,11 @@ Renderer::~Renderer() {
     vkDestroyPipeline(context.device, hzbPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, hzbPipelineLayout, nullptr);
     vkDestroyPipeline(context.device, cullPipeline, nullptr);
+    vkDestroyPipeline(context.device, skinBoundsPipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, skinBoundsPipelineLayout, nullptr);
     vkDestroyPipeline(context.device, skinPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, skinPipelineLayout, nullptr);
+    destroyBuffer(context, skinnedBoundsBuffer);
     destroyBuffer(context, skinnedVertexBuffer);
     vkDestroyPipeline(context.device, exposurePipeline, nullptr);
     vkDestroyPipelineLayout(context.device, exposurePipelineLayout, nullptr);
@@ -385,7 +401,6 @@ Renderer::~Renderer() {
         destroyBuffer(context, frame.shadowDrawBuffer);
         destroyBuffer(context, frame.shadowMatrixBuffer);
         destroyBuffer(context, frame.lightBuffer);
-        destroyBuffer(context, frame.previousJointBuffer);
         destroyBuffer(context, frame.jointBuffer);
         destroyBuffer(context, frame.lodNetworkBuffer);
         destroyBuffer(context, frame.drawCountBuffer);
@@ -874,12 +889,9 @@ void Renderer::reserveJoints(Frame& frame, uint32_t jointCount) {
     }
     uint32_t capacity = std::max(needed, frame.jointCapacity * 2);
     destroyBuffer(context, frame.jointBuffer);
-    destroyBuffer(context, frame.previousJointBuffer);
     VkDeviceSize bytes = static_cast<VkDeviceSize>(capacity) * sizeof(glm::mat4);
     frame.jointBuffer =
         createBuffer(context, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, MemoryLocation::HOST_WRITE, "조인트 행렬");
-    frame.previousJointBuffer = createBuffer(
-        context, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, MemoryLocation::HOST_WRITE, "이전 조인트 행렬");
     frame.jointCapacity = capacity;
 }
 
@@ -1183,6 +1195,14 @@ void Renderer::createSkinPipeline() {
     pipelineInfo.layout = skinPipelineLayout;
     VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &skinPipeline));
     vkDestroyShaderModule(context.device, module, nullptr);
+
+    pushConstantRange.size = sizeof(SkinBoundsPushConstants);
+    VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &skinBoundsPipelineLayout));
+    VkShaderModule boundsModule = createShaderModule(context.device, "skin_bounds.comp.spv");
+    pipelineInfo.stage = shaderStage(VK_SHADER_STAGE_COMPUTE_BIT, boundsModule);
+    pipelineInfo.layout = skinBoundsPipelineLayout;
+    VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &skinBoundsPipeline));
+    vkDestroyShaderModule(context.device, boundsModule, nullptr);
 }
 
 void Renderer::createCullPipeline() {
@@ -1277,7 +1297,7 @@ void Renderer::recordShadowPass(VkCommandBuffer commandBuffer) {
     DepthPushConstants pushConstants{};
     pushConstants.vertices = geometry.vertexBuffer.address;
     pushConstants.instances = frame.instanceBuffer.address;
-    pushConstants.joints = frame.jointBuffer.address;
+    pushConstants.skinnedVertices = skinnedVertexBuffer.address;
     pushConstants.meshes = geometry.meshBuffer.address;
     pushConstants.materials = geometry.materialBuffer.address;
 
@@ -2190,14 +2210,14 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     skinDispatches.clear();
     skinnedInstances.clear();
 
-    // 변형 정점은 가속 구조를 세울 때만 쓴다. 래스터만 그리는 프레임에는 만들지 않는다.
-    bool rayTracedFrame =
-        rayTracer != nullptr && (usePathTracing || (useRayQueryShadows && rayQueryShadowsAvailable()));
     // 경로 추적 프레임은 래스터 패스를 건너뛰므로 meshlet 그룹을 아무도 읽지 않는다. 자동 LOD 는
     // 메쉬의 모든 단계를 후보로 올리기 때문에 그냥 두면 헛일이 적지 않다. 인스턴스는 상위 가속
     // 구조가 쓰므로 그대로 채운다.
     bool needMeshletGroups = !(usePathTracing && rayTracer != nullptr);
     uint32_t skinnedVertexCursor = 0;
+    uint32_t skinnedMeshletCursor = 0;
+    // 스킨 인스턴스 슬롯과 디스패치 번호. 버퍼 용량이 정해진 뒤 절대 위치를 채운다.
+    std::vector<std::pair<uint32_t, uint32_t>> skinnedSlots;
 
     // 재질 경로와 면 방향 조합마다 명령이 연속 구간을 이루도록 두 번 순회한다.
     auto bucketOf = [this, &scene](uint32_t index) {
@@ -2275,12 +2295,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
             }
         }
     }
-    // 지난 포즈는 조인트 배치가 그대로일 때만 뜻이 있다. 아니면 현재 포즈를 넣어 변위를 0 으로 만든다.
-    bool reusePreviousJoints = !temporalReset && previousJointMatrices.size() == jointMatrices.size();
     std::ranges::copy(jointMatrices, static_cast<glm::mat4*>(frame.jointBuffer.mapped));
-    std::ranges::copy(reusePreviousJoints ? previousJointMatrices : jointMatrices,
-                      static_cast<glm::mat4*>(frame.previousJointBuffer.mapped));
-    previousJointMatrices.swap(jointMatrices);
     auto jointOffsetFor = [&skinOffsets, &scene](uint32_t index) {
         int32_t animator = scene.objects[index].animator;
         int32_t skin = scene.skinOf(index);
@@ -2341,19 +2356,26 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         uint32_t jointOffset = jointOffsetFor(index);
         instances[slot].jointOffset = jointOffset;
 
-        // 스킨 인스턴스는 변형 정점을 따로 뽑아 두고, 그 구간으로 자기 하위 가속 구조를 세운다.
+        // 스킨 인스턴스는 변형 정점을 따로 뽑아 두고 래스터와 광선 경로가 모두 그 구간을 읽는다.
         // 같은 메쉬를 여러 오브젝트가 서로 다른 포즈로 쓸 수 있어 오브젝트마다 하나씩 잡는다.
-        uint32_t skinnedVertexOffset = NO_SKINNED_VERTICES;
-        if (rayTracedFrame && jointOffset != NO_JOINTS) {
+        // 절대 위치는 버퍼 용량이 정해진 뒤 채운다.
+        instances[slot].skinnedVertexOffset = NO_SKINNED_VERTICES;
+        instances[slot].previousSkinnedVertexOffset = NO_SKINNED_VERTICES;
+        instances[slot].skinnedMeshletOffset = 0;
+        if (jointOffset != NO_JOINTS) {
             uint32_t vertexCount = geometry.meshVertexCount(scene.meshOf(index));
-            skinnedVertexOffset = skinnedVertexCursor;
+            objectSkinnedBlas[index] = static_cast<uint32_t>(skinDispatches.size());
+            skinDispatches.push_back(SkinDispatch{static_cast<uint32_t>(mesh.vertexOffset),
+                                                  skinnedVertexCursor,
+                                                  jointOffset,
+                                                  vertexCount,
+                                                  mesh.meshletOffset,
+                                                  mesh.meshletCount,
+                                                  skinnedMeshletCursor});
+            skinnedSlots.emplace_back(slot, objectSkinnedBlas[index]);
             skinnedVertexCursor += vertexCount;
-            objectSkinnedBlas[index] = static_cast<uint32_t>(skinnedInstances.size());
-            skinnedInstances.push_back(SkinnedInstance{scene.meshOf(index), skinnedVertexOffset});
-            skinDispatches.push_back(
-                SkinDispatch{static_cast<uint32_t>(mesh.vertexOffset), skinnedVertexOffset, jointOffset, vertexCount});
+            skinnedMeshletCursor += mesh.meshletCount;
         }
-        instances[slot].skinnedVertexOffset = skinnedVertexOffset;
 
         draws[slot].indexCount = lod.indexCount;
         draws[slot].instanceCount = 1;
@@ -2380,17 +2402,46 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     }
 
     // 커질 때만 다시 잡는다. 지난 프레임이 아직 읽고 있을 수 있어 그때는 장치를 세운다. 스킨
-    // 오브젝트가 늘어나는 순간에만 일어나므로 프레임마다 드는 비용은 아니다.
+    // 오브젝트가 늘어나는 순간에만 일어나므로 프레임마다 드는 비용은 아니다. 반쪽 둘이라 두 배다.
+    bool skinBuffersReset = false;
     if (skinnedVertexCursor > skinnedVertexCapacity) {
         waitIdle();
         destroyBuffer(context, skinnedVertexBuffer);
         skinnedVertexCapacity = skinnedVertexCursor * 2;
         skinnedVertexBuffer = createBuffer(context,
-                                           static_cast<VkDeviceSize>(skinnedVertexCapacity) * sizeof(asset::Vertex),
+                                           static_cast<VkDeviceSize>(skinnedVertexCapacity) * 2 * sizeof(asset::Vertex),
                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                                            MemoryLocation::DEVICE,
                                            "스킨 정점");
+        skinBuffersReset = true;
+    }
+    if (skinnedMeshletCursor > skinnedBoundsCapacity) {
+        waitIdle();
+        destroyBuffer(context, skinnedBoundsBuffer);
+        skinnedBoundsCapacity = skinnedMeshletCursor * 2;
+        skinnedBoundsBuffer = createBuffer(context,
+                                           static_cast<VkDeviceSize>(skinnedBoundsCapacity) * sizeof(glm::vec4),
+                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                           MemoryLocation::DEVICE,
+                                           "스킨 meshlet 경계");
+    }
+    // 반쪽을 번갈아 쓴다. 지난 프레임과 스킨 목록이 같으면 다른 반쪽이 그대로 지난 포즈다.
+    skinnedHalf ^= 1U;
+    uint32_t currentBase = skinnedHalf * skinnedVertexCapacity;
+    uint32_t previousBase = (skinnedHalf ^ 1U) * skinnedVertexCapacity;
+    bool previousPoseValid = !temporalReset && !skinBuffersReset && skinDispatches == previousSkinDispatches;
+    previousSkinDispatches = skinDispatches;
+    // 디스패치 순서가 곧 하위 가속 구조 번호다. objectSkinnedBlas 가 같은 번호를 가리킨다.
+    skinnedInstances.resize(skinDispatches.size());
+    for (auto [slot, dispatchIndex] : skinnedSlots) {
+        const SkinDispatch& dispatch = skinDispatches[dispatchIndex];
+        uint32_t offset = currentBase + dispatch.destinationOffset;
+        instances[slot].skinnedVertexOffset = offset;
+        instances[slot].previousSkinnedVertexOffset =
+            (previousPoseValid ? previousBase : currentBase) + dispatch.destinationOffset;
+        instances[slot].skinnedMeshletOffset = dispatch.boundsOffset;
+        skinnedInstances[dispatchIndex] = SkinnedInstance{instances[slot].meshIndex, offset};
     }
 
     auto* meshTasks = static_cast<VkDrawMeshTasksIndirectCommandEXT*>(frame.meshTaskIndirectBuffer.mapped);
@@ -2667,6 +2718,7 @@ void Renderer::recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches&
     pushConstants.hzbSize[0] = static_cast<float>(targets.hzbExtent.width);
     pushConstants.hzbSize[1] = static_cast<float>(targets.hzbExtent.height);
     pushConstants.network = frame.lodNetworkBuffer.address;
+    pushConstants.skinnedBounds = skinnedBoundsBuffer.address;
     if (useNeuralLod) {
         pushConstants.flags |= CULL_FLAG_NEURAL_LOD;
     }
@@ -2694,8 +2746,35 @@ void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame)
     if (skinDispatches.empty()) {
         return;
     }
-
+    uint32_t zone = frameProfiler.begin("스킨", commandBuffer);
     VkDescriptorSet bindlessSet = bindless.set();
+
+    auto memoryBarrier = [&](VkPipelineStageFlags2 sourceStage,
+                             VkAccessFlags2 sourceAccess,
+                             VkPipelineStageFlags2 destinationStage,
+                             VkAccessFlags2 destinationAccess) {
+        VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        barrier.srcStageMask = sourceStage;
+        barrier.srcAccessMask = sourceAccess;
+        barrier.dstStageMask = destinationStage;
+        barrier.dstAccessMask = destinationAccess;
+        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dependency.memoryBarrierCount = 1;
+        dependency.pMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(commandBuffer, &dependency);
+    };
+    // 이 버퍼를 읽는 단계 전부. 지난 프레임의 읽기가 끝나기를 기다리고, 이번 프레임의 읽기에 앞선다.
+    constexpr VkPipelineStageFlags2 READER_STAGES =
+        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT |
+        VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    memoryBarrier(READER_STAGES,
+                  VK_ACCESS_2_SHADER_READ_BIT,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+    uint32_t currentBase = skinnedHalf * skinnedVertexCapacity;
     vkCmdBindDescriptorSets(
         commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, skinPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, skinPipeline);
@@ -2704,7 +2783,7 @@ void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame)
                                         skinnedVertexBuffer.address,
                                         frame.jointBuffer.address,
                                         dispatch.sourceOffset,
-                                        dispatch.destinationOffset,
+                                        currentBase + dispatch.destinationOffset,
                                         dispatch.jointOffset,
                                         dispatch.vertexCount};
         vkCmdPushConstants(
@@ -2712,29 +2791,49 @@ void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame)
         vkCmdDispatch(commandBuffer, (dispatch.vertexCount + SKIN_GROUP_SIZE - 1) / SKIN_GROUP_SIZE, 1, 1);
     }
 
-    // 하위 가속 구조 구축이 이 정점을 그대로 읽는다.
-    VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-    barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
-    barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
-    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    dependency.memoryBarrierCount = 1;
-    dependency.pMemoryBarriers = &barrier;
-    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+    // 경계 구 컴퓨트가 변형 정점을 읽는다.
+    memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, skinBoundsPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, skinBoundsPipeline);
+    for (const SkinDispatch& dispatch : skinDispatches) {
+        SkinBoundsPushConstants pushConstants{skinnedVertexBuffer.address,
+                                              geometry.meshletBuffer.address,
+                                              skinnedBoundsBuffer.address,
+                                              dispatch.meshletOffset,
+                                              dispatch.meshletCount,
+                                              dispatch.sourceOffset,
+                                              currentBase + dispatch.destinationOffset,
+                                              dispatch.boundsOffset};
+        vkCmdPushConstants(commandBuffer,
+                           skinBoundsPipelineLayout,
+                           VK_SHADER_STAGE_COMPUTE_BIT,
+                           0,
+                           sizeof(pushConstants),
+                           &pushConstants);
+        vkCmdDispatch(commandBuffer, dispatch.meshletCount, 1, 1);
+    }
+
+    // 정점은 그림자·장면 패스와 가속 구조 구축이, 경계 구는 컬 컴퓨트와 태스크 셰이더가 읽는다.
+    memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                  READER_STAGES,
+                  VK_ACCESS_2_SHADER_READ_BIT);
+    frameProfiler.end(zone, commandBuffer);
 }
 
-void Renderer::updateAccelerationStructures(VkCommandBuffer commandBuffer,
-                                            const Frame& frame,
-                                            const scene::Scene& scene) {
+void Renderer::updateAccelerationStructures(VkCommandBuffer commandBuffer, const scene::Scene& scene) {
     // 장면이 그대로면 가속 구조도 그대로다. 포즈가 바뀌면 애니메이터가 장면 리비전을 올리므로
-    // 같은 조건으로 걸러진다. 스킨 목록 자체가 달라졌으면(경로 추적을 막 켰거나 오브젝트가
-    // 늘었으면) 리비전과 무관하게 다시 세워야 한다.
-    if (!sceneChangedThisFrame && skinnedInstances == builtSkinnedInstances && rayTracer->ready()) {
+    // 같은 조건으로 걸러진다. 스킨 인스턴스가 있으면 변형 정점 반쪽이 프레임마다 번갈아 바뀌어
+    // 지난 구조가 가리키던 자리가 덮어써지므로 포즈가 그대로여도 다시 세운다.
+    // ponytail: 포즈가 그대로인 스킨 오브젝트까지 매 프레임 다시 세운다. 반쪽을 번갈지 않고 복사로
+    // 지난 포즈를 남기면 건너뛸 수 있다.
+    if (!sceneChangedThisFrame && skinnedInstances.empty() && rayTracer->ready()) {
         return;
     }
-    builtSkinnedInstances = skinnedInstances;
-    recordSkinPass(commandBuffer, frame);
     rayTracer->updateSkinnedBottomLevel(commandBuffer, skinnedVertexBuffer, skinnedInstances);
     rayTracer->updateTopLevel(commandBuffer,
                               scene,
@@ -2744,7 +2843,7 @@ void Renderer::updateAccelerationStructures(VkCommandBuffer commandBuffer,
 }
 
 void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, const scene::Scene& scene) {
-    updateAccelerationStructures(commandBuffer, frame, scene);
+    updateAccelerationStructures(commandBuffer, scene);
     if (!rayTracer->ready()) {
         return;
     }
@@ -3017,6 +3116,9 @@ void Renderer::recordCommands(Frame& frame,
         frameProfiler.end(environmentZone, commandBuffer);
     }
 
+    // 변형 정점은 그림자·장면·광선 경로가 모두 읽으므로 맨 먼저 만든다.
+    recordSkinPass(commandBuffer, frame);
+
     // 그림자 아틀라스는 장면 패스보다 먼저 채워야 한다. 경로 추적은 아틀라스를 읽지 않으므로 건너뛴다.
     if (!pathTracing && !shadowViews.empty()) {
         uint32_t shadowZone = frameProfiler.begin("그림자", commandBuffer);
@@ -3075,8 +3177,8 @@ void Renderer::recordCommands(Frame& frame,
                                               geometry.meshletTriangleBuffer.address,
                                               geometry.vertexMeshletBuffer.address,
                                               frame.meshletGroupBuffer.address,
-                                              frame.jointBuffer.address,
-                                              frame.previousJointBuffer.address,
+                                              skinnedVertexBuffer.address,
+                                              skinnedBoundsBuffer.address,
                                               frame.lightBuffer.address,
                                               frame.shadowMatrixBuffer.address,
                                               0,
@@ -3084,7 +3186,7 @@ void Renderer::recordCommands(Frame& frame,
         // 광선 질의 그림자를 쓰면 TLAS 를 집합 1 로 함께 묶고, 장면이 바뀌었으면 먼저 다시 만든다.
         rayQueryPass = useRayQueryShadows && rayQueryShadowsAvailable();
         if (rayQueryPass) {
-            updateAccelerationStructures(commandBuffer, frame, scene);
+            updateAccelerationStructures(commandBuffer, scene);
             rayQueryPass = rayTracer->ready();
         }
         VkPipelineLayout sceneLayout = rayQueryPass ? meshRayQueryPipelineLayout : meshPipelineLayout;

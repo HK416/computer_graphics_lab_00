@@ -90,9 +90,14 @@ struct Instance {
     uint bucket;
     uint bucketBase;
     uint jointOffset;
-    // 스킨 컴퓨트가 이 인스턴스의 변형된 정점을 써 둔 위치. 래스터 경로는 정점 셰이더에서 직접
-    // 스키닝하므로 쓰지 않고, 가속 구조를 세우는 광선 경로만 본다. 없으면 NO_SKINNED_VERTICES.
+    // 스킨 컴퓨트가 이 인스턴스의 변형된 정점을 써 둔 위치. 래스터와 광선 경로가 모두 여기서
+    // 정점을 읽는다. 없으면 NO_SKINNED_VERTICES.
     uint skinnedVertexOffset;
+    // 지난 프레임 포즈의 변형 정점. 모션 벡터 전용이며, 지난 포즈가 없으면 skinnedVertexOffset
+    // 과 같은 값이 들어와 강체 이동만 남는다.
+    uint previousSkinnedVertexOffset;
+    // 변형 정점에서 다시 잰 meshlet 경계 구가 시작하는 위치. 메쉬의 meshlet 순서와 같다.
+    uint skinnedMeshletOffset;
 };
 
 // 태스크 셰이더 워크그룹 하나가 처리할 meshlet 구간.
@@ -171,6 +176,10 @@ layout(buffer_reference, scalar) writeonly buffer SkinnedVertexBuffer {
 };
 layout(buffer_reference, scalar) readonly buffer IndexBuffer {
     uint items[];
+};
+// 스킨 인스턴스의 meshlet 경계 구. xyz 중심, w 반지름. 모델 공간이라 인스턴스 변환을 곱해 쓴다.
+layout(buffer_reference, scalar) buffer SkinnedBoundsBuffer {
+    vec4 items[];
 };
 layout(buffer_reference, scalar) readonly buffer MeshLodBuffer {
     MeshLod items[];

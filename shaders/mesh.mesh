@@ -28,21 +28,18 @@ void main() {
 
     mat3 normalMatrix = mat3(instance.normalMatrix);
     for (uint i = gl_LocalInvocationIndex; i < meshlet.vertexCount; i += MESHLET_GROUP_SIZE) {
-        Vertex vertex = pushConstants.vertices.items[meshlet.vertexOffset + i];
-        vec3 position = vertex.position;
-        vec3 normal = vertex.normal;
-        vec3 tangent = vertex.tangent.xyz;
-        skinVertex(instance, vertex, position, normal, tangent);
-        vec4 worldPosition = instance.model * vec4(position, 1.0);
+        uint globalIndex = meshlet.vertexOffset + i;
+        Vertex vertex = fetchVertex(instance, mesh, globalIndex);
+        vec4 worldPosition = instance.model * vec4(vertex.position, 1.0);
 
         // mesh shader 는 출력 변수를 되읽을 수 없어 클립 좌표를 지역 변수에 먼저 담는다.
         vec4 clipPosition = pushConstants.camera.item.viewProjection * worldPosition;
         gl_MeshVerticesEXT[i].gl_Position = clipPosition;
         outCurrentClip[i] = clipPosition;
-        outPreviousClip[i] = previousClipPosition(instance, vertex);
+        outPreviousClip[i] = previousClipPosition(instance, mesh, globalIndex, vertex.position);
         outWorldPosition[i] = worldPosition.xyz;
-        outNormal[i] = normalMatrix * normal;
-        outTangent[i] = vec4(normalMatrix * tangent, vertex.tangent.w);
+        outNormal[i] = normalMatrix * vertex.normal;
+        outTangent[i] = vec4(normalMatrix * vertex.tangent.xyz, vertex.tangent.w);
         outUv[i] = vertex.uv;
         outMaterialIndex[i] = mesh.materialIndex;
         outMeshletIndex[i] = meshletIndex;

@@ -13,9 +13,11 @@ layout(push_constant) uniform PushConstants {
     MeshletTriangleBuffer meshletTriangles;
     VertexMeshletBuffer vertexMeshlets;
     MeshletGroupBuffer meshletGroups;
-    JointBuffer joints;
-    // 지난 프레임의 조인트 행렬. 스킨 인스턴스의 이전 위치를 구하는 데만 쓴다.
-    JointBuffer previousJoints;
+    // 스킨 컴퓨트가 뽑아 둔 변형 정점. 이번 포즈와 지난 포즈가 반쪽씩 들어 있고, 인스턴스의
+    // 오프셋이 각각을 가리킨다. 광선 경로도 같은 버퍼를 읽는다.
+    VertexBuffer skinnedVertices;
+    // 변형 정점에서 다시 잰 스킨 인스턴스의 meshlet 경계 구. 태스크 셰이더 컬링이 읽는다.
+    SkinnedBoundsBuffer skinnedBounds;
     LightBuffer lights;
     ShadowMatrixBuffer shadowMatrices;
     // 재질 경로마다 meshlet 그룹 구간이 달라 디스패치 직전에 갱신한다.
@@ -24,26 +26,22 @@ layout(push_constant) uniform PushConstants {
 }
 pushConstants;
 
-// 스킨이 있으면 정점을 포즈 공간으로 옮긴다. 조인트 변환은 강체에 가까워 노멀도 같은 행렬로 돌린다.
-void skinVertex(Instance instance, Vertex vertex, inout vec3 position, inout vec3 normal, inout vec3 tangent) {
-    if (instance.jointOffset == NO_JOINTS) {
-        return;
+// 전역 정점 번호로 정점을 읽는다. 스킨 인스턴스는 변형 정점 구간에서 같은 지역 번호를 읽는다.
+Vertex fetchVertex(Instance instance, Mesh mesh, uint globalIndex) {
+    if (instance.skinnedVertexOffset == NO_SKINNED_VERTICES) {
+        return pushConstants.vertices.items[globalIndex];
     }
-    mat4 skin = skinMatrix(pushConstants.joints, instance.jointOffset, vertex.joints, vertex.weights);
-    position = (skin * vec4(position, 1.0)).xyz;
-    mat3 rotation = mat3(skin);
-    normal = rotation * normal;
-    tangent = rotation * tangent;
+    return pushConstants.skinnedVertices.items[instance.skinnedVertexOffset + (globalIndex - uint(mesh.vertexOffset))];
 }
 
-// 모션 벡터에 쓸 이전 프레임 클립 좌표. 스킨은 지난 프레임 포즈로 다시 옮긴다.
-vec4 previousClipPosition(Instance instance, Vertex vertex) {
-    vec3 position = vertex.position;
-    if (instance.jointOffset != NO_JOINTS) {
-        mat4 skin = skinMatrix(pushConstants.previousJoints, instance.jointOffset, vertex.joints, vertex.weights);
-        position = (skin * vec4(position, 1.0)).xyz;
+// 모션 벡터에 쓸 이전 프레임 클립 좌표. 스킨 인스턴스는 지난 포즈의 변형 정점을 읽는다.
+vec4 previousClipPosition(Instance instance, Mesh mesh, uint globalIndex, vec3 localPosition) {
+    if (instance.skinnedVertexOffset != NO_SKINNED_VERTICES) {
+        localPosition = pushConstants.skinnedVertices
+                            .items[instance.previousSkinnedVertexOffset + (globalIndex - uint(mesh.vertexOffset))]
+                            .position;
     }
-    return pushConstants.camera.item.previousViewProjection * (instance.previousModel * vec4(position, 1.0));
+    return pushConstants.camera.item.previousViewProjection * (instance.previousModel * vec4(localPosition, 1.0));
 }
 
 #endif

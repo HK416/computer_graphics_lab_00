@@ -74,12 +74,19 @@ struct ShadowView {
     bool directional = false;
 };
 
-// 스킨 컴퓨트 디스패치 하나. 오브젝트 하나가 자기 구간을 통째로 변형한다.
+// 스킨 컴퓨트 디스패치 하나. 오브젝트 하나가 자기 구간을 통째로 변형한다. destinationOffset 은
+// 반쪽 안의 상대 위치라, 지난 프레임 목록과 같으면 다른 반쪽이 그대로 지난 포즈다.
 struct SkinDispatch {
     uint32_t sourceOffset;
     uint32_t destinationOffset;
     uint32_t jointOffset;
     uint32_t vertexCount;
+    // 경계 구를 다시 잴 meshlet 구간과 결과 위치.
+    uint32_t meshletOffset;
+    uint32_t meshletCount;
+    uint32_t boundsOffset;
+
+    bool operator==(const SkinDispatch&) const = default;
 };
 
 // 층마다의 캐싱 상태. 실제로 그려 둔 시점 행렬과 비교해 다시 그릴지 정한다.
@@ -320,8 +327,6 @@ private:
         Buffer lodNetworkBuffer;
         // 스킨 인스턴스의 조인트 행렬을 이어 붙인다. 인스턴스마다 jointOffset 으로 자기 구간을 찾는다.
         Buffer jointBuffer;
-        // 같은 배치의 지난 프레임 조인트 행렬. 스킨 인스턴스의 모션 벡터가 읽는다.
-        Buffer previousJointBuffer;
         uint32_t jointCapacity = 0;
         // 장면의 조명과 그림자 시점 행렬. 둘 다 매 프레임 다시 채운다.
         Buffer lightBuffer;
@@ -369,8 +374,8 @@ private:
     // 장면의 조명을 GPU 배치로 옮기고 그림자 시점을 정한다.
     void buildLights(Frame& frame, const scene::Scene& scene);
     void createCullPipeline();
-    // 스킨 정점을 포즈 공간으로 옮겨 따로 뽑아 두는 컴퓨트. 광선 경로가 이 결과로 하위 가속
-    // 구조를 세운다.
+    // 스킨 정점을 포즈 공간으로 옮겨 따로 뽑아 두는 컴퓨트. 래스터와 광선 경로가 모두 이 결과를
+    // 읽고, 경계 구 컴퓨트가 같은 결과로 meshlet 경계를 다시 잰다.
     void createSkinPipeline();
     void createShadowPipeline();
     void createSsaoPipelines();
@@ -384,10 +389,10 @@ private:
     void recordShadowPass(VkCommandBuffer commandBuffer);
     void recordSsaoPass(VkCommandBuffer commandBuffer, const Frame& frame);
     void recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches& batches);
-    // 스킨 인스턴스의 변형 정점을 만들고, 그것으로 하위 가속 구조를 다시 세운다.
+    // 스킨 인스턴스의 변형 정점과 meshlet 경계 구를 만든다. 그림자 패스보다 먼저 온다.
     void recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame);
     // 광선 경로가 이번 프레임에 쓸 가속 구조를 최신으로 맞춘다.
-    void updateAccelerationStructures(VkCommandBuffer commandBuffer, const Frame& frame, const scene::Scene& scene);
+    void updateAccelerationStructures(VkCommandBuffer commandBuffer, const scene::Scene& scene);
     void recordHzbPass(VkCommandBuffer commandBuffer);
     void updateLodNetwork(const scene::Scene& scene, Frame& frame, float projectionScale);
     // 장면을 순회하며 인스턴스와 간접 그리기 명령을 재질 경로별 구간으로 채운다.
@@ -484,15 +489,22 @@ private:
     VkPipeline cullPipeline = VK_NULL_HANDLE;
     VkPipelineLayout skinPipelineLayout = VK_NULL_HANDLE;
     VkPipeline skinPipeline = VK_NULL_HANDLE;
-    // 스킨 인스턴스의 변형 정점. 인스턴스마다 메쉬 정점 수만큼 이어 붙인다.
+    VkPipelineLayout skinBoundsPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline skinBoundsPipeline = VK_NULL_HANDLE;
+    // 스킨 인스턴스의 변형 정점. 인스턴스마다 메쉬 정점 수만큼 이어 붙인 구간이 반쪽 둘로 있고,
+    // 프레임마다 번갈아 쓴다. 쓰지 않는 반쪽이 지난 포즈다.
     Buffer skinnedVertexBuffer;
     uint32_t skinnedVertexCapacity = 0;
+    // 스킨 인스턴스의 meshlet 경계 구. 변형 정점에서 프레임마다 다시 잰다.
+    Buffer skinnedBoundsBuffer;
+    uint32_t skinnedBoundsCapacity = 0;
+    // 이번 프레임이 쓰는 반쪽. 정점 버퍼 안의 절대 위치는 이 값에 용량을 곱한 만큼 밀린다.
+    uint32_t skinnedHalf = 0;
     // buildDrawCommands 가 채운다. 스킨 컴퓨트 디스패치와 하위 가속 구조 구축이 함께 읽는다.
     std::vector<SkinDispatch> skinDispatches;
+    // 지난 프레임의 목록. 같으면 다른 반쪽이 그대로 지난 포즈다.
+    std::vector<SkinDispatch> previousSkinDispatches;
     std::vector<SkinnedInstance> skinnedInstances;
-    // 지난 프레임에 실제로 세운 목록. 경로 추적을 켜는 순간처럼 장면은 그대로인데 스킨 구조가
-    // 새로 필요해지는 경우를 잡는다.
-    std::vector<SkinnedInstance> builtSkinnedInstances;
     // 오브젝트 인덱스 -> skinnedInstances 번호. 스킨이 아니면 RayTracer::NO_SKINNED_BLAS.
     std::vector<uint32_t> objectSkinnedBlas;
     VkPipelineLayout hzbPipelineLayout = VK_NULL_HANDLE;
@@ -532,9 +544,7 @@ private:
     // 모션 벡터용 지난 프레임 상태. 장면 구성이 바뀌면 현재 값으로 덮어 변위를 0 으로 만든다.
     glm::mat4 previousViewProjection{1.0F};
     std::vector<glm::mat4> previousWorld;
-    // 조인트는 CPU 사본을 두고 거기서 두 버퍼로 올린다. 매핑된 버퍼를 되읽는 것보다 싸다.
     std::vector<glm::mat4> jointMatrices;
-    std::vector<glm::mat4> previousJointMatrices;
     uint64_t lastTopologyRevision = 0;
     uint32_t pathSampleCount = 0;
 
