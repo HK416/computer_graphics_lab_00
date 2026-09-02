@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <string>
@@ -436,7 +437,8 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
         selection = std::move(copies);
     }
     ImGui::SameLine();
-    if (ImGui::Button("삭제") || (anySelected && ImGui::IsKeyPressed(ImGuiKey_Delete))) {
+    if (ImGui::Button("삭제") ||
+        (anySelected && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Delete))) {
         // 하나씩 지우면 첫 삭제가 인덱스를 밀어 나머지가 엉뚱한 것을 가리킨다. 한 번에 넘긴다.
         std::vector<uint32_t> doomed;
         for (int selected : selection) {
@@ -679,7 +681,8 @@ void Editor::buildSceneView(scene::Scene& active) {
     gizmoUsing = false;
     bool anySelected = hasSelection();
     if (anySelected && imageSize.x > 1.0F && imageSize.y > 1.0F) {
-        if (!active.camera.isLooking()) {
+        // 텍스트 입력 중에는 W/E/R 이 글자다.
+        if (!active.camera.isLooking() && !ImGui::GetIO().WantTextInput) {
             if (ImGui::IsKeyPressed(ImGuiKey_W)) {
                 gizmoOperation = ImGuizmo::TRANSLATE;
             } else if (ImGui::IsKeyPressed(ImGuiKey_E)) {
@@ -702,14 +705,14 @@ void Editor::buildSceneView(scene::Scene& active) {
         glm::mat4 pivotBefore = active.worldMatrix(primary);
         glm::mat4 model = pivotBefore;
 
-        // Ctrl 을 누르면 스냅을 건다. 조작 종류마다 단위가 다르다.
-        glm::vec3 snapValue{0.25F};
+        // Ctrl 을 누르면 스냅을 건다. 값은 툴바에서 고치고, «스냅» 체크는 늘 걸리게 한다.
+        glm::vec3 snapValue{snapTranslate};
         if (gizmoOperation == ImGuizmo::ROTATE) {
-            snapValue = glm::vec3{15.0F};
+            snapValue = glm::vec3{snapRotate};
         } else if (gizmoOperation == ImGuizmo::SCALE) {
-            snapValue = glm::vec3{0.1F};
+            snapValue = glm::vec3{snapScale};
         }
-        const float* snap = ImGui::GetIO().KeyCtrl ? glm::value_ptr(snapValue) : nullptr;
+        const float* snap = snapAlways || ImGui::GetIO().KeyCtrl ? glm::value_ptr(snapValue) : nullptr;
 
         if (ImGuizmo::Manipulate(glm::value_ptr(view),
                                  glm::value_ptr(projection),
@@ -786,6 +789,21 @@ void Editor::buildSceneView(scene::Scene& active) {
     if (ImGui::Button(gizmoMode == ImGuizmo::LOCAL ? "로컬" : "월드")) {
         gizmoMode = gizmoMode == ImGuizmo::LOCAL ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
     }
+    // 스냅 값은 지금 고른 조작 종류의 것을 보여 준다.
+    ImGui::SameLine();
+    ImGui::Checkbox("스냅", &snapAlways);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Ctrl 을 누르는 동안 스냅이 걸린다. 체크하면 늘 건다");
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(72.0F);
+    if (gizmoOperation == ImGuizmo::ROTATE) {
+        ImGui::DragFloat("##snapRotate", &snapRotate, 1.0F, 1.0F, 90.0F, "%.0f°");
+    } else if (gizmoOperation == ImGuizmo::SCALE) {
+        ImGui::DragFloat("##snapScale", &snapScale, 0.01F, 0.01F, 2.0F, "x%.2f");
+    } else {
+        ImGui::DragFloat("##snapTranslate", &snapTranslate, 0.05F, 0.01F, 100.0F, "%.2f");
+    }
 
     // 카메라 조작 방식. 기본은 궤도이고, 자유 모드는 1인칭처럼 날아다닌다.
     ImGui::SameLine();
@@ -824,413 +842,437 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     ImGui::Text("렌더 해상도 %ux%u", renderer.renderExtent().width, renderer.renderExtent().height);
     ImGui::Text("작업 워커 %u", workerCount);
 
-    ImGui::SeparatorText("프로파일러");
-    gfx::GpuProfiler& profiler = renderer.profiler();
-    ImGui::Checkbox("구간 계측", &profiler.enabled);
-    if (!profiler.gpuAvailable()) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("(GPU 타임스탬프 미지원, CPU 만)");
-    }
-    if (profiler.enabled) {
-        ImGui::SliderFloat("평활", &profiler.smoothing, 0.01F, 1.0F, "%.2f");
-        const std::vector<gfx::ProfilerZone>& zones = profiler.zones();
-        if (zones.empty()) {
-            ImGui::TextDisabled("측정 중...");
-        } else if (ImGui::BeginTable("구간", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn("구간");
-            ImGui::TableSetupColumn("CPU");
-            ImGui::TableSetupColumn("GPU");
-            ImGui::TableHeadersRow();
-            for (const gfx::ProfilerZone& zone : zones) {
-                ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-                // 중첩된 구간은 들여써서 상위 구간과 구분한다.
-                ImGui::Text("%*s%s", static_cast<int>(zone.depth) * 2, "", zone.name);
-                ImGui::TableNextColumn();
-                ImGui::Text("%.3f", static_cast<double>(zone.cpuMilliseconds));
-                ImGui::TableNextColumn();
-                if (zone.hasGpu) {
-                    ImGui::Text("%.3f", static_cast<double>(zone.gpuMilliseconds));
-                } else {
-                    ImGui::TextDisabled("-");
-                }
+    // 설정이 길어 그룹을 접을 수 있게 하고, 검색어가 있으면 이름에 그 말이 든 그룹만 펼친다.
+    ImGui::SetNextItemWidth(200.0F);
+    ImGui::InputTextWithHint("##settingsFilter", "그룹 검색", settingsFilter.data(), settingsFilter.size());
+    auto section = [this](const char* name) {
+        if (settingsFilter[0] != '\0') {
+            if (std::strstr(name, settingsFilter.data()) == nullptr) {
+                return false;
             }
-            ImGui::EndTable();
+            ImGui::SeparatorText(name);
+            return true;
         }
-    }
-    ImGui::Separator();
-
-    ImGui::Checkbox("와이어프레임", &renderer.wireframe);
-
-    ImGui::SeparatorText("후처리");
-    ImGui::SliderFloat("노출", &renderer.exposure, 0.05F, 8.0F, "%.2f");
-    scene::PostProcess& post = active.post;
-    ImGui::SliderFloat("Bloom 세기", &post.bloomIntensity, 0.0F, 1.0F, "%.2f");
-    ImGui::Checkbox("자동 노출", &post.autoExposure);
-    ImGui::BeginDisabled(!post.autoExposure);
-    ImGui::SliderFloat("적응 속도", &post.adaptationSpeed, 0.1F, 10.0F, "%.1f /s");
-    ImGui::DragFloatRange2("EV 범위", &post.exposureMinEv, &post.exposureMaxEv, 0.1F, -10.0F, 20.0F, "%.1f");
-    ImGui::EndDisabled();
-
-    ImGui::SeparatorText("높이 안개");
-    ImGui::SliderFloat("안개 밀도", &post.fogDensity, 0.0F, 2.0F, "%.3f", ImGuiSliderFlags_Logarithmic);
-    ImGui::BeginDisabled(post.fogDensity <= 0.0F);
-    ImGui::ColorEdit3("안개 색", glm::value_ptr(post.fogColor));
-    ImGui::DragFloat("안개 높이", &post.fogHeight, 0.05F, -100.0F, 100.0F, "%.2f");
-    ImGui::SliderFloat("높이 감쇠", &post.fogFalloff, 0.0F, 5.0F, "%.2f");
-    ImGui::EndDisabled();
+        return ImGui::CollapsingHeader(name, ImGuiTreeNodeFlags_DefaultOpen);
+    };
 
     // 경로 추적은 래스터 패스를 통째로 건너뛴다. 거기 딸린 설정은 눌러도 아무 일이 없으므로
     // 디버그 뷰와 같은 이유로 잠근다.
     bool rasterOnly = renderer.usePathTracing;
-
-    ImGui::SeparatorText("조명");
-    ImGui::Text("장면 조명 %zu개", active.lights.size());
-    ImGui::ColorEdit3("환경광", glm::value_ptr(active.ambientColor));
-    ImGui::SliderFloat("환경광 세기", &active.ambientIntensity, 0.0F, 4.0F, "%.2f");
-    ImGui::BeginDisabled(rasterOnly);
-    ImGui::Checkbox("그림자", &renderer.shadowsEnabled);
-    ImGui::BeginDisabled(!renderer.shadowsEnabled);
-    ImGui::Checkbox("시점 절두체 컬링", &renderer.shadowViewCulling);
-    ImGui::SameLine();
-    ImGui::Checkbox("캐스터 컬링", &renderer.shadowCasterCulling);
-    ImGui::Checkbox("시점 캐싱", &renderer.shadowCaching);
-    int cascades = static_cast<int>(renderer.shadowCascades);
-    if (ImGui::SliderInt("캐스케이드", &cascades, 1, static_cast<int>(gfx::MAX_SHADOW_CASCADES))) {
-        renderer.shadowCascades = static_cast<uint32_t>(cascades);
-    }
-    ImGui::SliderFloat("분할 혼합", &renderer.shadowSplitLambda, 0.0F, 1.0F, "%.2f");
-    ImGui::DragFloat("그림자 거리", &renderer.shadowDistance, 1.0F, 0.0F, 10000.0F, "%.0f (0 이면 자동)");
-    ImGui::Text("드로우 %u / %u, 다시 그린 층 %u",
-                renderer.shadowDrawCount(),
-                renderer.shadowDrawCandidates(),
-                renderer.shadowLayersDrawn());
-    ImGui::EndDisabled();
-    ImGui::EndDisabled();
-    ImGui::TextDisabled("그림자 시점 %u개까지 (방향광/스폿광 1, 점광 6)", gfx::MAX_SHADOW_VIEWS);
-
-    // 광선 그림자도 래스터 프래그먼트 셰이더 안에서 도는 것이라 경로 추적과는 무관하다.
+    // 광선 그림자와 반사는 래스터 안에서 도는 것이라 경로 추적과는 무관하다.
     bool rayQueryReady = renderer.rayQueryShadowsAvailable() && !rasterOnly;
-    ImGui::BeginDisabled(!rayQueryReady);
-    ImGui::Checkbox("광선 그림자 (하이브리드)", &renderer.useRayQueryShadows);
-    ImGui::BeginDisabled(!renderer.useRayQueryShadows);
-    ImGui::SliderFloat("광선 거리", &renderer.rayShadowDistance, 1.0F, 200.0F, "%.0f");
-    ImGui::EndDisabled();
-    ImGui::EndDisabled();
-    if (rasterOnly) {
-        ImGui::TextDisabled("경로 추적 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
-    } else if (!rayQueryReady) {
-        ImGui::TextDisabled("이 장치는 광선 질의를 지원하지 않는다");
-    } else {
-        ImGui::TextDisabled("이 거리 안쪽만 광선으로 판정하고 바깥은 그림자 맵을 쓴다");
-    }
+    scene::PostProcess& post = active.post;
 
-    ImGui::SeparatorText("광선 반사");
-    bool reflectionReady = rayQueryReady && renderer.useIbl;
-    ImGui::BeginDisabled(!reflectionReady);
-    ImGui::Checkbox("광선 반사", &renderer.useReflections);
-    ImGui::BeginDisabled(!renderer.useReflections);
-    ImGui::SliderFloat("거칠기 상한", &renderer.reflectionRoughnessCutoff, 0.03F, 1.0F, "%.2f");
-    ImGui::SliderFloat("반사 세기", &renderer.reflectionIntensity, 0.0F, 2.0F, "%.2f");
-    int reflectionSamples = static_cast<int>(renderer.reflectionMaxSamples);
-    if (ImGui::SliderInt("누적 상한", &reflectionSamples, 1, 64)) {
-        renderer.reflectionMaxSamples = static_cast<uint32_t>(reflectionSamples);
-    }
-    ImGui::EndDisabled();
-    ImGui::EndDisabled();
-    if (rasterOnly) {
-        ImGui::TextDisabled("경로 추적이 반사를 직접 계산한다");
-    } else if (!rayQueryReady) {
-        ImGui::TextDisabled("이 장치는 광선 질의를 지원하지 않는다");
-    } else if (!renderer.useIbl) {
-        ImGui::TextDisabled("IBL 이 꺼져 있으면 스페큘러 항이 없어 반사도 쉰다");
-    } else {
-        ImGui::TextDisabled("거칠기 상한 이하의 불투명 표면만 추적한다. 픽셀당 광선 하나, 시간축 누적");
-    }
-
-    ImGui::SeparatorText("환경 (IBL)");
-    scene::Environment& env = active.environment;
-    ImGui::Checkbox("IBL 사용", &renderer.useIbl);
-    int skySource = env.useHdr ? 1 : 0;
-    if (ImGui::Combo("하늘", &skySource, "절차적\0HDR 파일\0")) {
-        env.useHdr = skySource == 1;
-    }
-    if (env.useHdr) {
-        ImGui::TextDisabled("%s", env.hdrPath.empty() ? "파일 없음" : env.hdrPath.filename().string().c_str());
-        if (ImGui::Button("HDR 파일 고르기")) {
-            hdrFiles.clear();
-            std::error_code error;
-            for (const auto& entry : std::filesystem::directory_iterator(modelRoot, error)) {
-                if (entry.is_regular_file() && entry.path().extension() == ".hdr") {
-                    hdrFiles.push_back(entry.path());
-                }
-            }
-            std::ranges::sort(hdrFiles);
-            ImGui::OpenPopup("HDR 선택");
-        }
-        if (ImGui::BeginPopup("HDR 선택")) {
-            if (hdrFiles.empty()) {
-                ImGui::TextDisabled("%s 에 .hdr 파일이 없습니다", modelRoot.string().c_str());
-            }
-            for (const std::filesystem::path& file : hdrFiles) {
-                if (ImGui::Selectable(file.filename().string().c_str())) {
-                    env.hdrPath = file;
-                }
-            }
-            ImGui::Separator();
-            ImGui::SetNextItemWidth(320.0F);
-            ImGui::InputText("경로", hdrPathInput.data(), hdrPathInput.size());
+    if (section("프로파일러")) {
+        gfx::GpuProfiler& profiler = renderer.profiler();
+        ImGui::Checkbox("구간 계측", &profiler.enabled);
+        if (!profiler.gpuAvailable()) {
             ImGui::SameLine();
-            if (ImGui::Button("열기") && hdrPathInput[0] != '\0') {
-                env.hdrPath = std::filesystem::path(hdrPathInput.data());
+            ImGui::TextDisabled("(GPU 타임스탬프 미지원, CPU 만)");
+        }
+        if (profiler.enabled) {
+            ImGui::SliderFloat("평활", &profiler.smoothing, 0.01F, 1.0F, "%.2f");
+            const std::vector<gfx::ProfilerZone>& zones = profiler.zones();
+            if (zones.empty()) {
+                ImGui::TextDisabled("측정 중...");
+            } else if (ImGui::BeginTable("구간", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("구간");
+                ImGui::TableSetupColumn("CPU");
+                ImGui::TableSetupColumn("GPU");
+                ImGui::TableHeadersRow();
+                for (const gfx::ProfilerZone& zone : zones) {
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    // 중첩된 구간은 들여써서 상위 구간과 구분한다.
+                    ImGui::Text("%*s%s", static_cast<int>(zone.depth) * 2, "", zone.name);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%.3f", static_cast<double>(zone.cpuMilliseconds));
+                    ImGui::TableNextColumn();
+                    if (zone.hasGpu) {
+                        ImGui::Text("%.3f", static_cast<double>(zone.gpuMilliseconds));
+                    } else {
+                        ImGui::TextDisabled("-");
+                    }
+                }
+                ImGui::EndTable();
             }
-            ImGui::EndPopup();
-        }
-    } else {
-        ImGui::ColorEdit3("천정", glm::value_ptr(env.zenithColor));
-        ImGui::ColorEdit3("지평", glm::value_ptr(env.horizonColor));
-        ImGui::ColorEdit3("지면", glm::value_ptr(env.groundColor));
-        ImGui::ColorEdit3("태양색", glm::value_ptr(env.sunColor));
-        ImGui::SliderFloat("태양 세기", &env.sunIntensity, 0.0F, 8.0F, "%.2f");
-    }
-    ImGui::SliderFloat("환경 세기", &env.intensity, 0.0F, 4.0F, "%.2f");
-    ImGui::SliderFloat("환경 회전", &env.yawDegrees, -180.0F, 180.0F, "%.0f°");
-    if (ImGui::Button("다시 굽기")) {
-        renderer.invalidateEnvironment();
-    }
-    ImGui::SameLine();
-    ImGui::TextDisabled("태양 방향은 첫 방향광을 따라간다");
-
-    ImGui::SeparatorText("SSAO");
-    ImGui::BeginDisabled(rasterOnly);
-    ImGui::Checkbox("사용", &renderer.useSsao);
-    ImGui::BeginDisabled(!renderer.useSsao);
-    ImGui::SliderFloat("반지름", &renderer.ssaoRadius, 0.005F, 0.3F, "장면의 %.3f배");
-    ImGui::SliderFloat("세기", &renderer.ssaoIntensity, 0.0F, 3.0F, "%.2f");
-    ImGui::SliderFloat("편향", &renderer.ssaoBias, 0.0F, 0.02F, "%.4f");
-    int samples = static_cast<int>(renderer.ssaoSamples);
-    if (ImGui::SliderInt("표본", &samples, 4, 64)) {
-        renderer.ssaoSamples = static_cast<uint32_t>(samples);
-    }
-    ImGui::EndDisabled();
-    ImGui::EndDisabled();
-    if (rasterOnly) {
-        ImGui::TextDisabled("경로 추적 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
-    }
-
-    // 컬 컴퓨트도 태스크 셰이더도 래스터 분기 안에서만 돈다. 경로 추적의 가속 구조는 0단계 LOD
-    // 삼각형으로 세우므로 meshlet 컬링도 LOD 선정도 관여하지 않는다.
-    ImGui::SeparatorText("컬링과 LOD");
-    ImGui::BeginDisabled(rasterOnly);
-    ImGui::Checkbox("컴퓨트 컬링", &renderer.useComputeCulling);
-    // 오클루전은 mesh shader 경로의 태스크 셰이더에도 적용되므로 컴퓨트 컬링 잠금 밖에 둔다.
-    ImGui::Checkbox("HZB 오클루전 컬링 (두 패스)", &renderer.occlusionCulling);
-    ImGui::BeginDisabled(!renderer.useComputeCulling);
-    ImGui::Checkbox("절두체 컬링", &renderer.frustumCulling);
-    ImGui::SameLine();
-    ImGui::Checkbox("법선 원뿔 컬링", &renderer.coneCulling);
-    ImGui::EndDisabled();
-
-    ImGui::Checkbox("자동 LOD 선정", &renderer.automaticLod);
-    if (renderer.automaticLod) {
-        ImGui::SliderFloat("허용 화면 오차", &renderer.lodErrorThreshold, 0.1F, 32.0F, "%.2f px");
-
-        ImGui::Checkbox("신경망 보정", &renderer.useNeuralLod);
-        if (renderer.useNeuralLod) {
-            ImGui::Checkbox("학습", &renderer.trainLodNetwork);
-            ImGui::SameLine();
-            if (ImGui::Button("가중치 초기화")) {
-                renderer.lodNetwork.reset();
-            }
-            ImGui::SliderFloat(
-                "삼각형 예산", &renderer.triangleBudget, 1000.0F, 500000.0F, "%.0f", ImGuiSliderFlags_Logarithmic);
-            ImGui::SliderFloat(
-                "학습률", &renderer.lodNetwork.learningRate, 0.001F, 0.5F, "%.3f", ImGuiSliderFlags_Logarithmic);
-            ImGui::Text("손실 %.5f, 기대 삼각형 %.0f",
-                        static_cast<double>(renderer.lodNetwork.lastLoss()),
-                        static_cast<double>(renderer.lodNetwork.lastSoftTriangleCount()));
-        }
-    } else {
-        int lodLevel = static_cast<int>(renderer.lodLevel);
-        int maxLod = static_cast<int>(geometryStore != nullptr ? geometryStore->maxLodCount() : 1) - 1;
-        if (ImGui::SliderInt("LOD 단계", &lodLevel, 0, std::max(maxLod, 0))) {
-            renderer.lodLevel = static_cast<uint32_t>(lodLevel);
         }
     }
 
-    ImGui::EndDisabled();
-    if (rasterOnly) {
-        ImGui::TextDisabled("경로 추적 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
+    if (section("후처리")) {
+        ImGui::SliderFloat("노출", &renderer.exposure, 0.05F, 8.0F, "%.2f");
+        ImGui::SliderFloat("Bloom 세기", &post.bloomIntensity, 0.0F, 1.0F, "%.2f");
+        ImGui::Checkbox("자동 노출", &post.autoExposure);
+        ImGui::BeginDisabled(!post.autoExposure);
+        ImGui::SliderFloat("적응 속도", &post.adaptationSpeed, 0.1F, 10.0F, "%.1f /s");
+        ImGui::DragFloatRange2("EV 범위", &post.exposureMinEv, &post.exposureMaxEv, 0.1F, -10.0F, 20.0F, "%.1f");
+        ImGui::EndDisabled();
     }
 
-    ImGui::SeparatorText("해상도와 업스케일");
-    if (ImGui::SliderFloat("렌더 배율", &renderer.renderScale, 0.25F, 2.0F, "%.2f")) {
-        // 배율은 다음 프레임의 표시 크기 갱신에서 반영된다.
+    if (section("높이 안개")) {
+        ImGui::SliderFloat("안개 밀도", &post.fogDensity, 0.0F, 2.0F, "%.3f", ImGuiSliderFlags_Logarithmic);
+        ImGui::BeginDisabled(post.fogDensity <= 0.0F);
+        ImGui::ColorEdit3("안개 색", glm::value_ptr(post.fogColor));
+        ImGui::DragFloat("안개 높이", &post.fogHeight, 0.05F, -100.0F, 100.0F, "%.2f");
+        ImGui::SliderFloat("높이 감쇠", &post.fogFalloff, 0.0F, 5.0F, "%.2f");
+        ImGui::EndDisabled();
     }
-    ImGui::Text("장면 %ux%u -> 표시 %ux%u",
-                renderer.renderExtent().width,
-                renderer.renderExtent().height,
-                renderer.displayExtent().width,
-                renderer.displayExtent().height);
 
-    std::vector<gfx::UpscalerInfo> upscalers = renderer.upscalers();
-    bool dlssSelected = renderer.upscaler == gfx::Upscaler::DLSS || renderer.upscaler == gfx::Upscaler::DLSS_RR;
-    for (const gfx::UpscalerInfo& info : upscalers) {
-        // Ray Reconstruction 은 DLSS 의 한 모드다. 목록에 따로 두면 초해상과 무관한 별개 기법처럼
-        // 보이고, 경로 추적을 켜야 한다는 조건도 드러나지 않는다. 아래에서 체크박스로 다룬다.
-        if (info.kind == gfx::Upscaler::DLSS_RR) {
-            continue;
+    if (section("조명")) {
+        ImGui::Text("장면 조명 %zu개", active.lights.size());
+        ImGui::ColorEdit3("환경광", glm::value_ptr(active.ambientColor));
+        ImGui::SliderFloat("환경광 세기", &active.ambientIntensity, 0.0F, 4.0F, "%.2f");
+        ImGui::BeginDisabled(rasterOnly);
+        ImGui::Checkbox("그림자", &renderer.shadowsEnabled);
+        ImGui::BeginDisabled(!renderer.shadowsEnabled);
+        ImGui::Checkbox("시점 절두체 컬링", &renderer.shadowViewCulling);
+        ImGui::SameLine();
+        ImGui::Checkbox("캐스터 컬링", &renderer.shadowCasterCulling);
+        ImGui::Checkbox("시점 캐싱", &renderer.shadowCaching);
+        int cascades = static_cast<int>(renderer.shadowCascades);
+        if (ImGui::SliderInt("캐스케이드", &cascades, 1, static_cast<int>(gfx::MAX_SHADOW_CASCADES))) {
+            renderer.shadowCascades = static_cast<uint32_t>(cascades);
         }
-        bool selected = info.kind == gfx::Upscaler::DLSS ? dlssSelected : renderer.upscaler == info.kind;
-        ImGui::BeginDisabled(!info.available);
-        if (ImGui::RadioButton(info.name, selected)) {
-            renderer.upscaler = info.kind;
+        ImGui::SliderFloat("분할 혼합", &renderer.shadowSplitLambda, 0.0F, 1.0F, "%.2f");
+        ImGui::DragFloat("그림자 거리", &renderer.shadowDistance, 1.0F, 0.0F, 10000.0F, "%.0f (0 이면 자동)");
+        ImGui::Text("드로우 %u / %u, 다시 그린 층 %u",
+                    renderer.shadowDrawCount(),
+                    renderer.shadowDrawCandidates(),
+                    renderer.shadowLayersDrawn());
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        ImGui::TextDisabled("그림자 시점 %u개까지 (방향광/스폿광 1, 점광 6)", gfx::MAX_SHADOW_VIEWS);
+
+        ImGui::BeginDisabled(!rayQueryReady);
+        ImGui::Checkbox("광선 그림자 (하이브리드)", &renderer.useRayQueryShadows);
+        ImGui::BeginDisabled(!renderer.useRayQueryShadows);
+        ImGui::SliderFloat("광선 거리", &renderer.rayShadowDistance, 1.0F, 200.0F, "%.0f");
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        if (rasterOnly) {
+            ImGui::TextDisabled("경로 추적 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
+        } else if (!rayQueryReady) {
+            ImGui::TextDisabled("이 장치는 광선 질의를 지원하지 않는다");
+        } else {
+            ImGui::TextDisabled("이 거리 안쪽만 광선으로 판정하고 바깥은 그림자 맵을 쓴다");
+        }
+    }
+
+    if (section("광선 반사")) {
+        bool reflectionReady = rayQueryReady && renderer.useIbl;
+        ImGui::BeginDisabled(!reflectionReady);
+        ImGui::Checkbox("광선 반사", &renderer.useReflections);
+        ImGui::BeginDisabled(!renderer.useReflections);
+        ImGui::SliderFloat("거칠기 상한", &renderer.reflectionRoughnessCutoff, 0.03F, 1.0F, "%.2f");
+        ImGui::SliderFloat("반사 세기", &renderer.reflectionIntensity, 0.0F, 2.0F, "%.2f");
+        int reflectionSamples = static_cast<int>(renderer.reflectionMaxSamples);
+        if (ImGui::SliderInt("누적 상한", &reflectionSamples, 1, 64)) {
+            renderer.reflectionMaxSamples = static_cast<uint32_t>(reflectionSamples);
         }
         ImGui::EndDisabled();
-        if (!info.available) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(%s)", info.reason);
+        ImGui::EndDisabled();
+        if (rasterOnly) {
+            ImGui::TextDisabled("경로 추적이 반사를 직접 계산한다");
+        } else if (!rayQueryReady) {
+            ImGui::TextDisabled("이 장치는 광선 질의를 지원하지 않는다");
+        } else if (!renderer.useIbl) {
+            ImGui::TextDisabled("IBL 이 꺼져 있으면 스페큘러 항이 없어 반사도 쉰다");
+        } else {
+            ImGui::TextDisabled("거칠기 상한 이하의 불투명 표면만 추적한다. 픽셀당 광선 하나, 시간축 누적");
         }
     }
-    if (renderer.upscaler == gfx::Upscaler::SPATIAL) {
-        ImGui::SliderFloat("선명화", &renderer.upscaleSharpness, 0.0F, 1.0F, "%.2f");
-    }
-    if (dlssSelected) {
-        ImGui::Indent();
 
-        // 사전 설정은 곧 렌더 배율이다. NGX 에 넘기는 값도 배율에서 되돌리므로 둘이 어긋날 수 없다.
-        gfx::DlssQuality quality = gfx::dlssQualityForScale(renderer.renderScale);
-        if (ImGui::BeginCombo("품질", gfx::dlssQualityName(quality))) {
-            for (uint32_t index = 0; index < gfx::DLSS_QUALITY_COUNT; ++index) {
-                auto candidate = static_cast<gfx::DlssQuality>(index);
-                if (ImGui::Selectable(gfx::dlssQualityName(candidate), candidate == quality)) {
-                    renderer.renderScale = gfx::dlssQualityScale(candidate);
+    if (section("환경 (IBL)")) {
+        scene::Environment& env = active.environment;
+        ImGui::Checkbox("IBL 사용", &renderer.useIbl);
+        int skySource = env.useHdr ? 1 : 0;
+        if (ImGui::Combo("하늘", &skySource, "절차적\0HDR 파일\0")) {
+            env.useHdr = skySource == 1;
+        }
+        if (env.useHdr) {
+            ImGui::TextDisabled("%s", env.hdrPath.empty() ? "파일 없음" : env.hdrPath.filename().string().c_str());
+            if (ImGui::Button("HDR 파일 고르기")) {
+                hdrFiles.clear();
+                std::error_code error;
+                for (const auto& entry : std::filesystem::directory_iterator(modelRoot, error)) {
+                    if (entry.is_regular_file() && entry.path().extension() == ".hdr") {
+                        hdrFiles.push_back(entry.path());
+                    }
+                }
+                std::ranges::sort(hdrFiles);
+                ImGui::OpenPopup("HDR 선택");
+            }
+            if (ImGui::BeginPopup("HDR 선택")) {
+                if (hdrFiles.empty()) {
+                    ImGui::TextDisabled("%s 에 .hdr 파일이 없습니다", modelRoot.string().c_str());
+                }
+                for (const std::filesystem::path& file : hdrFiles) {
+                    if (ImGui::Selectable(file.filename().string().c_str())) {
+                        env.hdrPath = file;
+                    }
+                }
+                ImGui::Separator();
+                ImGui::SetNextItemWidth(320.0F);
+                ImGui::InputText("경로", hdrPathInput.data(), hdrPathInput.size());
+                ImGui::SameLine();
+                if (ImGui::Button("열기") && hdrPathInput[0] != '\0') {
+                    env.hdrPath = std::filesystem::path(hdrPathInput.data());
+                }
+                ImGui::EndPopup();
+            }
+        } else {
+            ImGui::ColorEdit3("천정", glm::value_ptr(env.zenithColor));
+            ImGui::ColorEdit3("지평", glm::value_ptr(env.horizonColor));
+            ImGui::ColorEdit3("지면", glm::value_ptr(env.groundColor));
+            ImGui::ColorEdit3("태양색", glm::value_ptr(env.sunColor));
+            ImGui::SliderFloat("태양 세기", &env.sunIntensity, 0.0F, 8.0F, "%.2f");
+        }
+        ImGui::SliderFloat("환경 세기", &env.intensity, 0.0F, 4.0F, "%.2f");
+        ImGui::SliderFloat("환경 회전", &env.yawDegrees, -180.0F, 180.0F, "%.0f°");
+        if (ImGui::Button("다시 굽기")) {
+            renderer.invalidateEnvironment();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("태양 방향은 첫 방향광을 따라간다");
+    }
+
+    if (section("SSAO")) {
+        ImGui::BeginDisabled(rasterOnly);
+        ImGui::Checkbox("사용", &renderer.useSsao);
+        ImGui::BeginDisabled(!renderer.useSsao);
+        ImGui::SliderFloat("반지름", &renderer.ssaoRadius, 0.005F, 0.3F, "장면의 %.3f배");
+        ImGui::SliderFloat("세기", &renderer.ssaoIntensity, 0.0F, 3.0F, "%.2f");
+        ImGui::SliderFloat("편향", &renderer.ssaoBias, 0.0F, 0.02F, "%.4f");
+        int samples = static_cast<int>(renderer.ssaoSamples);
+        if (ImGui::SliderInt("표본", &samples, 4, 64)) {
+            renderer.ssaoSamples = static_cast<uint32_t>(samples);
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        if (rasterOnly) {
+            ImGui::TextDisabled("경로 추적 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
+        }
+
+        // 컬 컴퓨트도 태스크 셰이더도 래스터 분기 안에서만 돈다. 경로 추적의 가속 구조는 0단계 LOD
+        // 삼각형으로 세우므로 meshlet 컬링도 LOD 선정도 관여하지 않는다.
+    }
+
+    if (section("컬링과 LOD")) {
+        ImGui::BeginDisabled(rasterOnly);
+        ImGui::Checkbox("컴퓨트 컬링", &renderer.useComputeCulling);
+        // 오클루전은 mesh shader 경로의 태스크 셰이더에도 적용되므로 컴퓨트 컬링 잠금 밖에 둔다.
+        ImGui::Checkbox("HZB 오클루전 컬링 (두 패스)", &renderer.occlusionCulling);
+        ImGui::BeginDisabled(!renderer.useComputeCulling);
+        ImGui::Checkbox("절두체 컬링", &renderer.frustumCulling);
+        ImGui::SameLine();
+        ImGui::Checkbox("법선 원뿔 컬링", &renderer.coneCulling);
+        ImGui::EndDisabled();
+
+        ImGui::Checkbox("자동 LOD 선정", &renderer.automaticLod);
+        if (renderer.automaticLod) {
+            ImGui::SliderFloat("허용 화면 오차", &renderer.lodErrorThreshold, 0.1F, 32.0F, "%.2f px");
+
+            ImGui::Checkbox("신경망 보정", &renderer.useNeuralLod);
+            if (renderer.useNeuralLod) {
+                ImGui::Checkbox("학습", &renderer.trainLodNetwork);
+                ImGui::SameLine();
+                if (ImGui::Button("가중치 초기화")) {
+                    renderer.lodNetwork.reset();
+                }
+                ImGui::SliderFloat(
+                    "삼각형 예산", &renderer.triangleBudget, 1000.0F, 500000.0F, "%.0f", ImGuiSliderFlags_Logarithmic);
+                ImGui::SliderFloat(
+                    "학습률", &renderer.lodNetwork.learningRate, 0.001F, 0.5F, "%.3f", ImGuiSliderFlags_Logarithmic);
+                ImGui::Text("손실 %.5f, 기대 삼각형 %.0f",
+                            static_cast<double>(renderer.lodNetwork.lastLoss()),
+                            static_cast<double>(renderer.lodNetwork.lastSoftTriangleCount()));
+            }
+        } else {
+            int lodLevel = static_cast<int>(renderer.lodLevel);
+            int maxLod = static_cast<int>(geometryStore != nullptr ? geometryStore->maxLodCount() : 1) - 1;
+            if (ImGui::SliderInt("LOD 단계", &lodLevel, 0, std::max(maxLod, 0))) {
+                renderer.lodLevel = static_cast<uint32_t>(lodLevel);
+            }
+        }
+
+        ImGui::EndDisabled();
+        if (rasterOnly) {
+            ImGui::TextDisabled("경로 추적 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
+        }
+    }
+
+    if (section("해상도와 업스케일")) {
+        if (ImGui::SliderFloat("렌더 배율", &renderer.renderScale, 0.25F, 2.0F, "%.2f")) {
+            // 배율은 다음 프레임의 표시 크기 갱신에서 반영된다.
+        }
+        ImGui::Text("장면 %ux%u -> 표시 %ux%u",
+                    renderer.renderExtent().width,
+                    renderer.renderExtent().height,
+                    renderer.displayExtent().width,
+                    renderer.displayExtent().height);
+
+        std::vector<gfx::UpscalerInfo> upscalers = renderer.upscalers();
+        bool dlssSelected = renderer.upscaler == gfx::Upscaler::DLSS || renderer.upscaler == gfx::Upscaler::DLSS_RR;
+        for (const gfx::UpscalerInfo& info : upscalers) {
+            // Ray Reconstruction 은 DLSS 의 한 모드다. 목록에 따로 두면 초해상과 무관한 별개 기법처럼
+            // 보이고, 경로 추적을 켜야 한다는 조건도 드러나지 않는다. 아래에서 체크박스로 다룬다.
+            if (info.kind == gfx::Upscaler::DLSS_RR) {
+                continue;
+            }
+            bool selected = info.kind == gfx::Upscaler::DLSS ? dlssSelected : renderer.upscaler == info.kind;
+            ImGui::BeginDisabled(!info.available);
+            if (ImGui::RadioButton(info.name, selected)) {
+                renderer.upscaler = info.kind;
+            }
+            ImGui::EndDisabled();
+            if (!info.available) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(%s)", info.reason);
+            }
+        }
+        if (renderer.upscaler == gfx::Upscaler::SPATIAL) {
+            ImGui::SliderFloat("선명화", &renderer.upscaleSharpness, 0.0F, 1.0F, "%.2f");
+        }
+        if (dlssSelected) {
+            ImGui::Indent();
+
+            // 사전 설정은 곧 렌더 배율이다. NGX 에 넘기는 값도 배율에서 되돌리므로 둘이 어긋날 수 없다.
+            gfx::DlssQuality quality = gfx::dlssQualityForScale(renderer.renderScale);
+            if (ImGui::BeginCombo("품질", gfx::dlssQualityName(quality))) {
+                for (uint32_t index = 0; index < gfx::DLSS_QUALITY_COUNT; ++index) {
+                    auto candidate = static_cast<gfx::DlssQuality>(index);
+                    if (ImGui::Selectable(gfx::dlssQualityName(candidate), candidate == quality)) {
+                        renderer.renderScale = gfx::dlssQualityScale(candidate);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            gfx::UpscalerInfo reconstruction{};
+            for (const gfx::UpscalerInfo& info : upscalers) {
+                if (info.kind == gfx::Upscaler::DLSS_RR) {
+                    reconstruction = info;
+                }
+            }
+            bool useReconstruction = renderer.upscaler == gfx::Upscaler::DLSS_RR;
+            ImGui::BeginDisabled(!reconstruction.available);
+            if (ImGui::Checkbox("Ray Reconstruction", &useReconstruction)) {
+                renderer.upscaler = useReconstruction ? gfx::Upscaler::DLSS_RR : gfx::Upscaler::DLSS;
+            }
+            ImGui::EndDisabled();
+            if (!reconstruction.available) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(%s)", reconstruction.reason);
+            } else if (useReconstruction && !renderer.usePathTracing) {
+                ImGui::TextDisabled("경로 추적을 켜야 동작한다. 그전까지는 초해상으로 돌아간다");
+            } else if (useReconstruction) {
+                ImGui::TextDisabled("경로 추적 1표본을 디노이즈하면서 확대한다");
+            }
+
+            ImGui::Unindent();
+        }
+    }
+
+    if (section("경로 추적")) {
+        ImGui::BeginDisabled(!renderer.pathTracingAvailable());
+        ImGui::Checkbox("경로 추적", &renderer.usePathTracing);
+        ImGui::EndDisabled();
+        if (!renderer.pathTracingAvailable()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(미지원)");
+        } else if (renderer.usePathTracing) {
+            gfx::PathTraceOptions& options = renderer.pathTrace;
+            int bounces = static_cast<int>(options.maxBounces);
+            if (ImGui::SliderInt("반사 횟수", &bounces, 1, 16)) {
+                options.maxBounces = static_cast<uint32_t>(bounces);
+            }
+            int perFrame = static_cast<int>(options.samplesPerFrame);
+            if (ImGui::SliderInt("프레임당 표본", &perFrame, 1, 16)) {
+                options.samplesPerFrame = static_cast<uint32_t>(perFrame);
+            }
+            int maxSamples = static_cast<int>(options.maxSamples);
+            if (ImGui::SliderInt("표본 상한", &maxSamples, 0, 4096, maxSamples == 0 ? "무제한" : "%d")) {
+                options.maxSamples = static_cast<uint32_t>(maxSamples);
+            }
+            ImGui::Checkbox("다음 사건 추정", &options.nextEventEstimation);
+            ImGui::SameLine();
+            ImGui::Checkbox("러시안 룰렛", &options.russianRoulette);
+            ImGui::SliderFloat("복사휘도 상한", &options.radianceClamp, 1.0F, 64.0F, "%.1f");
+            ImGui::SliderFloat("하늘 밝기", &options.skyIntensity, 0.0F, 4.0F, "%.2f");
+            ImGui::Text("누적 표본 %u", renderer.pathTraceSamples());
+            ImGui::SameLine();
+            if (ImGui::Button("누적 초기화")) {
+                renderer.resetPathAccumulation();
+            }
+        }
+    }
+
+    if (section("파이프라인")) {
+        ImGui::Checkbox("와이어프레임", &renderer.wireframe);
+        ImGui::BeginDisabled(!renderer.meshShaderAvailable() || rasterOnly);
+        ImGui::Checkbox("mesh shader 경로", &renderer.useMeshShader);
+        ImGui::EndDisabled();
+        if (!renderer.meshShaderAvailable()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(미지원)");
+        } else if (rasterOnly) {
+            // 광선 순회는 가속 구조를 타지 mesh 셰이더를 실행하지 않는다. 둘은 아예 다른 파이프라인이다.
+            ImGui::TextDisabled("경로 추적은 래스터 파이프라인을 타지 않는다");
+        }
+
+        static constexpr const char* DEBUG_MODE_NAMES[] = {"셰이딩",
+                                                           "meshlet",
+                                                           "노멀",
+                                                           "UV",
+                                                           "깊이",
+                                                           "LOD",
+                                                           "캐스케이드",
+                                                           "그림자",
+                                                           "모션 벡터",
+                                                           "컬 패스",
+                                                           "반사 원본",
+                                                           "반사 누적"};
+        // 경로 추적은 래스터에 있는 모드를 다 그리지는 못한다. 못 그리는 것만 개별로 잠근다.
+        auto modeUsable = [this](uint32_t mode) {
+            return !renderer.usePathTracing || gfx::pathTraceSupportsDebugMode(mode);
+        };
+        if (ImGui::BeginCombo("디버그 뷰", DEBUG_MODE_NAMES[renderer.debugMode])) {
+            for (uint32_t mode = 0; mode < IM_ARRAYSIZE(DEBUG_MODE_NAMES); ++mode) {
+                bool usable = modeUsable(mode);
+                ImGui::BeginDisabled(!usable);
+                if (ImGui::Selectable(DEBUG_MODE_NAMES[mode], renderer.debugMode == mode)) {
+                    renderer.debugMode = mode;
+                }
+                ImGui::EndDisabled();
+                if (!usable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    ImGui::SetTooltip("경로 추적에는 이 값이 없다");
                 }
             }
             ImGui::EndCombo();
         }
+        if (!modeUsable(renderer.debugMode)) {
+            ImGui::TextDisabled("경로 추적 중에는 셰이딩으로 그린다");
+        }
 
-        gfx::UpscalerInfo reconstruction{};
-        for (const gfx::UpscalerInfo& info : upscalers) {
-            if (info.kind == gfx::Upscaler::DLSS_RR) {
-                reconstruction = info;
-            }
+        bool vsync = renderer.vsyncEnabled();
+        if (ImGui::Checkbox("수직 동기화", &vsync)) {
+            renderer.setVsync(vsync);
         }
-        bool useReconstruction = renderer.upscaler == gfx::Upscaler::DLSS_RR;
-        ImGui::BeginDisabled(!reconstruction.available);
-        if (ImGui::Checkbox("Ray Reconstruction", &useReconstruction)) {
-            renderer.upscaler = useReconstruction ? gfx::Upscaler::DLSS_RR : gfx::Upscaler::DLSS;
-        }
+
+        ImGui::Separator();
+        ImGui::TextDisabled("하드웨어 기능");
+        const gfx::Capabilities& caps = context.caps;
+        ImGui::BeginDisabled();
+        bool meshShader = caps.meshShader;
+        bool rayTracing = caps.rayTracingPipeline;
+        bool drawIndirectCount = caps.drawIndirectCount;
+        bool minmax = caps.samplerFilterMinmax;
+        ImGui::Checkbox("mesh shader", &meshShader);
+        ImGui::Checkbox("레이트레이싱 파이프라인", &rayTracing);
+        ImGui::Checkbox("drawIndirectCount", &drawIndirectCount);
+        ImGui::Checkbox("samplerFilterMinmax", &minmax);
         ImGui::EndDisabled();
-        if (!reconstruction.available) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(%s)", reconstruction.reason);
-        } else if (useReconstruction && !renderer.usePathTracing) {
-            ImGui::TextDisabled("경로 추적을 켜야 동작한다. 그전까지는 초해상으로 돌아간다");
-        } else if (useReconstruction) {
-            ImGui::TextDisabled("경로 추적 1표본을 디노이즈하면서 확대한다");
-        }
-
-        ImGui::Unindent();
     }
-
-    ImGui::SeparatorText("경로 추적");
-    ImGui::BeginDisabled(!renderer.pathTracingAvailable());
-    ImGui::Checkbox("경로 추적", &renderer.usePathTracing);
-    ImGui::EndDisabled();
-    if (!renderer.pathTracingAvailable()) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("(미지원)");
-    } else if (renderer.usePathTracing) {
-        gfx::PathTraceOptions& options = renderer.pathTrace;
-        int bounces = static_cast<int>(options.maxBounces);
-        if (ImGui::SliderInt("반사 횟수", &bounces, 1, 16)) {
-            options.maxBounces = static_cast<uint32_t>(bounces);
-        }
-        int perFrame = static_cast<int>(options.samplesPerFrame);
-        if (ImGui::SliderInt("프레임당 표본", &perFrame, 1, 16)) {
-            options.samplesPerFrame = static_cast<uint32_t>(perFrame);
-        }
-        int maxSamples = static_cast<int>(options.maxSamples);
-        if (ImGui::SliderInt("표본 상한", &maxSamples, 0, 4096, maxSamples == 0 ? "무제한" : "%d")) {
-            options.maxSamples = static_cast<uint32_t>(maxSamples);
-        }
-        ImGui::Checkbox("다음 사건 추정", &options.nextEventEstimation);
-        ImGui::SameLine();
-        ImGui::Checkbox("러시안 룰렛", &options.russianRoulette);
-        ImGui::SliderFloat("복사휘도 상한", &options.radianceClamp, 1.0F, 64.0F, "%.1f");
-        ImGui::SliderFloat("하늘 밝기", &options.skyIntensity, 0.0F, 4.0F, "%.2f");
-        ImGui::Text("누적 표본 %u", renderer.pathTraceSamples());
-        ImGui::SameLine();
-        if (ImGui::Button("누적 초기화")) {
-            renderer.resetPathAccumulation();
-        }
-    }
-
-    ImGui::SeparatorText("파이프라인");
-    ImGui::BeginDisabled(!renderer.meshShaderAvailable() || rasterOnly);
-    ImGui::Checkbox("mesh shader 경로", &renderer.useMeshShader);
-    ImGui::EndDisabled();
-    if (!renderer.meshShaderAvailable()) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("(미지원)");
-    } else if (rasterOnly) {
-        // 광선 순회는 가속 구조를 타지 mesh 셰이더를 실행하지 않는다. 둘은 아예 다른 파이프라인이다.
-        ImGui::TextDisabled("경로 추적은 래스터 파이프라인을 타지 않는다");
-    }
-
-    static constexpr const char* DEBUG_MODE_NAMES[] = {"셰이딩",
-                                                       "meshlet",
-                                                       "노멀",
-                                                       "UV",
-                                                       "깊이",
-                                                       "LOD",
-                                                       "캐스케이드",
-                                                       "그림자",
-                                                       "모션 벡터",
-                                                       "컬 패스",
-                                                       "반사 원본",
-                                                       "반사 누적"};
-    // 경로 추적은 래스터에 있는 모드를 다 그리지는 못한다. 못 그리는 것만 개별로 잠근다.
-    auto modeUsable = [this](uint32_t mode) {
-        return !renderer.usePathTracing || gfx::pathTraceSupportsDebugMode(mode);
-    };
-    if (ImGui::BeginCombo("디버그 뷰", DEBUG_MODE_NAMES[renderer.debugMode])) {
-        for (uint32_t mode = 0; mode < IM_ARRAYSIZE(DEBUG_MODE_NAMES); ++mode) {
-            bool usable = modeUsable(mode);
-            ImGui::BeginDisabled(!usable);
-            if (ImGui::Selectable(DEBUG_MODE_NAMES[mode], renderer.debugMode == mode)) {
-                renderer.debugMode = mode;
-            }
-            ImGui::EndDisabled();
-            if (!usable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip("경로 추적에는 이 값이 없다");
-            }
-        }
-        ImGui::EndCombo();
-    }
-    if (!modeUsable(renderer.debugMode)) {
-        ImGui::TextDisabled("경로 추적 중에는 셰이딩으로 그린다");
-    }
-
-    bool vsync = renderer.vsyncEnabled();
-    if (ImGui::Checkbox("수직 동기화", &vsync)) {
-        renderer.setVsync(vsync);
-    }
-
-    ImGui::Separator();
-    ImGui::TextDisabled("하드웨어 기능");
-    const gfx::Capabilities& caps = context.caps;
-    ImGui::BeginDisabled();
-    bool meshShader = caps.meshShader;
-    bool rayTracing = caps.rayTracingPipeline;
-    bool drawIndirectCount = caps.drawIndirectCount;
-    bool minmax = caps.samplerFilterMinmax;
-    ImGui::Checkbox("mesh shader", &meshShader);
-    ImGui::Checkbox("레이트레이싱 파이프라인", &rayTracing);
-    ImGui::Checkbox("drawIndirectCount", &drawIndirectCount);
-    ImGui::Checkbox("samplerFilterMinmax", &minmax);
-    ImGui::EndDisabled();
     ImGui::End();
 }
 

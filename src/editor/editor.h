@@ -122,6 +122,13 @@ private:
     int gizmoOperation = 7;
     int gizmoMode = 1;
     bool gizmoUsing = false;
+    // 기즈모 스냅. Ctrl 을 누르는 동안 걸리고, snapAlways 면 늘 건다. 이동은 단위, 회전은 도, 크기는 배율.
+    float snapTranslate = 0.25F;
+    float snapRotate = 15.0F;
+    float snapScale = 0.1F;
+    bool snapAlways = false;
+    // 렌더 설정 패널의 그룹 검색어. 비어 있으면 모든 그룹을 접었다 펼 수 있게 보여 준다.
+    std::array<char, 64> settingsFilter{};
     float frameTimeMilliseconds = 0.0F;
 
 public:
