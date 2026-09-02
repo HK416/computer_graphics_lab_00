@@ -1,10 +1,17 @@
 #pragma once
 
 #include <glm/mat4x4.hpp>
+#include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <SDL3/SDL_events.h>
 
 namespace scene {
+
+// 화면에서 쏘는 월드 광선. 클릭 피킹이 쓴다.
+struct Ray {
+    glm::vec3 origin{0.0F};
+    glm::vec3 direction{0.0F, 0.0F, -1.0F};
+};
 
 // 궤도(orbit)는 대상 주위를 도는 기본 조작이고, 자유(fly)는 1인칭처럼 직접 날아다닌다.
 enum class CameraMode {
@@ -23,6 +30,8 @@ public:
     // ImGuizmo 는 OpenGL 규약(NDC +Y 위)을 가정하므로 Y 뒤집기를 되돌린 투영을 따로 준다.
     glm::mat4 gizmoProjectionMatrix(float aspect) const;
     glm::vec3 forward() const;
+    // 장면 뷰 정규화 좌표(왼쪽 위 0,0 / 오른쪽 아래 1,1)에서 나가는 광선.
+    Ray screenToRay(glm::vec2 uv, float aspect) const;
     bool isLooking() const { return dragging; }
 
     // 두 모드가 같은 화면에서 이어지도록 전환 시점에 대상이나 위치를 맞춰 준다.

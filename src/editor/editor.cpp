@@ -1,7 +1,9 @@
 #include "editor/editor.h"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <utility>
 
@@ -26,6 +28,54 @@
 #include "scene/scene.h"
 
 namespace editor {
+
+namespace {
+
+// 광선과 구가 만나는 가장 가까운 거리. 만나지 않거나 뒤쪽이면 음수.
+float raySphere(const scene::Ray& ray, const glm::vec4& sphere) {
+    glm::vec3 toCenter = glm::vec3(sphere) - ray.origin;
+    float alongRay = glm::dot(toCenter, ray.direction);
+    float centerDistanceSq = glm::dot(toCenter, toCenter) - alongRay * alongRay;
+    float radiusSq = sphere.w * sphere.w;
+    if (centerDistanceSq > radiusSq) {
+        return -1.0F;
+    }
+    float halfChord = std::sqrt(radiusSq - centerDistanceSq);
+    float near = alongRay - halfChord;
+    float far = alongRay + halfChord;
+    // 구 안에서 쏘면 near 가 음수다. 그때는 반대쪽 교차를 쓴다.
+    return near >= 0.0F ? near : (far >= 0.0F ? far : -1.0F);
+}
+
+// 광선에 걸리는 가장 가까운 오브젝트. 없으면 -1.
+//
+// ponytail: 메쉬 경계 구까지만 본다. 더 정확히 하려면 meshlet 경계 구로 한 단계 좁힌 뒤
+// LOD 0 삼각형과 교차시키면 된다. 스킨 메쉬는 CPU 정점이 바인드 포즈라 구로만 다뤄야 한다.
+int pickObject(const scene::Scene& scene, const gfx::GeometryStore& geometry, const scene::Ray& ray) {
+    int best = -1;
+    float bestDistance = std::numeric_limits<float>::max();
+    for (uint32_t index = 0; index < scene.objects.size(); ++index) {
+        uint32_t mesh = scene.meshOf(index);
+        if (mesh >= geometry.meshCount() || !scene.visibleInTree(index)) {
+            continue;
+        }
+        const glm::mat4& world = scene.worldMatrix(index);
+        glm::vec4 local = geometry.mesh(mesh).boundingSphere;
+        glm::vec3 center = glm::vec3(world * glm::vec4{glm::vec3(local), 1.0F});
+        // 비균등 스케일은 가장 긴 축으로 보수적으로 키운다. focusSelected 와 같은 계산이다.
+        float scale = std::sqrt(std::max({glm::dot(glm::vec3(world[0]), glm::vec3(world[0])),
+                                          glm::dot(glm::vec3(world[1]), glm::vec3(world[1])),
+                                          glm::dot(glm::vec3(world[2]), glm::vec3(world[2]))}));
+        float distance = raySphere(ray, glm::vec4{center, local.w * scale});
+        if (distance >= 0.0F && distance < bestDistance) {
+            bestDistance = distance;
+            best = static_cast<int>(index);
+        }
+    }
+    return best;
+}
+
+} // namespace
 namespace {
 
 constexpr float BASE_FONT_SIZE = 16.0F;
@@ -603,6 +653,7 @@ void Editor::buildSceneView(scene::Scene& active) {
                      textureFor(renderer.presentView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)))},
                  available);
     sceneHovered = ImGui::IsItemHovered();
+    bool imageClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
 
     ImVec2 imagePosition = ImGui::GetItemRectMin();
     ImVec2 imageSize = ImGui::GetItemRectSize();
@@ -653,6 +704,16 @@ void Editor::buildSceneView(scene::Scene& active) {
             object.transform = scene::Transform::fromMatrix(glm::inverse(parentWorld) * model);
         }
         gizmoUsing = ImGuizmo::IsUsing();
+    }
+
+    // 장면 뷰를 왼쪽 단추로 누르면 그 아래 오브젝트를 고른다. 기즈모를 잡고 있거나 시선을 돌리는
+    // 중에는 받지 않는다. 빈 곳을 누르면 선택이 풀린다.
+    if (imageClicked && !gizmoUsing && !ImGuizmo::IsOver() && !active.camera.isLooking() &&
+        geometryStore != nullptr && imageSize.x > 1.0F && imageSize.y > 1.0F) {
+        ImVec2 mouse = ImGui::GetMousePos();
+        glm::vec2 uv{(mouse.x - imagePosition.x) / imageSize.x, (mouse.y - imagePosition.y) / imageSize.y};
+        scene::Ray ray = active.camera.screenToRay(uv, imageSize.x / imageSize.y);
+        selectedObject = pickObject(active, *geometryStore, ray);
     }
 
     // 조작 도구 선택은 장면 뷰 위에 겹쳐 둔다.

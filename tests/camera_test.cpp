@@ -3,6 +3,7 @@
 #include <cstdio>
 
 #include <glm/geometric.hpp>
+#include <glm/trigonometric.hpp>
 #include <glm/mat4x4.hpp>
 #include <glm/matrix.hpp>
 
@@ -89,6 +90,39 @@ int main() {
         orbit.distance = 0.0F;
         orbit.applyOrbit();
         assert(orbit.distance > 0.0F);
+    }
+
+    // 클릭 피킹이 쓰는 화면 -> 월드 광선. 부호와 종횡비가 가장 틀리기 쉽다.
+    {
+        scene::Camera eye;
+        eye.position = glm::vec3{0.0F, 0.0F, 0.0F};
+        eye.yawDegrees = -90.0F; // -Z 를 본다
+        eye.pitchDegrees = 0.0F;
+        eye.fovYDegrees = 90.0F;
+
+        // 화면 한가운데는 시선과 같은 방향이다.
+        scene::Ray middle = eye.screenToRay(glm::vec2{0.5F, 0.5F}, 1.0F);
+        assert(glm::length(middle.origin - eye.position) < 1e-5F);
+        assert(glm::length(middle.direction - eye.forward()) < 1e-5F && "가운데는 시선 그대로여야 한다");
+
+        // 화면 위쪽은 위를 향한다. y 를 뒤집지 않으면 여기서 부호가 반대로 나온다.
+        scene::Ray top = eye.screenToRay(glm::vec2{0.5F, 0.0F}, 1.0F);
+        assert(top.direction.y > 0.0F && "화면 위는 월드에서도 위여야 한다");
+        scene::Ray bottom = eye.screenToRay(glm::vec2{0.5F, 1.0F}, 1.0F);
+        assert(bottom.direction.y < 0.0F);
+
+        // 시야각 90 도에서 화면 위 끝은 시선과 45 도를 이룬다.
+        float cosine = glm::dot(top.direction, eye.forward());
+        assert(std::abs(cosine - std::cos(glm::radians(45.0F))) < 1e-4F && "세로 시야각이 반영되어야 한다");
+
+        // 종횡비가 넓어지면 가로로 더 벌어진다.
+        scene::Ray narrow = eye.screenToRay(glm::vec2{1.0F, 0.5F}, 1.0F);
+        scene::Ray wide = eye.screenToRay(glm::vec2{1.0F, 0.5F}, 2.0F);
+        assert(glm::dot(wide.direction, eye.forward()) < glm::dot(narrow.direction, eye.forward()) &&
+               "종횡비가 클수록 화면 가장자리 광선이 더 벌어진다");
+
+        // 방향은 단위 벡터여야 한다. 피킹의 거리 비교가 이걸 전제한다.
+        assert(std::abs(glm::length(wide.direction) - 1.0F) < 1e-5F);
     }
 
     std::printf("카메라 자체 점검 통과\n");

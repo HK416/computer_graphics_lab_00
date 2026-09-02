@@ -24,6 +24,24 @@ glm::vec3 Camera::forward() const {
     return glm::normalize(glm::vec3{std::cos(yaw) * std::cos(pitch), std::sin(pitch), std::sin(yaw) * std::cos(pitch)});
 }
 
+// 투영 행렬을 뒤집는 대신 시야각으로 직접 만든다. 무한 원거리 투영은 역변환이 성립하지 않고,
+// 기즈모용 투영은 Y 부호가 반대라 어느 쪽을 써도 한 번 더 손봐야 하기 때문이다.
+Ray Camera::screenToRay(glm::vec2 uv, float aspect) const {
+    float ndcX = uv.x * 2.0F - 1.0F;
+    // 화면은 위가 0 이라 뒤집어야 위쪽이 +가 된다.
+    float ndcY = 1.0F - uv.y * 2.0F;
+    float tanHalf = std::tan(glm::radians(fovYDegrees) * 0.5F);
+
+    glm::vec3 ahead = forward();
+    glm::vec3 right = glm::normalize(glm::cross(ahead, WORLD_UP));
+    glm::vec3 up = glm::cross(right, ahead);
+
+    Ray ray;
+    ray.origin = position;
+    ray.direction = glm::normalize(ahead + right * (ndcX * tanHalf * aspect) + up * (ndcY * tanHalf));
+    return ray;
+}
+
 void Camera::applyOrbit() {
     distance = std::max(distance, MIN_ORBIT_DISTANCE);
     position = target - forward() * distance;

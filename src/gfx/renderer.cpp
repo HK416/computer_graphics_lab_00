@@ -1691,7 +1691,6 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
     glm::vec3 maximum{std::numeric_limits<float>::lowest()};
     bool hasBounds = false;
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
-        const scene::Object& object = scene.objects[index];
         if (scene.meshOf(index) >= geometry.meshCount() || !scene.visibleCached(index)) {
             continue;
         }
@@ -1871,7 +1870,6 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         if (!drawable(index)) {
             continue;
         }
-        const scene::Object& object = scene.objects[index];
         auto [mode, sided] = bucketOf(index);
         ++batches.draws[mode][sided].count;
         uint32_t groups = groupsFor(index);
@@ -1958,7 +1956,6 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         if (!drawable(index)) {
             continue;
         }
-        const scene::Object& object = scene.objects[index];
         auto [mode, sided] = bucketOf(index);
         uint32_t slot = drawCursors[mode][sided]++;
 
