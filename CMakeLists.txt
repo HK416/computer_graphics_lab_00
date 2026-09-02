@@ -161,6 +161,14 @@ endforeach()
 
 add_custom_target(cg_lab_shaders DEPENDS ${shader_binaries} SOURCES ${shader_sources})
 
+# CMake 4.4 + Ninja + MSVC 조합에서 구성별 기본 플래그(/O2, /Od, NDEBUG)가 비어 있는 채로 캐시되는
+# 일이 있어 release 가 최적화 없이 빌드됐다. 직접 못 박는다. 기본값이 살아 있어도 중복은 무해하다.
+if(MSVC)
+    add_compile_options($<$<CONFIG:Debug>:/Od> $<$<CONFIG:Debug>:/RTC1>
+                        $<$<NOT:$<CONFIG:Debug>>:/O2> $<$<NOT:$<CONFIG:Debug>>:/Ob2>)
+    add_compile_definitions($<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+endif()
+
 add_executable(cg_lab
     src/main.cpp
     src/app/application.cpp
