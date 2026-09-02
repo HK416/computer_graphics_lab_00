@@ -853,7 +853,10 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
             ImGui::SeparatorText(name);
             return true;
         }
-        return ImGui::CollapsingHeader(name, ImGuiTreeNodeFlags_DefaultOpen);
+        // 헤더 이름이 안의 체크박스 이름("광선 반사", "경로 추적")과 같으면 ID 가 겹쳐 체크박스가
+        // 눌리지 않는다. 숨은 접미사로 헤더 ID 를 따로 둔다.
+        std::string header = std::string(name) + "##section";
+        return ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
     };
 
     // 경로 추적은 래스터 패스를 통째로 건너뛴다. 거기 딸린 설정은 눌러도 아무 일이 없으므로
