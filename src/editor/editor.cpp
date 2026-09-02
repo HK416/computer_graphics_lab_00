@@ -632,8 +632,7 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
     }
 
     uint32_t selectedMesh = active.meshOf(static_cast<uint32_t>(selectedObject));
-    if (selectedMesh < geometry.meshCount() &&
-        ImGui::CollapsingHeader("메쉬와 재질", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (selectedMesh < geometry.meshCount() && ImGui::CollapsingHeader("메쉬와 재질", ImGuiTreeNodeFlags_DefaultOpen)) {
         const gfx::GpuMesh& mesh = geometry.mesh(selectedMesh);
         ImGui::Text("삼각형 %u", mesh.indexCount / 3);
         ImGui::Text("바운딩 반지름 %.3f", mesh.boundingSphere.w);
@@ -737,8 +736,7 @@ void Editor::buildSceneView(scene::Scene& active) {
             // 움직여, 순회 도중에 재면 뒤쪽이 어긋난다.
             std::vector<std::pair<uint32_t, glm::mat4>> targets;
             for (int selected : selection) {
-                if (selected < 0 || selected >= static_cast<int>(active.objects.size()) ||
-                    ancestorSelected(selected)) {
+                if (selected < 0 || selected >= static_cast<int>(active.objects.size()) || ancestorSelected(selected)) {
                     continue;
                 }
                 auto index = static_cast<uint32_t>(selected);
@@ -757,8 +755,8 @@ void Editor::buildSceneView(scene::Scene& active) {
 
     // 장면 뷰를 왼쪽 단추로 누르면 그 아래 오브젝트를 고른다. 기즈모를 잡고 있거나 시선을 돌리는
     // 중에는 받지 않는다. 빈 곳을 누르면 선택이 풀린다.
-    if (imageClicked && !gizmoUsing && !ImGuizmo::IsOver() && !active.camera.isLooking() &&
-        geometryStore != nullptr && imageSize.x > 1.0F && imageSize.y > 1.0F) {
+    if (imageClicked && !gizmoUsing && !ImGuizmo::IsOver() && !active.camera.isLooking() && geometryStore != nullptr &&
+        imageSize.x > 1.0F && imageSize.y > 1.0F) {
         ImVec2 mouse = ImGui::GetMousePos();
         glm::vec2 uv{(mouse.x - imagePosition.x) / imageSize.x, (mouse.y - imagePosition.y) / imageSize.y};
         scene::Ray ray = active.camera.screenToRay(uv, imageSize.x / imageSize.y);
@@ -862,8 +860,17 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     }
     ImGui::Separator();
 
-    ImGui::SliderFloat("노출", &renderer.exposure, 0.05F, 8.0F, "%.2f");
     ImGui::Checkbox("와이어프레임", &renderer.wireframe);
+
+    ImGui::SeparatorText("후처리");
+    ImGui::SliderFloat("노출", &renderer.exposure, 0.05F, 8.0F, "%.2f");
+    scene::PostProcess& post = active.post;
+    ImGui::SliderFloat("Bloom 세기", &post.bloomIntensity, 0.0F, 1.0F, "%.2f");
+    ImGui::Checkbox("자동 노출", &post.autoExposure);
+    ImGui::BeginDisabled(!post.autoExposure);
+    ImGui::SliderFloat("적응 속도", &post.adaptationSpeed, 0.1F, 10.0F, "%.1f /s");
+    ImGui::DragFloatRange2("EV 범위", &post.exposureMinEv, &post.exposureMaxEv, 0.1F, -10.0F, 20.0F, "%.1f");
+    ImGui::EndDisabled();
 
     // 경로 추적은 래스터 패스를 통째로 건너뛴다. 거기 딸린 설정은 눌러도 아무 일이 없으므로
     // 디버그 뷰와 같은 이유로 잠근다.
@@ -1035,8 +1042,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
                 renderer.displayExtent().height);
 
     std::vector<gfx::UpscalerInfo> upscalers = renderer.upscalers();
-    bool dlssSelected =
-        renderer.upscaler == gfx::Upscaler::DLSS || renderer.upscaler == gfx::Upscaler::DLSS_RR;
+    bool dlssSelected = renderer.upscaler == gfx::Upscaler::DLSS || renderer.upscaler == gfx::Upscaler::DLSS_RR;
     for (const gfx::UpscalerInfo& info : upscalers) {
         // Ray Reconstruction 은 DLSS 의 한 모드다. 목록에 따로 두면 초해상과 무관한 별개 기법처럼
         // 보이고, 경로 추적을 켜야 한다는 조건도 드러나지 않는다. 아래에서 체크박스로 다룬다.
@@ -1348,8 +1354,8 @@ void Editor::updateHistory(scene::Scene& active, size_t sceneIndex) {
     // 글자를 입력하는 중에는 단축키를 받지 않는다. 이름을 고치다 장면이 되돌아가면 곤란하다.
     bool shortcutsAllowed = io.KeyCtrl && !io.WantTextInput;
     bool wantUndo = shortcutsAllowed && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false);
-    bool wantRedo = shortcutsAllowed && (ImGui::IsKeyPressed(ImGuiKey_Y, false) ||
-                                         (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)));
+    bool wantRedo = shortcutsAllowed &&
+                    (ImGui::IsKeyPressed(ImGuiKey_Y, false) || (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)));
 
     if (wantUndo && !history.undoStack.empty()) {
         history.redoStack.push_back(active.capture());

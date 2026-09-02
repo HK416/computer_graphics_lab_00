@@ -229,6 +229,7 @@ SceneSnapshot Scene::capture() const {
     snapshot.ambientColor = ambientColor;
     snapshot.ambientIntensity = ambientIntensity;
     snapshot.environment = environment;
+    snapshot.post = post;
     return snapshot;
 }
 
@@ -243,12 +244,14 @@ void Scene::restore(const SceneSnapshot& snapshot) {
     ambientColor = snapshot.ambientColor;
     ambientIntensity = snapshot.ambientIntensity;
     environment = snapshot.environment;
+    post = snapshot.post;
 }
 
 bool Scene::differsFrom(const SceneSnapshot& snapshot) const {
     if (name != snapshot.name || objects != snapshot.objects || meshRenderers != snapshot.meshRenderers ||
         lights != snapshot.lights || ambientColor != snapshot.ambientColor ||
-        ambientIntensity != snapshot.ambientIntensity || !(environment == snapshot.environment)) {
+        ambientIntensity != snapshot.ambientIntensity || !(environment == snapshot.environment) ||
+        !(post == snapshot.post)) {
         return true;
     }
     if (animators.size() != snapshot.animators.size()) {

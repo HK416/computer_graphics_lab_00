@@ -114,6 +114,21 @@ struct Environment {
     bool operator==(const Environment&) const = default;
 };
 
+// 톤 매핑 앞뒤의 후처리. Environment 와 따로 두는 이유는 그쪽 비교가 환경 맵을 다시 굽는
+// 조건이라, 여기 값을 만질 때마다 굽기가 돌면 안 되기 때문이다.
+struct PostProcess {
+    // 0 이면 Bloom 을 끈다. 흐린 이미지를 원본에 섞는 비율이다.
+    float bloomIntensity = 0.1F;
+    bool autoExposure = false;
+    // 자동 노출이 목표 값으로 옮겨 가는 속도(1/초).
+    float adaptationSpeed = 2.0F;
+    // 자동 노출이 고를 수 있는 EV100 범위.
+    float exposureMinEv = -4.0F;
+    float exposureMaxEv = 12.0F;
+
+    bool operator==(const PostProcess&) const = default;
+};
+
 // 되돌리기가 되살리는 장면 상태. 카메라와 애니메이션 재생 시각처럼 매 프레임 스스로 변하는
 // 것은 담지 않는다. 담으면 재생 중에 되돌리기 기록이 프레임마다 쌓인다.
 struct SceneSnapshot {
@@ -125,6 +140,7 @@ struct SceneSnapshot {
     glm::vec3 ambientColor{0.25F};
     float ambientIntensity = 1.0F;
     Environment environment;
+    PostProcess post;
 };
 
 struct Scene {
@@ -138,6 +154,7 @@ struct Scene {
     glm::vec3 ambientColor{0.25F};
     float ambientIntensity = 1.0F;
     Environment environment;
+    PostProcess post;
 
     // 애니메이션 시간을 진행시키고 조인트 행렬을 다시 만든다. 재생 중이 아니고 클립도 그대로면
     // 포즈 계산 자체를 건너뛴다.

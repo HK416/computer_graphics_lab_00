@@ -1,0 +1,41 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+
+#include "bindless.glsl"
+#include "exposure.glsl"
+
+// 장면 휘도의 log2 히스토그램. 워크그룹 공유 메모리에 먼저 모은 뒤 전역 버퍼에 한 번만 더한다.
+// 입력은 Bloom 의 작은 밉이라 화소 수가 적고, 이미 평균이 잡혀 있어 잡음에 덜 흔들린다.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform HistogramPushConstants {
+    HistogramBuffer histogram;
+    uint sourceTexture;
+    ivec2 sourceSize;
+    // 빈 0 은 이 값보다 어두운(사실상 검은) 화소가 차지하고 평균에서 빠진다.
+    float minLog;
+    float inverseLogRange;
+} push;
+
+shared uint bins[HISTOGRAM_BINS];
+
+void main() {
+    uint local = gl_LocalInvocationIndex;
+    bins[local] = 0u;
+    barrier();
+
+    ivec2 coordinate = ivec2(gl_GlobalInvocationID.xy);
+    if (coordinate.x < push.sourceSize.x && coordinate.y < push.sourceSize.y) {
+        vec2 uv = (vec2(coordinate) + 0.5) / vec2(push.sourceSize);
+        float value = luminance(fetchBindlessLod(push.sourceTexture, uv, 0.0).rgb);
+        uint bin = 0u;
+        if (value > 1e-4) {
+            float normalized = clamp((log2(value) - push.minLog) * push.inverseLogRange, 0.0, 1.0);
+            bin = uint(normalized * float(HISTOGRAM_BINS - 2u)) + 1u;
+        }
+        atomicAdd(bins[bin], 1u);
+    }
+    barrier();
+
+    atomicAdd(push.histogram.items[local], bins[local]);
+}

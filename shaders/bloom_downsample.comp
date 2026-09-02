@@ -1,0 +1,74 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+
+#include "bindless.glsl"
+#include "exposure.glsl"
+
+// Bloom 밉 한 단계를 만든다. 13탭(Jimenez, CoD: Advanced Warfare) 다운샘플이라 2x2 상자보다
+// 깜빡임이 적다. 첫 단계에서만 반딧불이를 억제하려고 휘도 가중(Karis) 평균을 건다.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(push_constant) uniform BloomPushConstants {
+    uint sourceTexture;
+    uint destinationStorage;
+    vec2 sourceTexelSize;
+    ivec2 destinationSize;
+    // 0 이 아니면 경로 추적 누적 버퍼라 표본 수로 나눈다. 첫 단계에만 온다.
+    uint sampleCount;
+    // 첫 단계면 1.
+    uint firstLevel;
+} bloom;
+
+vec3 fetch(vec2 uv) {
+    vec3 color = sampleBindless(bloom.sourceTexture, uv).rgb;
+    if (bloom.sampleCount > 0u) {
+        color /= float(bloom.sampleCount);
+    }
+    // NaN 이나 무한대가 한 번 들어오면 밉 사슬 전체가 오염된다.
+    return clamp(color, vec3(0.0), vec3(65504.0));
+}
+
+// 네 표본의 평균. 첫 단계에서는 밝은 표본의 가중치를 줄여 한 화소짜리 반딧불이를 누른다.
+vec3 average(vec3 a, vec3 b, vec3 c, vec3 d) {
+    if (bloom.firstLevel == 0u) {
+        return (a + b + c + d) * 0.25;
+    }
+    float wa = 1.0 / (1.0 + luminance(a));
+    float wb = 1.0 / (1.0 + luminance(b));
+    float wc = 1.0 / (1.0 + luminance(c));
+    float wd = 1.0 / (1.0 + luminance(d));
+    return (a * wa + b * wb + c * wc + d * wd) / (wa + wb + wc + wd);
+}
+
+void main() {
+    ivec2 destination = ivec2(gl_GlobalInvocationID.xy);
+    if (destination.x >= bloom.destinationSize.x || destination.y >= bloom.destinationSize.y) {
+        return;
+    }
+    vec2 uv = (vec2(destination) + 0.5) / vec2(bloom.destinationSize);
+    vec2 texel = bloom.sourceTexelSize;
+
+    // 바깥 3x3 은 두 텍셀, 안쪽 2x2 는 한 텍셀 간격이다.
+    vec3 a = fetch(uv + texel * vec2(-2.0, -2.0));
+    vec3 b = fetch(uv + texel * vec2(0.0, -2.0));
+    vec3 c = fetch(uv + texel * vec2(2.0, -2.0));
+    vec3 d = fetch(uv + texel * vec2(-2.0, 0.0));
+    vec3 e = fetch(uv);
+    vec3 f = fetch(uv + texel * vec2(2.0, 0.0));
+    vec3 g = fetch(uv + texel * vec2(-2.0, 2.0));
+    vec3 h = fetch(uv + texel * vec2(0.0, 2.0));
+    vec3 i = fetch(uv + texel * vec2(2.0, 2.0));
+    vec3 j = fetch(uv + texel * vec2(-1.0, -1.0));
+    vec3 k = fetch(uv + texel * vec2(1.0, -1.0));
+    vec3 l = fetch(uv + texel * vec2(-1.0, 1.0));
+    vec3 m = fetch(uv + texel * vec2(1.0, 1.0));
+
+    // 안쪽 사각형이 0.5, 바깥 네 사각형이 0.125 씩. 합이 1 이다.
+    vec3 result = average(j, k, l, m) * 0.5;
+    result += average(a, b, d, e) * 0.125;
+    result += average(b, c, e, f) * 0.125;
+    result += average(d, e, g, h) * 0.125;
+    result += average(e, f, h, i) * 0.125;
+
+    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(bloom.destinationStorage)], destination, vec4(result, 1.0));
+}

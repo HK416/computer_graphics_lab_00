@@ -80,6 +80,10 @@ set(shader_sources
     shaders/fullscreen.vert
     shaders/oit_composite.frag
     shaders/tonemap.frag
+    shaders/bloom_downsample.comp
+    shaders/bloom_upsample.comp
+    shaders/exposure_histogram.comp
+    shaders/exposure_average.comp
     shaders/upscale.frag
     shaders/sky.frag
     shaders/taau.comp

@@ -150,6 +150,15 @@ struct RenderTargets {
     uint32_t guideRoughnessStorageSlot = 0;
     uint32_t guideDepthStorageSlot = 0;
 
+    // Bloom 밉 사슬. 절반 해상도에서 시작해 단계마다 반으로 줄이고, 올라오며 더한다. 컴퓨트가
+    // 쓰고 읽으므로 계속 GENERAL 이다.
+    Image bloom;
+    VkExtent2D bloomExtent{};
+    std::vector<VkImageView> bloomMipViews;
+    std::vector<uint32_t> bloomStorageSlots;
+    // 밉마다 선형 샘플러로 읽는 슬롯. 업샘플 텐트 필터가 이중 선형 보간을 필요로 한다.
+    std::vector<uint32_t> bloomSampledSlots;
+
     // 경로 추적 누적 버퍼. 카메라가 멈춰 있는 동안 표본을 쌓는다.
     Image pathAccumulation;
     uint32_t pathAccumulationStorageSlot = 0;
@@ -365,6 +374,13 @@ private:
     void createSkinPipeline();
     void createShadowPipeline();
     void createSsaoPipelines();
+    void createBloomPipelines();
+    // Bloom 밉 사슬과 자동 노출. 톤 매핑이 읽을 이미지를 원본으로 받는다.
+    void recordPostEffects(VkCommandBuffer commandBuffer,
+                           const scene::PostProcess& post,
+                           uint32_t sourceSlot,
+                           VkExtent2D sourceExtent,
+                           uint32_t sampleCount);
     void recordShadowPass(VkCommandBuffer commandBuffer);
     void recordSsaoPass(VkCommandBuffer commandBuffer, const Frame& frame);
     void recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches& batches);
@@ -388,6 +404,20 @@ private:
     std::unique_ptr<Swapchain> swapchain;
     RenderTargets targets;
     VkSampler postSampler = VK_NULL_HANDLE;
+    // Bloom 처럼 보간이 필요한 후처리가 쓴다. 밉을 명시적으로 고르므로 maxLod 를 열어 둔다.
+    VkSampler linearSampler = VK_NULL_HANDLE;
+    VkPipelineLayout bloomPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline bloomDownsamplePipeline = VK_NULL_HANDLE;
+    VkPipeline bloomUpsamplePipeline = VK_NULL_HANDLE;
+    VkPipelineLayout histogramPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline histogramPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout exposurePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline exposurePipeline = VK_NULL_HANDLE;
+    // 자동 노출. 히스토그램은 프레임마다 지우고, 노출 값은 프레임을 넘어 적응한다.
+    Buffer histogramBuffer;
+    Buffer exposureBuffer;
+    // 참이면 다음 자동 노출은 적응 없이 목표 값으로 바로 간다.
+    bool exposureNeedsReset = true;
     VkExtent2D currentDisplayExtent{};
     VkExtent2D currentRenderExtent{};
     uint64_t generation = 0;

@@ -176,12 +176,57 @@ struct CompositePushConstants {
     uint32_t revealageTexture;
 };
 
+// shaders/tonemap.frag 의 푸시 상수와 배치가 같아야 한다.
 struct TonemapPushConstants {
     VkDeviceAddress camera;
+    VkDeviceAddress exposureBuffer;
     uint32_t colorTexture;
     float exposure;
     uint32_t sampleCount;
+    uint32_t bloomTexture;
+    float bloomIntensity;
+    uint32_t autoExposure;
 };
+
+// shaders/bloom_downsample.comp, bloom_upsample.comp 와 배치가 같아야 한다.
+struct BloomPushConstants {
+    uint32_t sourceTexture;
+    uint32_t destinationStorage;
+    float sourceTexelSize[2];
+    int32_t destinationSize[2];
+    uint32_t sampleCount;
+    uint32_t firstLevel;
+};
+
+// shaders/exposure_histogram.comp 와 배치가 같아야 한다.
+struct HistogramPushConstants {
+    VkDeviceAddress histogram;
+    uint32_t sourceTexture;
+    int32_t sourceSize[2];
+    float minLog;
+    float inverseLogRange;
+};
+
+// shaders/exposure_average.comp 와 배치가 같아야 한다.
+struct ExposurePushConstants {
+    VkDeviceAddress histogram;
+    VkDeviceAddress exposure;
+    float minLog;
+    float logRange;
+    float deltaSeconds;
+    float adaptationSpeed;
+    float minEv;
+    float maxEv;
+    uint32_t reset;
+};
+
+// Bloom 밉 사슬 최대 단계. 절반 해상도에서 시작하므로 6단계면 1080p 에서 30x17 까지 내려간다.
+constexpr uint32_t BLOOM_MAX_LEVELS = 6;
+// 히스토그램이 담는 log2 휘도 범위. 바깥은 양 끝 빈으로 몰린다.
+constexpr float EXPOSURE_MIN_LOG = -10.0F;
+constexpr float EXPOSURE_MAX_LOG = 16.0F;
+// shaders/exposure.glsl 의 HISTOGRAM_BINS 와 같아야 한다.
+constexpr uint32_t HISTOGRAM_BINS = 256;
 
 struct SkyPushConstants {
     VkDeviceAddress camera;
@@ -243,6 +288,19 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& 
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     VK_CHECK(vkCreateSampler(context.device, &samplerInfo, nullptr, &postSampler));
 
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
+    VK_CHECK(vkCreateSampler(context.device, &samplerInfo, nullptr, &linearSampler));
+
+    histogramBuffer = createBuffer(context,
+                                   sizeof(uint32_t) * HISTOGRAM_BINS,
+                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                   MemoryLocation::DEVICE,
+                                   "휘도 히스토그램");
+    exposureBuffer =
+        createBuffer(context, sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, MemoryLocation::DEVICE, "자동 노출");
+
     // NGX 는 초기화해 봐야 쓸 수 있는지 알 수 있다. 편집기가 항목을 켤 수 있으려면 고르기 전에
     // 미리 띄워 둬야 한다.
     startDlssRuntime(context);
@@ -257,6 +315,7 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& 
     }
     createMeshPipelines();
     createPostPipelines();
+    createBloomPipelines();
     createCullPipeline();
     createSkinPipeline();
     createShadowPipeline();
@@ -302,6 +361,15 @@ Renderer::~Renderer() {
     vkDestroyPipeline(context.device, skinPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, skinPipelineLayout, nullptr);
     destroyBuffer(context, skinnedVertexBuffer);
+    vkDestroyPipeline(context.device, exposurePipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, exposurePipelineLayout, nullptr);
+    vkDestroyPipeline(context.device, histogramPipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, histogramPipelineLayout, nullptr);
+    vkDestroyPipeline(context.device, bloomUpsamplePipeline, nullptr);
+    vkDestroyPipeline(context.device, bloomDownsamplePipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, bloomPipelineLayout, nullptr);
+    destroyBuffer(context, exposureBuffer);
+    destroyBuffer(context, histogramBuffer);
     vkDestroyPipeline(context.device, ssaoBlurPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, ssaoBlurPipelineLayout, nullptr);
     vkDestroyPipeline(context.device, ssaoPipeline, nullptr);
@@ -335,6 +403,10 @@ Renderer::~Renderer() {
         vkDestroyImageView(context.device, view, nullptr);
     }
     destroyImage(context, targets.hzb);
+    for (VkImageView view : targets.bloomMipViews) {
+        vkDestroyImageView(context.device, view, nullptr);
+    }
+    destroyImage(context, targets.bloom);
     for (VkImageView view : targets.shadowLayerViews) {
         vkDestroyImageView(context.device, view, nullptr);
     }
@@ -355,6 +427,7 @@ Renderer::~Renderer() {
     destroyImage(context, targets.velocity);
     destroyImage(context, targets.depth);
     destroyImage(context, targets.color);
+    vkDestroySampler(context.device, linearSampler, nullptr);
     vkDestroySampler(context.device, postSampler, nullptr);
     swapchain.reset();
 }
@@ -438,7 +511,8 @@ std::vector<Renderer::TargetView> Renderer::targetViews() const {
                                   {"모션 벡터", targets.velocity.view, READ_ONLY},
                                   {"시간축 업스케일 (HDR)", targets.upscaledColor.view, VK_IMAGE_LAYOUT_GENERAL},
                                   // HZB 는 컴퓨트가 쓰고 읽으므로 계속 GENERAL 이다.
-                                  {"HZB", targets.hzb.view, VK_IMAGE_LAYOUT_GENERAL}};
+                                  {"HZB", targets.hzb.view, VK_IMAGE_LAYOUT_GENERAL},
+                                  {"Bloom", targets.bloom.view, VK_IMAGE_LAYOUT_GENERAL}};
     if (oitTargetsValid) {
         views.push_back({"OIT 누적", targets.oitAccumulation.view, READ_ONLY});
         views.push_back({"OIT 잔여 투과율", targets.oitRevealage.view, READ_ONLY});
@@ -487,8 +561,7 @@ void Renderer::createRenderTargets() {
     ImageDesc velocityDesc;
     velocityDesc.extent = extent;
     velocityDesc.format = VELOCITY_FORMAT;
-    velocityDesc.usage =
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+    velocityDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
     targets.velocity = createImage(context, velocityDesc, "모션 벡터");
 
     ImageDesc accumulationDesc = colorDesc;
@@ -522,8 +595,7 @@ void Renderer::createRenderTargets() {
     upscaledDesc.format = COLOR_FORMAT;
     // NGX 는 출력 이미지를 vkCmdClearColorImage 로 지우는 경로가 있어 전송 대상 자격이 필요하다.
     // 렌더 배율 1.0(DLAA)일 때만 타서 축소 배율 시험에서는 드러나지 않았다.
-    upscaledDesc.usage =
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    upscaledDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     targets.upscaledColor = createImage(context, upscaledDesc, "시간축 업스케일 결과");
 
     // RR 안내 버퍼는 전부 렌더 해상도이고 광선 생성 셰이더가 스토리지로 쓴다. 깊이까지 여기 두는
@@ -555,6 +627,36 @@ void Renderer::createRenderTargets() {
     hzbDesc.mipLevels = hzbLevels;
     hzbDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     targets.hzb = createImage(context, hzbDesc, "HZB");
+
+    for (VkImageView view : targets.bloomMipViews) {
+        vkDestroyImageView(context.device, view, nullptr);
+    }
+    targets.bloomMipViews.clear();
+    destroyImage(context, targets.bloom);
+
+    targets.bloomExtent = targets.hzbExtent;
+    uint32_t bloomLevels =
+        std::min(BLOOM_MAX_LEVELS,
+                 1U + static_cast<uint32_t>(
+                          std::floor(std::log2(std::min(targets.bloomExtent.width, targets.bloomExtent.height)))));
+    ImageDesc bloomDesc;
+    bloomDesc.extent = {targets.bloomExtent.width, targets.bloomExtent.height, 1};
+    bloomDesc.format = COLOR_FORMAT;
+    bloomDesc.mipLevels = bloomLevels;
+    bloomDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    targets.bloom = createImage(context, bloomDesc, "Bloom");
+    targets.bloomMipViews.resize(bloomLevels);
+    for (uint32_t level = 0; level < bloomLevels; ++level) {
+        VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        viewInfo.image = targets.bloom.handle;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = COLOR_FORMAT;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = level;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.layerCount = 1;
+        VK_CHECK(vkCreateImageView(context.device, &viewInfo, nullptr, &targets.bloomMipViews[level]));
+    }
 
     // 그림자 맵은 화면 크기와 무관하므로 한 번만 만든다. 층 하나가 시점 하나다.
     if (targets.shadowAtlas.handle == VK_NULL_HANDLE) {
@@ -637,6 +739,13 @@ void Renderer::createRenderTargets() {
         for (size_t level = 0; level < targets.hzbMipViews.size(); ++level) {
             targets.hzbStorageSlots[level] = bindless.addStorageImage(targets.hzbMipViews[level]);
         }
+        targets.bloomStorageSlots.resize(targets.bloomMipViews.size());
+        targets.bloomSampledSlots.resize(targets.bloomMipViews.size());
+        for (size_t level = 0; level < targets.bloomMipViews.size(); ++level) {
+            targets.bloomStorageSlots[level] = bindless.addStorageImageRgba16(targets.bloomMipViews[level]);
+            targets.bloomSampledSlots[level] =
+                bindless.add(targets.bloomMipViews[level], linearSampler, VK_IMAGE_LAYOUT_GENERAL);
+        }
         targets.slotsAllocated = true;
     } else {
         bindless.update(targets.colorSlot, targets.color.view, postSampler);
@@ -666,10 +775,25 @@ void Renderer::createRenderTargets() {
             size_t source = std::min(level, targets.hzbMipViews.size() - 1);
             bindless.updateStorageImage(targets.hzbStorageSlots[level], targets.hzbMipViews[source]);
         }
+        // Bloom 도 같다. 단계가 늘어나면 슬롯을 더 잡고, 줄어들면 남는 슬롯을 마지막 뷰로 채운다.
+        for (size_t level = targets.bloomStorageSlots.size(); level < targets.bloomMipViews.size(); ++level) {
+            targets.bloomStorageSlots.push_back(bindless.addStorageImageRgba16(targets.bloomMipViews[level]));
+            targets.bloomSampledSlots.push_back(
+                bindless.add(targets.bloomMipViews[level], linearSampler, VK_IMAGE_LAYOUT_GENERAL));
+        }
+        for (size_t level = 0; level < targets.bloomStorageSlots.size(); ++level) {
+            size_t source = std::min(level, targets.bloomMipViews.size() - 1);
+            bindless.updateStorageImageRgba16(targets.bloomStorageSlots[level], targets.bloomMipViews[source]);
+            bindless.update(targets.bloomSampledSlots[level],
+                            targets.bloomMipViews[source],
+                            linearSampler,
+                            VK_IMAGE_LAYOUT_GENERAL);
+        }
     }
     hzbNeedsClear = true;
     ssaoNeedsClear = true;
     postTargetsNeedInit = true;
+    exposureNeedsReset = true;
     pathSampleCount = 0;
     if (temporalUpscaler != nullptr) {
         temporalUpscaler->resize(currentRenderExtent, currentDisplayExtent);
@@ -1227,6 +1351,194 @@ void Renderer::recordShadowPass(VkCommandBuffer commandBuffer) {
                      layer,
                      1);
     }
+}
+
+void Renderer::createBloomPipelines() {
+    VkDescriptorSetLayout bindlessLayout = bindless.layout();
+    auto createLayout = [&](uint32_t size) {
+        VkPushConstantRange range{};
+        range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        range.size = size;
+        VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &bindlessLayout;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges = &range;
+        VkPipelineLayout layout = VK_NULL_HANDLE;
+        VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &layout));
+        return layout;
+    };
+    auto createPipeline = [&](const char* shader, VkPipelineLayout layout) {
+        VkShaderModule module = createShaderModule(context.device, shader);
+        VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        info.stage = shaderStage(VK_SHADER_STAGE_COMPUTE_BIT, module);
+        info.layout = layout;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline));
+        vkDestroyShaderModule(context.device, module, nullptr);
+        return pipeline;
+    };
+
+    bloomPipelineLayout = createLayout(sizeof(BloomPushConstants));
+    bloomDownsamplePipeline = createPipeline("bloom_downsample.comp.spv", bloomPipelineLayout);
+    bloomUpsamplePipeline = createPipeline("bloom_upsample.comp.spv", bloomPipelineLayout);
+    histogramPipelineLayout = createLayout(sizeof(HistogramPushConstants));
+    histogramPipeline = createPipeline("exposure_histogram.comp.spv", histogramPipelineLayout);
+    exposurePipelineLayout = createLayout(sizeof(ExposurePushConstants));
+    exposurePipeline = createPipeline("exposure_average.comp.spv", exposurePipelineLayout);
+}
+
+void Renderer::recordPostEffects(VkCommandBuffer commandBuffer,
+                                 const scene::PostProcess& post,
+                                 uint32_t sourceSlot,
+                                 VkExtent2D sourceExtent,
+                                 uint32_t sampleCount) {
+    bool useBloom = post.bloomIntensity > 0.0F;
+    if (!useBloom && !post.autoExposure) {
+        // 다음에 켜면 옛 값에서 느리게 옮겨 가지 않고 바로 맞춘다.
+        exposureNeedsReset = true;
+        return;
+    }
+    uint32_t zone = frameProfiler.begin("후처리", commandBuffer);
+    VkDescriptorSet bindlessSet = bindless.set();
+
+    auto memoryBarrier = [&](VkPipelineStageFlags2 sourceStage,
+                             VkAccessFlags2 sourceAccess,
+                             VkPipelineStageFlags2 destinationStage,
+                             VkAccessFlags2 destinationAccess) {
+        VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        barrier.srcStageMask = sourceStage;
+        barrier.srcAccessMask = sourceAccess;
+        barrier.dstStageMask = destinationStage;
+        barrier.dstAccessMask = destinationAccess;
+        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dependency.memoryBarrierCount = 1;
+        dependency.pMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(commandBuffer, &dependency);
+    };
+    auto extentOf = [&](size_t level) {
+        return VkExtent2D{std::max(targets.bloomExtent.width >> level, 1U),
+                          std::max(targets.bloomExtent.height >> level, 1U)};
+    };
+
+    // 지난 프레임 톤 매핑이 Bloom 과 노출 버퍼를 아직 읽고 있을 수 있다.
+    memoryBarrier(VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    if (post.autoExposure) {
+        vkCmdFillBuffer(commandBuffer, histogramBuffer.handle, 0, VK_WHOLE_SIZE, 0);
+    }
+
+    // 1) 아래로 내려가며 밉 사슬을 만든다. 자동 노출도 여기서 나온 작은 밉을 읽는다.
+    size_t levels = targets.bloomStorageSlots.size();
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, bloomDownsamplePipeline);
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, bloomPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+    VkExtent2D source = sourceExtent;
+    for (size_t level = 0; level < levels; ++level) {
+        VkExtent2D destination = extentOf(level);
+        BloomPushConstants pushConstants{};
+        pushConstants.sourceTexture = level == 0 ? sourceSlot : targets.bloomSampledSlots[level - 1];
+        pushConstants.destinationStorage = targets.bloomStorageSlots[level];
+        pushConstants.sourceTexelSize[0] = 1.0F / static_cast<float>(source.width);
+        pushConstants.sourceTexelSize[1] = 1.0F / static_cast<float>(source.height);
+        pushConstants.destinationSize[0] = static_cast<int32_t>(destination.width);
+        pushConstants.destinationSize[1] = static_cast<int32_t>(destination.height);
+        pushConstants.sampleCount = level == 0 ? sampleCount : 0U;
+        pushConstants.firstLevel = level == 0 ? 1U : 0U;
+        vkCmdPushConstants(
+            commandBuffer, bloomPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(commandBuffer, (destination.width + 7) / 8, (destination.height + 7) / 8, 1);
+        memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        source = destination;
+    }
+
+    // 2) 자동 노출. 2단계 밉(1/8 해상도)이면 히스토그램에 충분하다.
+    if (post.autoExposure) {
+        size_t histogramLevel = std::min<size_t>(2, levels - 1);
+        VkExtent2D histogramExtent = extentOf(histogramLevel);
+        memoryBarrier(VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                      VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                      VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, histogramPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, histogramPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+        HistogramPushConstants histogram{};
+        histogram.histogram = histogramBuffer.address;
+        histogram.sourceTexture = targets.bloomSampledSlots[histogramLevel];
+        histogram.sourceSize[0] = static_cast<int32_t>(histogramExtent.width);
+        histogram.sourceSize[1] = static_cast<int32_t>(histogramExtent.height);
+        histogram.minLog = EXPOSURE_MIN_LOG;
+        histogram.inverseLogRange = 1.0F / (EXPOSURE_MAX_LOG - EXPOSURE_MIN_LOG);
+        vkCmdPushConstants(
+            commandBuffer, histogramPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(histogram), &histogram);
+        vkCmdDispatch(commandBuffer, (histogramExtent.width + 15) / 16, (histogramExtent.height + 15) / 16, 1);
+        memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                      VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, exposurePipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, exposurePipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+        ExposurePushConstants exposurePush{};
+        exposurePush.histogram = histogramBuffer.address;
+        exposurePush.exposure = exposureBuffer.address;
+        exposurePush.minLog = EXPOSURE_MIN_LOG;
+        exposurePush.logRange = EXPOSURE_MAX_LOG - EXPOSURE_MIN_LOG;
+        exposurePush.deltaSeconds = frameDeltaSeconds;
+        exposurePush.adaptationSpeed = post.adaptationSpeed;
+        exposurePush.minEv = post.exposureMinEv;
+        exposurePush.maxEv = std::max(post.exposureMaxEv, post.exposureMinEv);
+        exposurePush.reset = exposureNeedsReset ? 1U : 0U;
+        vkCmdPushConstants(
+            commandBuffer, exposurePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(exposurePush), &exposurePush);
+        vkCmdDispatch(commandBuffer, 1, 1, 1);
+        exposureNeedsReset = false;
+    } else {
+        exposureNeedsReset = true;
+    }
+
+    // 3) 위로 올라오며 텐트 필터로 더한다. 0단계에 모든 단계가 겹쳐 쌓인다.
+    if (useBloom) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, bloomUpsamplePipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, bloomPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+        for (size_t level = levels - 1; level > 0; --level) {
+            VkExtent2D from = extentOf(level);
+            VkExtent2D destination = extentOf(level - 1);
+            BloomPushConstants pushConstants{};
+            pushConstants.sourceTexture = targets.bloomSampledSlots[level];
+            pushConstants.destinationStorage = targets.bloomStorageSlots[level - 1];
+            pushConstants.sourceTexelSize[0] = 1.0F / static_cast<float>(from.width);
+            pushConstants.sourceTexelSize[1] = 1.0F / static_cast<float>(from.height);
+            pushConstants.destinationSize[0] = static_cast<int32_t>(destination.width);
+            pushConstants.destinationSize[1] = static_cast<int32_t>(destination.height);
+            vkCmdPushConstants(commandBuffer,
+                               bloomPipelineLayout,
+                               VK_SHADER_STAGE_COMPUTE_BIT,
+                               0,
+                               sizeof(pushConstants),
+                               &pushConstants);
+            vkCmdDispatch(commandBuffer, (destination.width + 7) / 8, (destination.height + 7) / 8, 1);
+            memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                          VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                          VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        }
+    }
+
+    // 톤 매핑(프래그먼트)이 Bloom 0단계와 노출 버퍼를 읽는다.
+    memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    frameProfiler.end(zone, commandBuffer);
 }
 
 void Renderer::recordSsaoPass(VkCommandBuffer commandBuffer, const Frame& frame) {
@@ -2038,10 +2350,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
             skinnedVertexCursor += vertexCount;
             objectSkinnedBlas[index] = static_cast<uint32_t>(skinnedInstances.size());
             skinnedInstances.push_back(SkinnedInstance{scene.meshOf(index), skinnedVertexOffset});
-            skinDispatches.push_back(SkinDispatch{static_cast<uint32_t>(mesh.vertexOffset),
-                                                  skinnedVertexOffset,
-                                                  jointOffset,
-                                                  vertexCount});
+            skinDispatches.push_back(
+                SkinDispatch{static_cast<uint32_t>(mesh.vertexOffset), skinnedVertexOffset, jointOffset, vertexCount});
         }
         instances[slot].skinnedVertexOffset = skinnedVertexOffset;
 
@@ -2075,13 +2385,12 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         waitIdle();
         destroyBuffer(context, skinnedVertexBuffer);
         skinnedVertexCapacity = skinnedVertexCursor * 2;
-        skinnedVertexBuffer =
-            createBuffer(context,
-                         static_cast<VkDeviceSize>(skinnedVertexCapacity) * sizeof(asset::Vertex),
-                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                         MemoryLocation::DEVICE,
-                         "스킨 정점");
+        skinnedVertexBuffer = createBuffer(context,
+                                           static_cast<VkDeviceSize>(skinnedVertexCapacity) * sizeof(asset::Vertex),
+                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+                                           MemoryLocation::DEVICE,
+                                           "스킨 정점");
     }
 
     auto* meshTasks = static_cast<VkDrawMeshTasksIndirectCommandEXT*>(frame.meshTaskIndirectBuffer.mapped);
@@ -2111,9 +2420,9 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         uint32_t phases = jitterPhaseCount(currentRenderExtent.width, currentDisplayExtent.width);
         currentJitter = haltonJitter(jitterIndex % phases + 1);
         ++jitterIndex;
-        jitterNdc = 2.0F * currentJitter /
-                    glm::vec2{static_cast<float>(currentRenderExtent.width),
-                              static_cast<float>(currentRenderExtent.height)};
+        jitterNdc =
+            2.0F * currentJitter /
+            glm::vec2{static_cast<float>(currentRenderExtent.width), static_cast<float>(currentRenderExtent.height)};
     }
     glm::mat4 cameraViewProjection =
         glm::translate(glm::mat4{1.0F}, glm::vec3{jitterNdc, 0.0F}) * unjitteredViewProjection;
@@ -2683,6 +2992,15 @@ void Renderer::recordCommands(Frame& frame,
                      0,
                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        imageBarrier(commandBuffer,
+                     targets.bloom.handle,
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_IMAGE_LAYOUT_GENERAL,
+                     VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                     0,
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         postTargetsNeedInit = false;
     }
 
@@ -3075,6 +3393,18 @@ void Renderer::recordCommands(Frame& frame,
         tonemapPushConstants.colorTexture = targets.upscaledColorSlot;
     }
 
+    // Bloom 과 자동 노출은 톤 매핑이 읽을 바로 그 이미지에서 만든다. 세 갈래(HDR 색상, 시간축
+    // 업스케일 결과, 경로 추적 누적) 어느 쪽이든 같은 자리에서 같은 결과를 낸다.
+    recordPostEffects(commandBuffer,
+                      scene.post,
+                      tonemapPushConstants.colorTexture,
+                      temporalUpscale ? currentDisplayExtent : currentRenderExtent,
+                      tonemapPushConstants.sampleCount);
+    tonemapPushConstants.exposureBuffer = exposureBuffer.address;
+    tonemapPushConstants.bloomTexture = targets.bloomSampledSlots[0];
+    tonemapPushConstants.bloomIntensity = scene.post.bloomIntensity;
+    tonemapPushConstants.autoExposure = scene.post.autoExposure ? 1U : 0U;
+
     // 시간축 경로는 이미 표시 해상도라 톤 매핑이 곧바로 표시 이미지를 채운다. 그렇지 않으면
     // 렌더 해상도 톤 매핑 결과를 만들고 공간 업스케일이 확대한다.
     uint32_t tonemapZone = frameProfiler.begin("톤 매핑", commandBuffer);
@@ -3090,7 +3420,8 @@ void Renderer::recordCommands(Frame& frame,
                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
 
-    VkRenderingAttachmentInfo tonemappedColor = colorAttachment(tonemapTarget.view, VK_ATTACHMENT_LOAD_OP_DONT_CARE, {});
+    VkRenderingAttachmentInfo tonemappedColor =
+        colorAttachment(tonemapTarget.view, VK_ATTACHMENT_LOAD_OP_DONT_CARE, {});
     VkRenderingInfo tonemapPass{VK_STRUCTURE_TYPE_RENDERING_INFO};
     tonemapPass.renderArea.extent = tonemapExtent;
     tonemapPass.layerCount = 1;

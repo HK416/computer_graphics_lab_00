@@ -120,6 +120,11 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
                                {"ground", toJson(scene.environment.groundColor)},
                                {"intensity", scene.environment.intensity},
                                {"yaw", scene.environment.yawDegrees}};
+    document["post"] = {{"bloomIntensity", scene.post.bloomIntensity},
+                        {"autoExposure", scene.post.autoExposure},
+                        {"adaptationSpeed", scene.post.adaptationSpeed},
+                        {"exposureMinEv", scene.post.exposureMinEv},
+                        {"exposureMaxEv", scene.post.exposureMaxEv}};
 
     json lights = json::array();
     for (const Light& light : scene.lights) {
@@ -222,6 +227,15 @@ SceneFile readScene(const std::string& text) {
     target.intensity = environment.value("intensity", target.intensity);
     target.yawDegrees = environment.value("yaw", target.yawDegrees);
 
+    // 옛 파일에는 없는 키다. 빠진 값은 기본값을 쓴다.
+    const json& post = document.value("post", json::object());
+    PostProcess& postTarget = file.scene.post;
+    postTarget.bloomIntensity = post.value("bloomIntensity", postTarget.bloomIntensity);
+    postTarget.autoExposure = post.value("autoExposure", postTarget.autoExposure);
+    postTarget.adaptationSpeed = post.value("adaptationSpeed", postTarget.adaptationSpeed);
+    postTarget.exposureMinEv = post.value("exposureMinEv", postTarget.exposureMinEv);
+    postTarget.exposureMaxEv = post.value("exposureMaxEv", postTarget.exposureMaxEv);
+
     for (const json& entry : document.value("lights", json::array())) {
         Light light;
         light.type = toLightType(entry.value("type", std::string{"directional"}));
@@ -263,8 +277,7 @@ SceneFile readScene(const std::string& text) {
         file.objectLocalMeshes.push_back(entry.value("mesh", 0U));
         // 전역 메쉬 번호는 모델을 올린 뒤에야 정해진다. 부품만 미리 붙여 스킨을 담아 둔다.
         if (file.objectModels.back() >= 0 || skin >= 0) {
-            file.scene.attachMeshRenderer(
-                static_cast<uint32_t>(file.scene.objects.size() - 1), INVALID_MESH, skin);
+            file.scene.attachMeshRenderer(static_cast<uint32_t>(file.scene.objects.size() - 1), INVALID_MESH, skin);
         }
     }
     return file;

@@ -1,0 +1,62 @@
+#version 460
+
+#include "exposure.glsl"
+
+// 히스토그램에서 평균 log2 휘도를 구해 노출을 정하고, 지난 프레임 값에서 부드럽게 옮겨 간다.
+// 워크그룹 하나가 256 빈을 병렬 합산한다.
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform ExposurePushConstants {
+    HistogramBuffer histogram;
+    ExposureBuffer exposure;
+    float minLog;
+    float logRange;
+    float deltaSeconds;
+    float adaptationSpeed;
+    float minEv;
+    float maxEv;
+    // 1 이면 적응 없이 목표 값으로 바로 간다. 첫 프레임과 크기 변경 뒤에 쓴다.
+    uint reset;
+} push;
+
+shared float weighted[HISTOGRAM_BINS];
+shared uint counts[HISTOGRAM_BINS];
+
+void main() {
+    uint local = gl_LocalInvocationIndex;
+    uint count = push.histogram.items[local];
+    // 빈 0 은 검은 화소다. 평균에서 빼야 어두운 배경이 노출을 끌어올리지 않는다.
+    counts[local] = local == 0u ? 0u : count;
+    weighted[local] = float(counts[local]) * float(local);
+    barrier();
+
+    for (uint stride = HISTOGRAM_BINS / 2u; stride > 0u; stride >>= 1u) {
+        if (local < stride) {
+            counts[local] += counts[local + stride];
+            weighted[local] += weighted[local + stride];
+        }
+        barrier();
+    }
+
+    if (local != 0u) {
+        return;
+    }
+    float previous = push.exposure.exposure;
+    if (counts[0] == 0u) {
+        // 전부 검으면 정할 근거가 없다. 지난 값을 둔다.
+        push.exposure.exposure = push.reset != 0u ? 1.0 : previous;
+        return;
+    }
+    float averageBin = weighted[0] / float(counts[0]);
+    float averageLog = (averageBin - 1.0) / float(HISTOGRAM_BINS - 2u) * push.logRange + push.minLog;
+    float averageLuminance = exp2(averageLog);
+
+    // EV100 = log2(L * 100 / 12.5), 노출 = 1 / (1.2 * 2^EV100). 평균 휘도가 중간 회색에 오도록 한다.
+    float ev = clamp(log2(averageLuminance * 8.0), push.minEv, push.maxEv);
+    float target = 1.0 / (1.2 * exp2(ev));
+    if (push.reset != 0u) {
+        push.exposure.exposure = target;
+    } else {
+        push.exposure.exposure = mix(previous, target, 1.0 - exp(-push.deltaSeconds * push.adaptationSpeed));
+    }
+}
