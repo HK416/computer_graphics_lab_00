@@ -178,7 +178,7 @@ private:
         create.Feature.InTargetWidth = displayExtent.width;
         create.Feature.InTargetHeight = displayExtent.height;
         // 배율은 렌더 배율이 이미 정한다. NGX 에는 그 배율에 가장 가까운 사전 설정을 알려 준다.
-        create.Feature.InPerfQualityValue = qualityForRatio();
+        create.Feature.InPerfQualityValue = ngxQuality();
         // 톤 매핑 앞의 선형 HDR 을 넘기고, 깊이는 reverse-Z 이며, 변위는 렌더 해상도에 지터가
         // 빠진 값이다.
         create.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
@@ -201,21 +201,22 @@ private:
         return true;
     }
 
-    NVSDK_NGX_PerfQuality_Value qualityForRatio() const {
-        float ratio = displayExtent.width > 0 && renderExtent.width > 0
-                          ? static_cast<float>(displayExtent.width) / static_cast<float>(renderExtent.width)
+    // 사전 설정은 편집기와 같은 기준으로 고른다. 어긋나면 고른 품질과 실제 배율이 따로 논다.
+    NVSDK_NGX_PerfQuality_Value ngxQuality() const {
+        float scale = displayExtent.height > 0
+                          ? static_cast<float>(renderExtent.height) / static_cast<float>(displayExtent.height)
                           : 1.0F;
-        if (ratio <= 1.05F) {
+        switch (dlssQualityForScale(scale)) {
+        case DlssQuality::DLAA:
             return NVSDK_NGX_PerfQuality_Value_DLAA;
-        }
-        if (ratio <= 1.4F) {
+        case DlssQuality::QUALITY:
             return NVSDK_NGX_PerfQuality_Value_MaxQuality;
-        }
-        if (ratio <= 1.8F) {
+        case DlssQuality::BALANCED:
             return NVSDK_NGX_PerfQuality_Value_Balanced;
-        }
-        if (ratio <= 2.5F) {
+        case DlssQuality::PERFORMANCE:
             return NVSDK_NGX_PerfQuality_Value_MaxPerf;
+        case DlssQuality::ULTRA_PERFORMANCE:
+            break;
         }
         return NVSDK_NGX_PerfQuality_Value_UltraPerformance;
     }
@@ -315,7 +316,7 @@ private:
         create.InHeight = renderExtent.height;
         create.InTargetWidth = displayExtent.width;
         create.InTargetHeight = displayExtent.height;
-        create.InPerfQualityValue = qualityForRatio();
+        create.InPerfQualityValue = ngxQuality();
         create.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
                                       NVSDK_NGX_DLSS_Feature_Flags_DepthInverted |
                                       NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
@@ -335,22 +336,22 @@ private:
         return true;
     }
 
-    // 렌더 배율에 가장 가까운 사전 설정. 초해상 쪽과 같은 기준이다.
-    NVSDK_NGX_PerfQuality_Value qualityForRatio() const {
-        float ratio = displayExtent.height > 0
+    // 사전 설정은 편집기와 같은 기준으로 고른다. 어긋나면 고른 품질과 실제 배율이 따로 논다.
+    NVSDK_NGX_PerfQuality_Value ngxQuality() const {
+        float scale = displayExtent.height > 0
                           ? static_cast<float>(renderExtent.height) / static_cast<float>(displayExtent.height)
                           : 1.0F;
-        if (ratio >= 0.99F) {
+        switch (dlssQualityForScale(scale)) {
+        case DlssQuality::DLAA:
             return NVSDK_NGX_PerfQuality_Value_DLAA;
-        }
-        if (ratio >= 0.65F) {
+        case DlssQuality::QUALITY:
             return NVSDK_NGX_PerfQuality_Value_MaxQuality;
-        }
-        if (ratio >= 0.55F) {
+        case DlssQuality::BALANCED:
             return NVSDK_NGX_PerfQuality_Value_Balanced;
-        }
-        if (ratio >= 0.45F) {
+        case DlssQuality::PERFORMANCE:
             return NVSDK_NGX_PerfQuality_Value_MaxPerf;
+        case DlssQuality::ULTRA_PERFORMANCE:
+            break;
         }
         return NVSDK_NGX_PerfQuality_Value_UltraPerformance;
     }

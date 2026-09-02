@@ -1013,9 +1013,17 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
                 renderer.displayExtent().height);
 
     std::vector<gfx::UpscalerInfo> upscalers = renderer.upscalers();
+    bool dlssSelected =
+        renderer.upscaler == gfx::Upscaler::DLSS || renderer.upscaler == gfx::Upscaler::DLSS_RR;
     for (const gfx::UpscalerInfo& info : upscalers) {
+        // Ray Reconstruction 은 DLSS 의 한 모드다. 목록에 따로 두면 초해상과 무관한 별개 기법처럼
+        // 보이고, 경로 추적을 켜야 한다는 조건도 드러나지 않는다. 아래에서 체크박스로 다룬다.
+        if (info.kind == gfx::Upscaler::DLSS_RR) {
+            continue;
+        }
+        bool selected = info.kind == gfx::Upscaler::DLSS ? dlssSelected : renderer.upscaler == info.kind;
         ImGui::BeginDisabled(!info.available);
-        if (ImGui::RadioButton(info.name, renderer.upscaler == info.kind)) {
+        if (ImGui::RadioButton(info.name, selected)) {
             renderer.upscaler = info.kind;
         }
         ImGui::EndDisabled();
@@ -1026,6 +1034,44 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     }
     if (renderer.upscaler == gfx::Upscaler::SPATIAL) {
         ImGui::SliderFloat("선명화", &renderer.upscaleSharpness, 0.0F, 1.0F, "%.2f");
+    }
+    if (dlssSelected) {
+        ImGui::Indent();
+
+        // 사전 설정은 곧 렌더 배율이다. NGX 에 넘기는 값도 배율에서 되돌리므로 둘이 어긋날 수 없다.
+        gfx::DlssQuality quality = gfx::dlssQualityForScale(renderer.renderScale);
+        if (ImGui::BeginCombo("품질", gfx::dlssQualityName(quality))) {
+            for (uint32_t index = 0; index < gfx::DLSS_QUALITY_COUNT; ++index) {
+                auto candidate = static_cast<gfx::DlssQuality>(index);
+                if (ImGui::Selectable(gfx::dlssQualityName(candidate), candidate == quality)) {
+                    renderer.renderScale = gfx::dlssQualityScale(candidate);
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        gfx::UpscalerInfo reconstruction{};
+        for (const gfx::UpscalerInfo& info : upscalers) {
+            if (info.kind == gfx::Upscaler::DLSS_RR) {
+                reconstruction = info;
+            }
+        }
+        bool useReconstruction = renderer.upscaler == gfx::Upscaler::DLSS_RR;
+        ImGui::BeginDisabled(!reconstruction.available);
+        if (ImGui::Checkbox("Ray Reconstruction", &useReconstruction)) {
+            renderer.upscaler = useReconstruction ? gfx::Upscaler::DLSS_RR : gfx::Upscaler::DLSS;
+        }
+        ImGui::EndDisabled();
+        if (!reconstruction.available) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%s)", reconstruction.reason);
+        } else if (useReconstruction && !renderer.usePathTracing) {
+            ImGui::TextDisabled("경로 추적을 켜야 동작한다. 그전까지는 초해상으로 돌아간다");
+        } else if (useReconstruction) {
+            ImGui::TextDisabled("경로 추적 1표본을 디노이즈하면서 확대한다");
+        }
+
+        ImGui::Unindent();
     }
 
     ImGui::SeparatorText("경로 추적");

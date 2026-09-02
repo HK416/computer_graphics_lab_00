@@ -404,20 +404,21 @@ std::vector<UpscalerInfo> Renderer::upscalers() const {
 }
 
 void Renderer::updateUpscaler() {
-    if (upscaler == activeUpscaler) {
+    Upscaler wanted = effectiveUpscaler();
+    if (wanted == activeUpscaler) {
         return;
     }
     // 파이프라인과 히스토리를 갈아 끼운다. 지난 프레임이 아직 쓰고 있을 수 있어 먼저 세운다.
     waitIdle();
     temporalUpscaler.reset();
-    activeUpscaler = upscaler;
-    if (!isTemporal(upscaler)) {
+    activeUpscaler = wanted;
+    if (!isTemporal(wanted)) {
         return;
     }
-    temporalUpscaler = createUpscaler(upscaler, context, bindless);
+    temporalUpscaler = createUpscaler(wanted, context, bindless);
     if (temporalUpscaler == nullptr) {
         // 편집기는 쓸 수 없는 방식을 고르지 못하게 하지만 실행 인자로는 들어올 수 있다.
-        UpscalerInfo info = upscalerInfo(upscaler, context);
+        UpscalerInfo info = upscalerInfo(wanted, context);
         spdlog::warn("{} 을(를) 쓸 수 없어 내장 공간 업스케일로 돌아갑니다: {}", info.name, info.reason);
         upscaler = Upscaler::SPATIAL;
         activeUpscaler = upscaler;

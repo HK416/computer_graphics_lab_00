@@ -3,6 +3,38 @@
 #include "gfx/context.h"
 
 namespace gfx {
+namespace {
+// NVIDIA 가 정한 사전 설정별 렌더 배율.
+constexpr float QUALITY_SCALES[DLSS_QUALITY_COUNT] = {1.0F, 1.0F / 1.5F, 1.0F / 1.72F, 0.5F, 1.0F / 3.0F};
+constexpr const char* QUALITY_NAMES[DLSS_QUALITY_COUNT] = {
+    "DLAA (1.00)", "품질 (0.67)", "균형 (0.58)", "성능 (0.50)", "울트라 성능 (0.33)"};
+} // namespace
+
+float dlssQualityScale(DlssQuality quality) {
+    return QUALITY_SCALES[static_cast<uint32_t>(quality) % DLSS_QUALITY_COUNT];
+}
+
+DlssQuality dlssQualityForScale(float scale) {
+    // 경계는 이웃한 두 사전 설정 배율의 중간값이다.
+    if (scale >= 0.833F) {
+        return DlssQuality::DLAA;
+    }
+    if (scale >= 0.624F) {
+        return DlssQuality::QUALITY;
+    }
+    if (scale >= 0.541F) {
+        return DlssQuality::BALANCED;
+    }
+    if (scale >= 0.417F) {
+        return DlssQuality::PERFORMANCE;
+    }
+    return DlssQuality::ULTRA_PERFORMANCE;
+}
+
+const char* dlssQualityName(DlssQuality quality) {
+    return QUALITY_NAMES[static_cast<uint32_t>(quality) % DLSS_QUALITY_COUNT];
+}
+
 UpscalerInfo upscalerInfo(Upscaler kind, const Context& context) {
     switch (kind) {
     case Upscaler::NONE:

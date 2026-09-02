@@ -335,6 +335,11 @@ private:
     // 시간축 업스케일러가 붙어 있고 마지막 크기 변경도 성공했는지. 벤더 SDK 는 컨텍스트 생성이
     // 실패할 수 있어, 그때는 지터도 끄고 공간 경로로 돌아가야 한다.
     bool temporalReady() const { return temporalUpscaler != nullptr && temporalUpscaler->ready(); }
+    // RR 은 경로 추적 전용이다. 경로 추적이 꺼져 있으면 같은 DLSS 의 초해상으로 돌린다. 이렇게
+    // 두지 않으면 RR 이 안내 버퍼가 없어 아무것도 쓰지 않고 돌아가, 표시 이미지가 비어 버린다.
+    Upscaler effectiveUpscaler() const {
+        return upscaler == Upscaler::DLSS_RR && !usePathTracing ? Upscaler::DLSS : upscaler;
+    }
     // Ray Reconstruction 이 도는 프레임인지. 이때만 경로 추적이 누적하지 않고 1표본과 안내
     // 버퍼를 내놓으며, 지터도 들어간다.
     bool rayReconstructionActive() const {

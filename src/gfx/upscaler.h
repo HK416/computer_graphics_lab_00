@@ -31,6 +31,24 @@ inline bool isTemporal(Upscaler kind) {
     return kind == Upscaler::TAAU || kind == Upscaler::FSR || kind == Upscaler::DLSS || kind == Upscaler::DLSS_RR;
 }
 
+// DLSS 품질 사전 설정. NGX 는 사전 설정과 실제 렌더 배율이 맞아야 제대로 동작하므로, 여기서는
+// 사전 설정을 고르면 렌더 배율이 정해지는 쪽으로 다룬다. 배율이 단일 진실이고 사전 설정은 그
+// 배율을 읽어 되돌린 것이다.
+enum class DlssQuality : uint32_t {
+    DLAA = 0,
+    QUALITY = 1,
+    BALANCED = 2,
+    PERFORMANCE = 3,
+    ULTRA_PERFORMANCE = 4,
+};
+inline constexpr uint32_t DLSS_QUALITY_COUNT = 5;
+
+// 사전 설정이 뜻하는 렌더 배율.
+float dlssQualityScale(DlssQuality quality);
+// 배율에 가장 가까운 사전 설정. 경계는 이웃한 두 배율의 중간이다.
+DlssQuality dlssQualityForScale(float scale);
+const char* dlssQualityName(DlssQuality quality);
+
 struct UpscalerInfo {
     Upscaler kind;
     const char* name;
