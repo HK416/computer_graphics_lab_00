@@ -1881,6 +1881,10 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     // 변형 정점은 가속 구조를 세울 때만 쓴다. 래스터만 그리는 프레임에는 만들지 않는다.
     bool rayTracedFrame =
         rayTracer != nullptr && (usePathTracing || (useRayQueryShadows && rayQueryShadowsAvailable()));
+    // 경로 추적 프레임은 래스터 패스를 건너뛰므로 meshlet 그룹을 아무도 읽지 않는다. 자동 LOD 는
+    // 메쉬의 모든 단계를 후보로 올리기 때문에 그냥 두면 헛일이 적지 않다. 인스턴스는 상위 가속
+    // 구조가 쓰므로 그대로 채운다.
+    bool needMeshletGroups = !(usePathTracing && rayTracer != nullptr);
     uint32_t skinnedVertexCursor = 0;
 
     // 재질 경로와 면 방향 조합마다 명령이 연속 구간을 이루도록 두 번 순회한다.
@@ -1921,13 +1925,15 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         }
         auto [mode, sided] = bucketOf(index);
         ++batches.draws[mode][sided].count;
-        uint32_t groups = groupsFor(index);
-        batches.groups[mode][sided].count += groups;
-        totalGroups += groups;
-        // 컴퓨트 컬링은 모든 단계의 meshlet 을 후보로 보므로 상한도 전체 개수로 잡는다.
-        uint32_t candidates = geometry.mesh(scene.meshOf(index)).meshletCount;
-        batches.meshletDraws[mode][sided].count += candidates;
-        totalMeshletDraws += candidates;
+        if (needMeshletGroups) {
+            uint32_t groups = groupsFor(index);
+            batches.groups[mode][sided].count += groups;
+            totalGroups += groups;
+            // 컴퓨트 컬링은 모든 단계의 meshlet 을 후보로 보므로 상한도 전체 개수로 잡는다.
+            uint32_t candidates = geometry.mesh(scene.meshOf(index)).meshletCount;
+            batches.meshletDraws[mode][sided].count += candidates;
+            totalMeshletDraws += candidates;
+        }
         ++batches.instanceCount;
     }
     reserveMeshletGroups(frame, totalGroups);
@@ -2047,7 +2053,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         draws[slot].firstInstance = slot;
 
         auto [meshletBase, meshletTotal] = meshletRangeFor(index);
-        for (uint32_t group = 0; group < groupsFor(index); ++group) {
+        for (uint32_t group = 0; needMeshletGroups && group < groupsFor(index); ++group) {
             uint32_t groupSlot = groupCursors[mode][sided]++;
             uint32_t first = group * MESHLET_GROUP_SIZE;
             groups[groupSlot].instanceIndex = slot;

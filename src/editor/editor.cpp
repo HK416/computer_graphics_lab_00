@@ -865,10 +865,15 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     ImGui::SliderFloat("노출", &renderer.exposure, 0.05F, 8.0F, "%.2f");
     ImGui::Checkbox("와이어프레임", &renderer.wireframe);
 
+    // 경로 추적은 래스터 패스를 통째로 건너뛴다. 거기 딸린 설정은 눌러도 아무 일이 없으므로
+    // 디버그 뷰와 같은 이유로 잠근다.
+    bool rasterOnly = renderer.usePathTracing;
+
     ImGui::SeparatorText("조명");
     ImGui::Text("장면 조명 %zu개", active.lights.size());
     ImGui::ColorEdit3("환경광", glm::value_ptr(active.ambientColor));
     ImGui::SliderFloat("환경광 세기", &active.ambientIntensity, 0.0F, 4.0F, "%.2f");
+    ImGui::BeginDisabled(rasterOnly);
     ImGui::Checkbox("그림자", &renderer.shadowsEnabled);
     ImGui::BeginDisabled(!renderer.shadowsEnabled);
     ImGui::Checkbox("시점 절두체 컬링", &renderer.shadowViewCulling);
@@ -886,16 +891,20 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
                 renderer.shadowDrawCandidates(),
                 renderer.shadowLayersDrawn());
     ImGui::EndDisabled();
+    ImGui::EndDisabled();
     ImGui::TextDisabled("그림자 시점 %u개까지 (방향광/스폿광 1, 점광 6)", gfx::MAX_SHADOW_VIEWS);
 
-    bool rayQueryReady = renderer.rayQueryShadowsAvailable();
+    // 광선 그림자도 래스터 프래그먼트 셰이더 안에서 도는 것이라 경로 추적과는 무관하다.
+    bool rayQueryReady = renderer.rayQueryShadowsAvailable() && !rasterOnly;
     ImGui::BeginDisabled(!rayQueryReady);
     ImGui::Checkbox("광선 그림자 (하이브리드)", &renderer.useRayQueryShadows);
     ImGui::BeginDisabled(!renderer.useRayQueryShadows);
     ImGui::SliderFloat("광선 거리", &renderer.rayShadowDistance, 1.0F, 200.0F, "%.0f");
     ImGui::EndDisabled();
     ImGui::EndDisabled();
-    if (!rayQueryReady) {
+    if (rasterOnly) {
+        ImGui::TextDisabled("경로 추적 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
+    } else if (!rayQueryReady) {
         ImGui::TextDisabled("이 장치는 광선 질의를 지원하지 않는다");
     } else {
         ImGui::TextDisabled("이 거리 안쪽만 광선으로 판정하고 바깥은 그림자 맵을 쓴다");
@@ -955,6 +964,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     ImGui::TextDisabled("태양 방향은 첫 방향광을 따라간다");
 
     ImGui::SeparatorText("SSAO");
+    ImGui::BeginDisabled(rasterOnly);
     ImGui::Checkbox("사용", &renderer.useSsao);
     ImGui::BeginDisabled(!renderer.useSsao);
     ImGui::SliderFloat("반지름", &renderer.ssaoRadius, 0.005F, 0.3F, "장면의 %.3f배");
@@ -965,8 +975,15 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         renderer.ssaoSamples = static_cast<uint32_t>(samples);
     }
     ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    if (rasterOnly) {
+        ImGui::TextDisabled("경로 추적 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
+    }
 
+    // 컬 컴퓨트도 태스크 셰이더도 래스터 분기 안에서만 돈다. 경로 추적의 가속 구조는 0단계 LOD
+    // 삼각형으로 세우므로 meshlet 컬링도 LOD 선정도 관여하지 않는다.
     ImGui::SeparatorText("컬링과 LOD");
+    ImGui::BeginDisabled(rasterOnly);
     ImGui::Checkbox("컴퓨트 컬링", &renderer.useComputeCulling);
     ImGui::BeginDisabled(!renderer.useComputeCulling);
     ImGui::Checkbox("절두체 컬링", &renderer.frustumCulling);
@@ -1000,6 +1017,11 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         if (ImGui::SliderInt("LOD 단계", &lodLevel, 0, std::max(maxLod, 0))) {
             renderer.lodLevel = static_cast<uint32_t>(lodLevel);
         }
+    }
+
+    ImGui::EndDisabled();
+    if (rasterOnly) {
+        ImGui::TextDisabled("경로 추적 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
     }
 
     ImGui::SeparatorText("해상도와 업스케일");
@@ -1108,12 +1130,15 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     }
 
     ImGui::SeparatorText("파이프라인");
-    ImGui::BeginDisabled(!renderer.meshShaderAvailable());
+    ImGui::BeginDisabled(!renderer.meshShaderAvailable() || rasterOnly);
     ImGui::Checkbox("mesh shader 경로", &renderer.useMeshShader);
     ImGui::EndDisabled();
     if (!renderer.meshShaderAvailable()) {
         ImGui::SameLine();
         ImGui::TextDisabled("(미지원)");
+    } else if (rasterOnly) {
+        // 광선 순회는 가속 구조를 타지 mesh 셰이더를 실행하지 않는다. 둘은 아예 다른 파이프라인이다.
+        ImGui::TextDisabled("경로 추적은 래스터 파이프라인을 타지 않는다");
     }
 
     static constexpr const char* DEBUG_MODE_NAMES[] = {
