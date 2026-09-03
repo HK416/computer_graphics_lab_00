@@ -127,6 +127,15 @@ public:
     // 있어야 하고, 부르는 쪽이 주소를 다시 읽어야 한다(가속 구조 등).
     void build();
 
+    // 이 모델이 GPU 에서 차지할 바이트. 올리기 전에 예산과 견주는 데 쓴다.
+    static VkDeviceSize estimateModelBytes(const asset::Model& model);
+    // 지금 GPU 에 올라가 있는 큰 배열의 바이트. build 가 키울 때 옛 버퍼와 새 버퍼가 잠시 함께 있으므로
+    // 그 겹침만큼도 예산에 넣어야 한다.
+    VkDeviceSize residentBytes() const;
+    // 더해졌지만 아직 올리지 않은 꼬리의 바이트. 장면 파일이 모델 여럿을 build 하나로 올릴 때 앞 모델
+    // 몫을 다음 모델의 예산 검사에 넣기 위한 것이다.
+    VkDeviceSize pendingBytes() const;
+
     const GpuMesh& mesh(uint32_t index) const { return meshes[index]; }
     const asset::Material& material(uint32_t index) const { return sourceMaterials[index]; }
     const std::string& meshName(uint32_t index) const { return meshNames[index]; }

@@ -64,6 +64,8 @@ int main(int argc, char* argv[]) {
             options.upscaler = static_cast<uint32_t>(std::atoi(argv[++i]));
         } else if (argument == "--threads" && i + 1 < argc) {
             options.threadCount = static_cast<unsigned>(std::atoi(argv[++i]));
+        } else if (argument == "--gpu-budget" && i + 1 < argc) {
+            options.gpuBudgetMegabytes = static_cast<uint64_t>(std::atoll(argv[++i]));
         }
     }
 

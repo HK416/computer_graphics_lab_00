@@ -92,6 +92,7 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     }
 
     context = std::make_unique<gfx::Context>(window);
+    context->memoryBudgetOverride = options.gpuBudgetMegabytes * 1024ULL * 1024ULL;
     bindless = std::make_unique<gfx::BindlessTextures>(*context);
     textures = std::make_unique<gfx::TextureCache>(*context, *bindless);
     geometry = std::make_unique<gfx::GeometryStore>(*context);
@@ -227,6 +228,9 @@ void Application::loadScenes() {
 
     // GPU 자원 생성은 순서를 지켜 한 스레드에서만 한다.
     for (size_t i = 0; i < files.size(); ++i) {
+        if (!fitsGpuBudget(models[i])) {
+            core::fatal("기본 에셋이 GPU 메모리 예산에 들어가지 않습니다: {}", files[i].string());
+        }
         uint32_t modelIndex = registerModel(files[i], models[i]);
         scene::Scene& created = scenes.create(files[i].stem().string());
         addDefaultLight(created);
@@ -298,6 +302,46 @@ Application::PrepareTimings Application::prepareModel(asset::Model& model, asset
     return prepareAssets(allTextures, allMeshes, progress);
 }
 
+bool Application::fitsGpuBudget(const asset::Model& model) const {
+    VkDeviceSize geometryBytes = gfx::GeometryStore::estimateModelBytes(model);
+    VkDeviceSize textureBytes = 0;
+    for (const asset::Texture& texture : model.textures) {
+        textureBytes += gfx::TextureCache::estimateBytes(texture);
+    }
+    // 지오메트리 버퍼를 키우는 동안 옛 버퍼가 새 버퍼와 함께 살아 있다. 장면 파일이 모델 여럿을 build 하나로
+    // 올릴 때는 앞 모델의 꼬리가 아직 GPU 사용량에 잡히지 않으므로 그것도 더한다. 하위 가속 구조는
+    // 광선 기능을 켤 때 따로 재서 넘으면 그 기능만 끈다.
+    VkDeviceSize overlapBytes = geometry->residentBytes() + geometry->pendingBytes();
+    VkDeviceSize needed = geometryBytes + textureBytes + overlapBytes;
+
+    gfx::Context::MemoryBudget budget = context->deviceMemoryBudget();
+    VkDeviceSize available = budget.budget > budget.usage ? budget.budget - budget.usage : 0;
+    constexpr double MB = 1024.0 * 1024.0;
+    if (needed > available) {
+        spdlog::error(
+            "GPU 메모리가 모자라 모델을 올리지 않습니다: {} (필요 {:.0f} MB = 지오메트리 {:.0f} + 텍스처 {:.0f} "
+            "+ 재할당 겹침 {:.0f}, 남은 예산 {:.0f} MB, 예산 {:.0f} MB 중 사용 {:.0f} MB)",
+            model.name,
+            static_cast<double>(needed) / MB,
+            static_cast<double>(geometryBytes) / MB,
+            static_cast<double>(textureBytes) / MB,
+            static_cast<double>(overlapBytes) / MB,
+            static_cast<double>(available) / MB,
+            static_cast<double>(budget.budget) / MB,
+            static_cast<double>(budget.usage) / MB);
+        return false;
+    }
+    spdlog::info(
+        "GPU 메모리: {} 에 {:.0f} MB (지오메트리 {:.0f}, 텍스처 {:.0f}, 재할당 겹침 {:.0f}), 남은 예산 {:.0f} MB",
+        model.name,
+        static_cast<double>(needed) / MB,
+        static_cast<double>(geometryBytes) / MB,
+        static_cast<double>(textureBytes) / MB,
+        static_cast<double>(overlapBytes) / MB,
+        static_cast<double>(available) / MB);
+    return true;
+}
+
 uint32_t Application::findModel(const std::filesystem::path& path) const {
     std::error_code error;
     for (uint32_t i = 0; i < loadedModels.size(); ++i) {
@@ -338,6 +382,9 @@ uint32_t Application::ensureModel(const std::filesystem::path& path) {
         return static_cast<uint32_t>(loadedModels.size());
     }
     prepareModel(*loaded, nullptr);
+    if (!fitsGpuBudget(*loaded)) {
+        return static_cast<uint32_t>(loadedModels.size());
+    }
     return registerModel(path, *loaded);
 }
 
@@ -449,6 +496,11 @@ void Application::completeLoad() {
     if (existing < loadedModels.size()) {
         instantiateModel(existing, target);
         spdlog::info("모델 적재: {} (해석 중에 이미 올라가 장면에만 붙임)", load.path.filename().string());
+        pendingLoad.reset();
+        return;
+    }
+
+    if (!fitsGpuBudget(load.model)) {
         pendingLoad.reset();
         return;
     }

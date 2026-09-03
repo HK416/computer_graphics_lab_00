@@ -25,6 +25,8 @@ public:
 
     // 등록에 성공하면 bindless 슬롯 번호를, 픽셀이 비어 있으면 INVALID_TEXTURE 를 돌려준다.
     uint32_t add(Uploader& uploader, const asset::Texture& texture);
+    // 이 텍스처가 GPU 에서 차지할 바이트. 밉을 만들어야 하면 1/3 을 더한다.
+    static VkDeviceSize estimateBytes(const asset::Texture& texture);
 
 private:
     VkSampler samplerFor(const asset::SamplerDesc& desc);

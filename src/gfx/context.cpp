@@ -650,6 +650,25 @@ Context::Context(SDL_Window* window) {
     logCapabilities(properties, queueFamilies, caps);
 }
 
+Context::MemoryBudget Context::deviceMemoryBudget() const {
+    const VkPhysicalDeviceMemoryProperties* memory = nullptr;
+    vmaGetMemoryProperties(allocator, &memory);
+    std::vector<VmaBudget> budgets(memory->memoryHeapCount);
+    vmaGetHeapBudgets(allocator, budgets.data());
+    MemoryBudget total;
+    for (uint32_t heap = 0; heap < memory->memoryHeapCount; ++heap) {
+        if ((memory->memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0) {
+            continue;
+        }
+        total.budget += budgets[heap].budget;
+        total.usage += budgets[heap].usage;
+    }
+    if (memoryBudgetOverride != 0) {
+        total.budget = memoryBudgetOverride;
+    }
+    return total;
+}
+
 Context::~Context() {
     vmaDestroyAllocator(allocator);
     vkDestroyDevice(device, nullptr);

@@ -127,6 +127,31 @@ uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<ui
     return firstMesh;
 }
 
+VkDeviceSize GeometryStore::estimateModelBytes(const asset::Model& model) {
+    VkDeviceSize bytes = model.materials.size() * sizeof(GpuMaterial);
+    for (const asset::Mesh& mesh : model.meshes) {
+        bytes += sizeof(GpuMesh) + mesh.lods.size() * sizeof(GpuMeshLod);
+        bytes += mesh.vertices.size() * sizeof(asset::Vertex);
+        bytes += mesh.skinWeights.size() * sizeof(asset::SkinWeight);
+        bytes += mesh.indices.size() * sizeof(uint32_t);
+        bytes += mesh.meshlets.size() * sizeof(GpuMeshlet);
+        bytes += mesh.meshletTriangles.size();
+        bytes += mesh.meshletVertices.size() * sizeof(uint32_t);
+    }
+    return bytes;
+}
+
+VkDeviceSize GeometryStore::residentBytes() const {
+    return vertexBuffer.size + skinWeightBuffer.size + indexBuffer.size + meshletTriangleBuffer.size +
+           meshletVertexBuffer.size;
+}
+
+VkDeviceSize GeometryStore::pendingBytes() const {
+    return vertices.pending.size() * sizeof(asset::Vertex) + skinWeights.pending.size() * sizeof(asset::SkinWeight) +
+           indices.pending.size() * sizeof(uint32_t) + meshletTriangles.pending.size() +
+           meshletVertices.pending.size() * sizeof(uint32_t);
+}
+
 template <typename T>
 void GeometryStore::growAndUpload(Uploader& uploader,
                                   Buffer& buffer,

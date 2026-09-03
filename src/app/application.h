@@ -60,6 +60,8 @@ struct Options {
     // 프레임마다 카메라를 이만큼(도) 궤도 회전한다. 정지 화면에서는 드러나지 않는 팝인을 재현한다.
     float orbitDegreesPerFrame = 0.0F;
     float triangleBudget = 0.0F;
+    // 0 이면 드라이버가 알려 주는 장치 메모리 예산을 쓴다. 메가바이트. 여유를 두거나 게이트를 시험할 때 준다.
+    uint64_t gpuBudgetMegabytes = 0;
 };
 
 class Application {
@@ -94,6 +96,9 @@ private:
                                  asset::LoadProgress* progress);
     PrepareTimings prepareModel(asset::Model& model, asset::LoadProgress* progress);
 
+    // 이 모델이 GPU 예산에 들어가는지. 지오메트리와 텍스처에 재할당 중 겹치는 옛 버퍼까지 더해 남은
+    // 예산과 견준다. 안 들어가면 사유를 로그에 남기고 false. 장치를 잃는 것보다 여기서 거부하는 편이 낫다.
+    bool fitsGpuBudget(const asset::Model& model) const;
     // 이미 해석해 둔 모델을 GPU 에 올리고 등록 번호를 돌려준다. 지오메트리 재구축은 부르는 쪽 몫이다.
     uint32_t registerModel(const std::filesystem::path& path, asset::Model& model);
     // 같은 파일이 이미 올라가 있으면 그 등록 번호를, 아니면 loadedModels.size() 를 돌려준다.

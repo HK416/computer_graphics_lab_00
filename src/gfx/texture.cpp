@@ -114,6 +114,12 @@ VkSampler TextureCache::samplerFor(const asset::SamplerDesc& desc) {
     return sampler;
 }
 
+VkDeviceSize TextureCache::estimateBytes(const asset::Texture& texture) {
+    VkDeviceSize bytes = texture.pixels.size();
+    bool prebuiltMips = texture.mipLevels > 1 || asset::isBlockCompressed(texture.format);
+    return prebuiltMips ? bytes : bytes + bytes / 3;
+}
+
 uint32_t TextureCache::add(Uploader& uploader, const asset::Texture& texture) {
     if (texture.pixels.empty() || texture.width == 0 || texture.height == 0) {
         return asset::INVALID_TEXTURE;

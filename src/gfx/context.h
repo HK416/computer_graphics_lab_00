@@ -78,6 +78,18 @@ struct Context {
     VkQueue transferQueue = VK_NULL_HANDLE;
 
     Capabilities caps;
+
+    // 장치 전용 힙의 예산과 사용량(바이트). VK_EXT_memory_budget 이 있으면 드라이버가 알려 주는 예산이고,
+    // 없으면 VMA 가 힙 크기의 80% 를 예산으로, 자기가 할당한 만큼만 사용량으로 본다. 큰 모델을 올리기
+    // 전에 들어갈지 미리 재는 데 쓴다.
+    struct MemoryBudget {
+        VkDeviceSize budget = 0;
+        VkDeviceSize usage = 0;
+    };
+    MemoryBudget deviceMemoryBudget() const;
+    // 0 이 아니면 드라이버 예산 대신 이 값을 예산으로 본다. --gpu-budget 이 채우며, 모델과 가속 구조의
+    // 예산 검사가 모두 같은 값을 보게 여기 둔다.
+    VkDeviceSize memoryBudgetOverride = 0;
 };
 
 } // namespace gfx
