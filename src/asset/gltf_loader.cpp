@@ -265,6 +265,9 @@ struct PrimitiveRange {
 // 정점 합치기 전후의 수. 모델 단위로 합쳐 로그에 남긴다.
 struct WeldStats {
     size_t before = 0;
+    // 속성이 완전히 같은 것끼리 합친 뒤.
+    size_t exact = 0;
+    // 위치·UV 가 같고 노멀이 스무딩 각도 안인 것까지 합친 뒤.
     size_t after = 0;
 };
 
@@ -277,10 +280,13 @@ struct WeldStats {
 void weldVertices(std::vector<LoadVertex>& vertices,
                   std::vector<SkinWeight>& skinWeights,
                   std::vector<uint32_t>& indices,
+                  bool hasNormals,
+                  float smoothingDegrees,
                   WeldStats& stats) {
     size_t before = vertices.size();
     stats.before += before;
     if (before == 0 || indices.empty()) {
+        stats.exact += before;
         stats.after += before;
         return;
     }
@@ -290,34 +296,151 @@ void weldVertices(std::vector<LoadVertex>& vertices,
     };
     static_assert(sizeof(LoadVertex) == 48 && sizeof(Key) == sizeof(LoadVertex) + sizeof(SkinWeight),
                   "채움 바이트가 있으면 비교가 틀어진다");
-    std::vector<Key> keys(before);
-    for (size_t i = 0; i < before; ++i) {
-        keys[i] = Key{vertices[i], skinWeights.empty() ? SkinWeight{} : skinWeights[i]};
+    {
+        std::vector<Key> keys(before);
+        for (size_t i = 0; i < before; ++i) {
+            keys[i] = Key{vertices[i], skinWeights.empty() ? SkinWeight{} : skinWeights[i]};
+        }
+        std::vector<uint32_t> remap(before);
+        size_t unique =
+            meshopt_generateVertexRemap(remap.data(), indices.data(), indices.size(), keys.data(), before, sizeof(Key));
+        keys.clear();
+        keys.shrink_to_fit();
+        if (unique != before) {
+            std::vector<LoadVertex> welded(unique);
+            meshopt_remapVertexBuffer(welded.data(), vertices.data(), before, sizeof(LoadVertex), remap.data());
+            vertices = std::move(welded);
+            if (!skinWeights.empty()) {
+                std::vector<SkinWeight> weldedWeights(unique);
+                meshopt_remapVertexBuffer(
+                    weldedWeights.data(), skinWeights.data(), before, sizeof(SkinWeight), remap.data());
+                skinWeights = std::move(weldedWeights);
+            }
+            // 원소마다 destination[i] = remap[indices[i]] 이라 같은 버퍼를 제자리에서 바꿔도 된다.
+            meshopt_remapIndexBuffer(indices.data(), indices.data(), indices.size(), remap.data());
+        }
     }
-    std::vector<uint32_t> remap(before);
-    size_t unique =
-        meshopt_generateVertexRemap(remap.data(), indices.data(), indices.size(), keys.data(), before, sizeof(Key));
-    stats.after += unique;
-    if (unique == before) {
+    size_t exact = vertices.size();
+    stats.exact += exact;
+    if (smoothingDegrees <= 0.0F) {
+        stats.after += exact;
         return;
     }
 
-    std::vector<LoadVertex> welded(unique);
-    meshopt_remapVertexBuffer(welded.data(), vertices.data(), before, sizeof(LoadVertex), remap.data());
-    vertices = std::move(welded);
-    if (!skinWeights.empty()) {
-        std::vector<SkinWeight> weldedWeights(unique);
-        meshopt_remapVertexBuffer(weldedWeights.data(), skinWeights.data(), before, sizeof(SkinWeight), remap.data());
-        skinWeights = std::move(weldedWeights);
+    // 2 단계: 위치·UV(스킨이면 가중치까지)가 같은 정점을 묶고, 묶음 안에서 노멀이 스무딩 각도 안인 것끼리
+    // 하나로 합쳐 노멀과 탄젠트를 평균 낸다. 삼각형마다 정점을 따로 두고 노멀을 조금씩 다르게 적은 스캔
+    // 데이터가 여기서 줄어든다. 노멀 키를 그대로 두면 프리미티브 경계가 전부 열린 모서리로 남아 meshlet 이
+    // 정점 한도에 먼저 걸리고 단순화가 그 자리에서 멈춘다. 각도 밖(각진 모서리)은 따로 남긴다.
+    // 노멀이 없는 프리미티브는 뒤에서 만들어지므로 묶음을 통째로 합친다.
+    struct PositionKey {
+        glm::vec3 position;
+        glm::vec2 uv;
+        SkinWeight weight;
+    };
+    static_assert(sizeof(PositionKey) == 28, "채움 바이트가 있으면 비교가 틀어진다");
+    std::vector<uint32_t> group(exact);
+    size_t groupCount = 0;
+    {
+        std::vector<PositionKey> keys(exact);
+        for (size_t i = 0; i < exact; ++i) {
+            keys[i] =
+                PositionKey{vertices[i].position, vertices[i].uv, skinWeights.empty() ? SkinWeight{} : skinWeights[i]};
+        }
+        groupCount = meshopt_generateVertexRemap(
+            group.data(), indices.data(), indices.size(), keys.data(), exact, sizeof(PositionKey));
     }
-    // 원소마다 destination[i] = remap[indices[i]] 이라 같은 버퍼를 제자리에서 바꿔도 된다.
-    meshopt_remapIndexBuffer(indices.data(), indices.data(), indices.size(), remap.data());
+    if (groupCount == exact) {
+        stats.after += exact;
+        return;
+    }
+
+    // 묶음별로 멤버를 모은다(계수 정렬). 참조되지 않는 정점은 ~0 이라 빠진다.
+    std::vector<uint32_t> groupStart(groupCount + 1, 0);
+    for (size_t i = 0; i < exact; ++i) {
+        if (group[i] != ~0U) {
+            ++groupStart[group[i] + 1];
+        }
+    }
+    for (size_t g = 0; g < groupCount; ++g) {
+        groupStart[g + 1] += groupStart[g];
+    }
+    std::vector<uint32_t> members(groupStart[groupCount]);
+    {
+        std::vector<uint32_t> cursor(groupStart.begin(), groupStart.end() - 1);
+        for (size_t i = 0; i < exact; ++i) {
+            if (group[i] != ~0U) {
+                members[cursor[group[i]]++] = static_cast<uint32_t>(i);
+            }
+        }
+    }
+
+    group.clear();
+    group.shrink_to_fit();
+
+    // 묶음 안에서 첫 멤버의 노멀을 대표로 두고 그 각도 안이면 같은 클러스터로 본다. 평균 대신 첫 멤버와
+    // 비교하므로 클러스터 안의 퍼짐은 최대 각도의 두 배까지 될 수 있다. 탄젠트 손 방향이 다르면(거울
+    // UV 이음새) 합치지 않는다. 결과 수의 상한은 exact 라 그만큼 예약해 중간에 다시 잡지 않는다.
+    float cosLimit = std::cos(glm::radians(smoothingDegrees));
+    std::vector<uint32_t> newIndex(exact, ~0U);
+    std::vector<LoadVertex> out;
+    std::vector<SkinWeight> outWeights;
+    std::vector<glm::vec3> representative;
+    out.reserve(exact);
+    representative.reserve(exact);
+    if (!skinWeights.empty()) {
+        outWeights.reserve(exact);
+    }
+    for (size_t g = 0; g < groupCount; ++g) {
+        size_t firstCluster = out.size();
+        for (uint32_t m = groupStart[g]; m < groupStart[g + 1]; ++m) {
+            uint32_t source = members[m];
+            const LoadVertex& vertex = vertices[source];
+            size_t target = ~size_t{0};
+            for (size_t c = firstCluster; c < out.size(); ++c) {
+                bool sameHandedness = (out[c].tangent.w < 0.0F) == (vertex.tangent.w < 0.0F);
+                if (sameHandedness && (!hasNormals || glm::dot(representative[c], vertex.normal) >= cosLimit)) {
+                    target = c;
+                    break;
+                }
+            }
+            if (target == ~size_t{0}) {
+                target = out.size();
+                out.push_back(vertex);
+                representative.push_back(vertex.normal);
+                if (!skinWeights.empty()) {
+                    outWeights.push_back(skinWeights[source]);
+                }
+            } else {
+                out[target].normal += vertex.normal;
+                out[target].tangent += glm::vec4{glm::vec3{vertex.tangent}, 0.0F};
+            }
+            newIndex[source] = static_cast<uint32_t>(target);
+        }
+    }
+    for (LoadVertex& vertex : out) {
+        float normalLength = glm::length(vertex.normal);
+        if (normalLength > 0.0F) {
+            vertex.normal /= normalLength;
+        }
+        float tangentLength = glm::length(glm::vec3{vertex.tangent});
+        if (tangentLength > 0.0F) {
+            vertex.tangent = glm::vec4{glm::vec3{vertex.tangent} / tangentLength, vertex.tangent.w};
+        }
+    }
+    for (uint32_t& index : indices) {
+        index = newIndex[index];
+    }
+    vertices = std::move(out);
+    skinWeights = std::move(outWeights);
+    stats.after += vertices.size();
 }
 
-// 프리미티브 하나를 Mesh 로 바꾼다. 삼각형이 아니거나 위치가 없으면 false. 프리미티브끼리 독립이라
-// 워커에 나눠 돌린다. defaultMaterial 은 재질이 없는 프리미티브가 쓸 마지막 재질의 번호다.
-bool convertPrimitive(
-    const cgltf_data& data, const cgltf_primitive& primitive, uint32_t defaultMaterial, Mesh& mesh, WeldStats& weld) {
+bool convertPrimitive(const cgltf_data& data,
+                      const cgltf_primitive& primitive,
+                      uint32_t defaultMaterial,
+                      const LoadSettings& settings,
+                      Mesh& mesh,
+                      WeldStats& weld) {
     const cgltf_accessor* positions = findAttribute(primitive, cgltf_attribute_type_position, 0);
     if (positions == nullptr || primitive.type != cgltf_primitive_type_triangles) {
         return false;
@@ -375,7 +498,7 @@ bool convertPrimitive(
         }
     }
 
-    weldVertices(loaded, mesh.skinWeights, mesh.indices, weld);
+    weldVertices(loaded, mesh.skinWeights, mesh.indices, normals != nullptr, settings.weldSmoothingDegrees, weld);
     if (normals == nullptr) {
         generateNormals(loaded, mesh.indices);
     }
@@ -523,7 +646,8 @@ void appendNode(Model& model,
 
 } // namespace
 
-std::optional<Model> loadGltf(const std::filesystem::path& path, LoadProgress* progress, core::JobSystem* jobs) {
+std::optional<Model>
+loadGltf(const std::filesystem::path& path, LoadProgress* progress, core::JobSystem* jobs, LoadSettings settings) {
     using Clock = std::chrono::steady_clock;
     auto elapsedMs = [](Clock::time_point since) {
         return std::chrono::duration<double, std::milli>(Clock::now() - since).count();
@@ -613,7 +737,7 @@ std::optional<Model> loadGltf(const std::filesystem::path& path, LoadProgress* p
     auto convert = [&](uint32_t begin, uint32_t end) {
         for (uint32_t k = begin; k < end; ++k) {
             PrimitiveJob& job = primitiveJobs[k];
-            job.valid = convertPrimitive(*data, *job.primitive, defaultMaterial, job.mesh, job.weld);
+            job.valid = convertPrimitive(*data, *job.primitive, defaultMaterial, settings, job.mesh, job.weld);
             if (progress != nullptr) {
                 progress->advance();
             }
@@ -633,6 +757,7 @@ std::optional<Model> loadGltf(const std::filesystem::path& path, LoadProgress* p
     }
     for (PrimitiveJob& job : primitiveJobs) {
         weld.before += job.weld.before;
+        weld.exact += job.weld.exact;
         weld.after += job.weld.after;
         if (!job.valid) {
             continue;
@@ -663,8 +788,8 @@ std::optional<Model> loadGltf(const std::filesystem::path& path, LoadProgress* p
     for (const Mesh& mesh : model.meshes) {
         triangleCount += mesh.indices.size() / 3;
     }
-    spdlog::info("glTF 적재: {} (메쉬 {}, 재질 {}, 텍스처 {}, 인스턴스 {}, 삼각형 {}, 정점 {} → 합친 뒤 {}, 스킨 {}, "
-                 "애니메이션 {}; 파싱 {:.1f} ms, 정점 변환 {:.1f} ms)",
+    spdlog::info("glTF 적재: {} (메쉬 {}, 재질 {}, 텍스처 {}, 인스턴스 {}, 삼각형 {}, 정점 {} → 같은 속성 합침 {} → "
+                 "위치·UV 합침({:.0f}°) {}, 스킨 {}, 애니메이션 {}; 파싱 {:.1f} ms, 정점 변환 {:.1f} ms)",
                  model.name,
                  model.meshes.size(),
                  model.materials.size(),
@@ -672,6 +797,8 @@ std::optional<Model> loadGltf(const std::filesystem::path& path, LoadProgress* p
                  model.instances.size(),
                  triangleCount,
                  weld.before,
+                 weld.exact,
+                 settings.weldSmoothingDegrees,
                  weld.after,
                  model.skeleton.skins.size(),
                  model.skeleton.animations.size(),

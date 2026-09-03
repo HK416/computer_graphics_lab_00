@@ -186,7 +186,7 @@ void Application::loadScenes() {
     std::vector<asset::Model> models(files.size());
     jobs.parallelFor(static_cast<uint32_t>(files.size()), 1, [&files, &models, this](uint32_t begin, uint32_t end) {
         for (uint32_t i = begin; i < end; ++i) {
-            std::optional<asset::Model> loaded = asset::loadGltf(files[i], nullptr, &jobs);
+            std::optional<asset::Model> loaded = asset::loadGltf(files[i], nullptr, &jobs, loadSettings());
             if (!loaded) {
                 core::fatal("기본 에셋을 읽지 못했습니다: {}", files[i].string());
             }
@@ -303,6 +303,12 @@ Application::PrepareTimings Application::prepareModel(asset::Model& model, asset
     return prepareAssets(allTextures, allMeshes, progress);
 }
 
+asset::LoadSettings Application::loadSettings() const {
+    asset::LoadSettings settings;
+    settings.weldSmoothingDegrees = options.weldAngleDegrees;
+    return settings;
+}
+
 bool Application::fitsGpuBudget(const asset::Model& model) const {
     VkDeviceSize geometryBytes = gfx::GeometryStore::estimateModelBytes(model);
     VkDeviceSize textureBytes = 0;
@@ -378,7 +384,7 @@ uint32_t Application::ensureModel(const std::filesystem::path& path) {
     if (existing < loadedModels.size()) {
         return existing;
     }
-    std::optional<asset::Model> loaded = asset::loadGltf(path, nullptr, &jobs);
+    std::optional<asset::Model> loaded = asset::loadGltf(path, nullptr, &jobs, loadSettings());
     if (!loaded) {
         return static_cast<uint32_t>(loadedModels.size());
     }
@@ -454,7 +460,7 @@ void Application::startNextLoad() {
         PendingLoad* load = pendingLoad.get();
         // 스레드는 load 가 가리키는 것만 만진다. pendingLoad 는 스레드를 합류한 뒤에만 비운다.
         load->worker = std::thread([this, load]() {
-            std::optional<asset::Model> loaded = asset::loadGltf(load->path, &load->progress, &jobs);
+            std::optional<asset::Model> loaded = asset::loadGltf(load->path, &load->progress, &jobs, loadSettings());
             if (loaded) {
                 load->model = std::move(*loaded);
                 load->timings = prepareModel(load->model, &load->progress);

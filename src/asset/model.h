@@ -221,11 +221,21 @@ struct Model {
 
 struct LoadProgress;
 
+// 적재 방식.
+struct LoadSettings {
+    // 위치와 UV(스킨이면 가중치까지)가 같은 정점은 노멀이 이 각도 안이면 하나로 합치고 노멀을 평균 낸다.
+    // 삼각형마다 정점을 따로 둔 스캔 데이터를 위한 것이다. 0 이면 속성이 완전히 같을 때만 합친다.
+    // 각진 저폴리 메쉬는 이 각도보다 작은 모서리가 부드러워지므로 그런 에셋은 0 으로 연다.
+    float weldSmoothingDegrees = 30.0F;
+};
+
 // 파일을 열지 못하거나 지원하지 않는 내용이면 사유를 로그에 남기고 비어 있는 값을 돌려준다. 종료는
 // 부르는 쪽이 정한다. 백그라운드 스레드에서도 부르므로 여기서 프로세스를 끝내면 안 된다.
 // progress 를 주면 파싱과 정점 변환 단계의 진행을 적는다. jobs 를 주면 프리미티브 변환을 워커에 나눈다.
-std::optional<Model>
-loadGltf(const std::filesystem::path& path, LoadProgress* progress = nullptr, core::JobSystem* jobs = nullptr);
+std::optional<Model> loadGltf(const std::filesystem::path& path,
+                              LoadProgress* progress = nullptr,
+                              core::JobSystem* jobs = nullptr,
+                              LoadSettings settings = {});
 
 // clip 을 time 위치에서 표본화해 노드마다 세계 변환을 만든다. clip 이 범위를 벗어나면 바인드 포즈다.
 void poseNodes(const Skeleton& skeleton, uint32_t clip, float time, std::vector<glm::mat4>& worlds);

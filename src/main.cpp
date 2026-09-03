@@ -66,6 +66,8 @@ int main(int argc, char* argv[]) {
             options.threadCount = static_cast<unsigned>(std::atoi(argv[++i]));
         } else if (argument == "--gpu-budget" && i + 1 < argc) {
             options.gpuBudgetMegabytes = static_cast<uint64_t>(std::atoll(argv[++i]));
+        } else if (argument == "--weld-angle" && i + 1 < argc) {
+            options.weldAngleDegrees = static_cast<float>(std::atof(argv[++i]));
         }
     }
 
