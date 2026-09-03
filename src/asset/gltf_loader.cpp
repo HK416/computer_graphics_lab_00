@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <optional>
 #include <vector>
 
 #define CGLTF_IMPLEMENTATION
@@ -11,8 +13,8 @@
 #include <spdlog/spdlog.h>
 #include <stb_image.h>
 
+#include "asset/load_progress.h"
 #include "asset/model.h"
-#include "core/error.h"
 
 namespace asset {
 namespace {
@@ -309,7 +311,7 @@ AnimationPath toAnimationPath(cgltf_animation_path_type path) {
 }
 
 // 노드 계층과 스킨, 애니메이션을 그대로 옮겨 둔다. 포즈 계산은 매 프레임 poseNodes 가 한다.
-void loadSkeleton(const cgltf_data& data, Skeleton& skeleton) {
+bool loadSkeleton(const cgltf_data& data, Skeleton& skeleton) {
     skeleton.nodes.resize(data.nodes_count);
     for (cgltf_size i = 0; i < data.nodes_count; ++i) {
         const cgltf_node& source = data.nodes[i];
@@ -333,7 +335,8 @@ void loadSkeleton(const cgltf_data& data, Skeleton& skeleton) {
         const cgltf_skin& source = data.skins[i];
         Skin& skin = skeleton.skins[i];
         if (source.joints_count > MAX_SKIN_JOINTS) {
-            core::fatal("조인트가 {}개를 넘는 스킨은 지원하지 않습니다: {}", MAX_SKIN_JOINTS, source.joints_count);
+            spdlog::error("조인트가 {}개를 넘는 스킨은 지원하지 않습니다: {}", MAX_SKIN_JOINTS, source.joints_count);
+            return false;
         }
         skin.joints.reserve(source.joints_count);
         skin.inverseBind.assign(source.joints_count, glm::mat4{1.0F});
@@ -384,6 +387,7 @@ void loadSkeleton(const cgltf_data& data, Skeleton& skeleton) {
             animation.channels.push_back(channel);
         }
     }
+    return true;
 }
 
 void appendNode(Model& model,
@@ -420,19 +424,30 @@ void appendNode(Model& model,
 
 } // namespace
 
-Model loadGltf(const std::filesystem::path& path) {
+std::optional<Model> loadGltf(const std::filesystem::path& path, LoadProgress* progress) {
+    using Clock = std::chrono::steady_clock;
+    auto elapsedMs = [](Clock::time_point since) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - since).count();
+    };
+    if (progress != nullptr) {
+        progress->begin(LoadProgress::Stage::PARSE);
+    }
+    Clock::time_point parseStart = Clock::now();
     cgltf_options options{};
     cgltf_data* data = nullptr;
     if (cgltf_parse_file(&options, path.string().c_str(), &data) != cgltf_result_success) {
-        core::fatal("glTF 파일을 열 수 없습니다: {}", path.string());
+        spdlog::error("glTF 파일을 열 수 없습니다: {}", path.string());
+        return std::nullopt;
     }
     if (cgltf_load_buffers(&options, data, path.string().c_str()) != cgltf_result_success) {
         cgltf_free(data);
-        core::fatal("glTF 버퍼를 읽을 수 없습니다: {}", path.string());
+        spdlog::error("glTF 버퍼를 읽을 수 없습니다: {}", path.string());
+        return std::nullopt;
     }
     if (cgltf_validate(data) != cgltf_result_success) {
         cgltf_free(data);
-        core::fatal("glTF 파일이 유효하지 않습니다: {}", path.string());
+        spdlog::error("glTF 파일이 유효하지 않습니다: {}", path.string());
+        return std::nullopt;
     }
 
     Model model;
@@ -464,13 +479,28 @@ Model loadGltf(const std::filesystem::path& path) {
     fallback.roughnessFactor = 1.0F;
     model.materials.push_back(fallback);
 
-    loadSkeleton(*data, model.skeleton);
+    if (!loadSkeleton(*data, model.skeleton)) {
+        cgltf_free(data);
+        return std::nullopt;
+    }
 
+    double parseMs = elapsedMs(parseStart);
+    Clock::time_point convertStart = Clock::now();
+    if (progress != nullptr) {
+        uint64_t primitiveCount = 0;
+        for (cgltf_size i = 0; i < data->meshes_count; ++i) {
+            primitiveCount += data->meshes[i].primitives_count;
+        }
+        progress->begin(LoadProgress::Stage::CONVERT, primitiveCount);
+    }
     std::vector<PrimitiveRange> meshRanges(data->meshes_count);
     for (cgltf_size i = 0; i < data->meshes_count; ++i) {
         meshRanges[i].first = static_cast<uint32_t>(model.meshes.size());
         for (cgltf_size j = 0; j < data->meshes[i].primitives_count; ++j) {
             appendPrimitive(model, *data, data->meshes[i].primitives[j]);
+            if (progress != nullptr) {
+                progress->advance();
+            }
         }
         meshRanges[i].count = static_cast<uint32_t>(model.meshes.size()) - meshRanges[i].first;
     }
@@ -494,7 +524,8 @@ Model loadGltf(const std::filesystem::path& path) {
     for (const Mesh& mesh : model.meshes) {
         triangleCount += mesh.indices.size() / 3;
     }
-    spdlog::info("glTF 적재: {} (메쉬 {}, 재질 {}, 텍스처 {}, 인스턴스 {}, 삼각형 {}, 스킨 {}, 애니메이션 {})",
+    spdlog::info("glTF 적재: {} (메쉬 {}, 재질 {}, 텍스처 {}, 인스턴스 {}, 삼각형 {}, 스킨 {}, 애니메이션 {}; "
+                 "파싱 {:.1f} ms, 정점 변환 {:.1f} ms)",
                  model.name,
                  model.meshes.size(),
                  model.materials.size(),
@@ -502,7 +533,9 @@ Model loadGltf(const std::filesystem::path& path) {
                  model.instances.size(),
                  triangleCount,
                  model.skeleton.skins.size(),
-                 model.skeleton.animations.size());
+                 model.skeleton.animations.size(),
+                 parseMs,
+                 elapsedMs(convertStart));
     return model;
 }
 

@@ -6,6 +6,7 @@
 #include <format>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -126,7 +127,7 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     }
     orbitDegreesPerFrame = options.orbitDegreesPerFrame;
     renderer->setUiCallback([this](VkCommandBuffer commandBuffer) { editorUi->record(commandBuffer); });
-    editorUi->setModelLoader(assetRoot, [this](const std::filesystem::path& path) { loadModel(path); });
+    editorUi->setModelLoader(assetRoot, [this](const std::filesystem::path& path) { requestModel(path); });
     editorUi->setSceneIo(
         sceneRoot,
         [this](const std::filesystem::path& path) { saveScene(path); },
@@ -150,6 +151,8 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
 }
 
 Application::~Application() {
+    // 백그라운드 해석이 남아 있으면 워커 큐가 살아 있을 때 먼저 끝낸다. 결과는 버린다.
+    pendingLoad.reset();
     // 렌더러가 쓰는 서피스는 윈도우보다 먼저 파괴되어야 한다.
     editorUi.reset();
     renderer.reset();
@@ -182,41 +185,28 @@ void Application::loadScenes() {
     std::vector<asset::Model> models(files.size());
     jobs.parallelFor(static_cast<uint32_t>(files.size()), 1, [&files, &models](uint32_t begin, uint32_t end) {
         for (uint32_t i = begin; i < end; ++i) {
-            models[i] = asset::loadGltf(files[i]);
+            std::optional<asset::Model> loaded = asset::loadGltf(files[i]);
+            if (!loaded) {
+                core::fatal("기본 에셋을 읽지 못했습니다: {}", files[i].string());
+            }
+            models[i] = std::move(*loaded);
         }
     });
 
+    double parseMs = static_cast<double>(SDL_GetTicksNS() - loadStart) / 1.0e6;
+
     // 텍스처 디코딩과 LOD 구성 모두 모델 경계를 넘어 하나의 목록으로 펼쳐야 워커에 고르게 퍼진다.
     std::vector<asset::Texture*> allTextures;
+    std::vector<asset::Mesh*> allMeshes;
     for (asset::Model& model : models) {
         for (asset::Texture& texture : model.textures) {
             allTextures.push_back(&texture);
         }
-    }
-    jobs.parallelFor(static_cast<uint32_t>(allTextures.size()), 1, [&allTextures](uint32_t begin, uint32_t end) {
-        for (uint32_t i = begin; i < end; ++i) {
-            asset::decodeTexture(*allTextures[i]);
-        }
-    });
-
-    std::vector<asset::Mesh*> allMeshes;
-    for (asset::Model& model : models) {
         for (asset::Mesh& mesh : model.meshes) {
             allMeshes.push_back(&mesh);
         }
     }
-    // 메쉬가 적으면 메쉬 단위 분배만으로는 워커가 놀기 때문에 계층 구성 안쪽까지 나눈다.
-    if (allMeshes.size() >= jobs.workerCount()) {
-        jobs.parallelFor(static_cast<uint32_t>(allMeshes.size()), 1, [&allMeshes](uint32_t begin, uint32_t end) {
-            for (uint32_t i = begin; i < end; ++i) {
-                asset::buildLodHierarchy(*allMeshes[i]);
-            }
-        });
-    } else {
-        for (asset::Mesh* mesh : allMeshes) {
-            asset::buildLodHierarchy(*mesh, &jobs);
-        }
-    }
+    PrepareTimings timings = prepareAssets(allTextures, allMeshes, nullptr);
 
     size_t meshletTotal = 0;
     size_t maxLodLevels = 0;
@@ -224,12 +214,16 @@ void Application::loadScenes() {
         meshletTotal += mesh->meshlets.size();
         maxLodLevels = std::max(maxLodLevels, mesh->lods.size());
     }
-    spdlog::info("에셋 적재 완료: 메쉬 {}, meshlet {}, LOD {}단계, {:.1f} ms, 워커 {}",
-                 allMeshes.size(),
-                 meshletTotal,
-                 maxLodLevels,
-                 static_cast<double>(SDL_GetTicksNS() - loadStart) / 1.0e6,
-                 jobs.workerCount());
+    spdlog::info(
+        "에셋 적재 완료: 메쉬 {}, meshlet {}, LOD {}단계, {:.1f} ms (해석 {:.1f}, 텍스처 {:.1f}, LOD {:.1f}), 워커 {}",
+        allMeshes.size(),
+        meshletTotal,
+        maxLodLevels,
+        static_cast<double>(SDL_GetTicksNS() - loadStart) / 1.0e6,
+        parseMs,
+        timings.textureMs,
+        timings.lodMs,
+        jobs.workerCount());
 
     // GPU 자원 생성은 순서를 지켜 한 스레드에서만 한다.
     for (size_t i = 0; i < files.size(); ++i) {
@@ -245,6 +239,73 @@ void Application::loadScenes() {
     }
     scenes.setActive(std::min(options.initialScene, scenes.count() - 1));
     spdlog::info("장면 {}개 준비 완료, 현재 장면: {}", scenes.count(), scenes.active().name);
+}
+
+Application::PrepareTimings Application::prepareAssets(std::vector<asset::Texture*>& allTextures,
+                                                       std::vector<asset::Mesh*>& allMeshes,
+                                                       asset::LoadProgress* progress) {
+    PrepareTimings timings;
+
+    uint64_t textureStart = SDL_GetTicksNS();
+    if (progress != nullptr) {
+        progress->begin(asset::LoadProgress::Stage::TEXTURES, allTextures.size());
+    }
+    jobs.parallelFor(
+        static_cast<uint32_t>(allTextures.size()), 1, [&allTextures, progress](uint32_t begin, uint32_t end) {
+            for (uint32_t i = begin; i < end; ++i) {
+                asset::decodeTexture(*allTextures[i]);
+                if (progress != nullptr) {
+                    progress->advance();
+                }
+            }
+        });
+    timings.textureMs = static_cast<double>(SDL_GetTicksNS() - textureStart) / 1.0e6;
+
+    uint64_t lodStart = SDL_GetTicksNS();
+    if (progress != nullptr) {
+        uint64_t work = 0;
+        for (const asset::Mesh* mesh : allMeshes) {
+            work += asset::lodWorkEstimate(*mesh);
+        }
+        progress->begin(asset::LoadProgress::Stage::LOD, work);
+    }
+    // 메쉬가 적으면 메쉬 단위 분배만으로는 워커가 놀기 때문에 계층 구성 안쪽까지 나눈다.
+    if (allMeshes.size() >= jobs.workerCount()) {
+        jobs.parallelFor(
+            static_cast<uint32_t>(allMeshes.size()), 1, [&allMeshes, progress](uint32_t begin, uint32_t end) {
+                for (uint32_t i = begin; i < end; ++i) {
+                    asset::buildLodHierarchy(*allMeshes[i], nullptr, progress);
+                }
+            });
+    } else {
+        for (asset::Mesh* mesh : allMeshes) {
+            asset::buildLodHierarchy(*mesh, &jobs, progress);
+        }
+    }
+    timings.lodMs = static_cast<double>(SDL_GetTicksNS() - lodStart) / 1.0e6;
+    return timings;
+}
+
+Application::PrepareTimings Application::prepareModel(asset::Model& model, asset::LoadProgress* progress) {
+    std::vector<asset::Texture*> allTextures;
+    std::vector<asset::Mesh*> allMeshes;
+    for (asset::Texture& texture : model.textures) {
+        allTextures.push_back(&texture);
+    }
+    for (asset::Mesh& mesh : model.meshes) {
+        allMeshes.push_back(&mesh);
+    }
+    return prepareAssets(allTextures, allMeshes, progress);
+}
+
+uint32_t Application::findModel(const std::filesystem::path& path) const {
+    std::error_code error;
+    for (uint32_t i = 0; i < loadedModels.size(); ++i) {
+        if (std::filesystem::equivalent(loadedModels[i].path, path, error)) {
+            return i;
+        }
+    }
+    return static_cast<uint32_t>(loadedModels.size());
 }
 
 uint32_t Application::registerModel(const std::filesystem::path& path, asset::Model& model) {
@@ -268,23 +329,16 @@ uint32_t Application::registerModel(const std::filesystem::path& path, asset::Mo
 }
 
 uint32_t Application::ensureModel(const std::filesystem::path& path) {
-    std::error_code error;
-    for (uint32_t i = 0; i < loadedModels.size(); ++i) {
-        if (std::filesystem::equivalent(loadedModels[i].path, path, error)) {
-            return i;
-        }
+    uint32_t existing = findModel(path);
+    if (existing < loadedModels.size()) {
+        return existing;
     }
-
-    asset::Model model = asset::loadGltf(path);
-    jobs.parallelFor(static_cast<uint32_t>(model.textures.size()), 1, [&model](uint32_t begin, uint32_t end) {
-        for (uint32_t i = begin; i < end; ++i) {
-            asset::decodeTexture(model.textures[i]);
-        }
-    });
-    for (asset::Mesh& mesh : model.meshes) {
-        asset::buildLodHierarchy(mesh, &jobs);
+    std::optional<asset::Model> loaded = asset::loadGltf(path);
+    if (!loaded) {
+        return static_cast<uint32_t>(loadedModels.size());
     }
-    return registerModel(path, model);
+    prepareModel(*loaded, nullptr);
+    return registerModel(path, *loaded);
 }
 
 void Application::instantiateModel(uint32_t modelIndex, scene::Scene& scene) {
@@ -327,18 +381,139 @@ void Application::instantiateModel(uint32_t modelIndex, scene::Scene& scene) {
     scene.refresh();
 }
 
-void Application::loadModel(const std::filesystem::path& path) {
+void Application::requestModel(const std::filesystem::path& path) {
+    loadQueue.push_back(path);
+    startNextLoad();
+}
+
+void Application::startNextLoad() {
+    while (pendingLoad == nullptr && !loadQueue.empty()) {
+        std::filesystem::path path = std::move(loadQueue.front());
+        loadQueue.pop_front();
+
+        // 이미 올라간 모델은 해석도 업로드도 없이 장면에만 붙인다.
+        uint32_t existing = findModel(path);
+        if (existing < loadedModels.size()) {
+            instantiateModel(existing, scenes.active());
+            spdlog::info("모델 적재: {} (이미 올라가 있어 장면에만 붙임)", path.filename().string());
+            continue;
+        }
+
+        pendingLoad = std::make_unique<PendingLoad>();
+        pendingLoad->path = std::move(path);
+        pendingLoad->startTicks = SDL_GetTicksNS();
+        pendingLoad->sceneIndex = scenes.current();
+        PendingLoad* load = pendingLoad.get();
+        // 스레드는 load 가 가리키는 것만 만진다. pendingLoad 는 스레드를 합류한 뒤에만 비운다.
+        load->worker = std::thread([this, load]() {
+            std::optional<asset::Model> loaded = asset::loadGltf(load->path, &load->progress);
+            if (loaded) {
+                load->model = std::move(*loaded);
+                load->timings = prepareModel(load->model, &load->progress);
+            } else {
+                load->failed.store(true, std::memory_order_relaxed);
+            }
+            load->progress.begin(asset::LoadProgress::Stage::DONE);
+            load->finished.store(true, std::memory_order_release);
+        });
+    }
+}
+
+void Application::pumpLoads() {
+    startNextLoad();
+    if (pendingLoad == nullptr || !pendingLoad->finished.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (!pendingLoad->uploadShown) {
+        pendingLoad->progress.begin(asset::LoadProgress::Stage::UPLOAD);
+        pendingLoad->uploadShown = true;
+        return;
+    }
+    pendingLoad->worker.join();
+    completeLoad();
+    startNextLoad();
+}
+
+void Application::completeLoad() {
+    PendingLoad& load = *pendingLoad;
+    // 장면이 지워지는 일은 없지만, 방어적으로 범위를 벗어나면 활성 장면에 붙인다.
+    scene::Scene& target = load.sceneIndex < scenes.count() ? scenes.at(load.sceneIndex) : scenes.active();
+
+    if (load.failed.load(std::memory_order_relaxed)) {
+        spdlog::error("모델 적재 실패: {}", load.path.string());
+        pendingLoad.reset();
+        return;
+    }
+    // 해석하는 동안 장면 파일이 같은 모델을 동기로 올렸을 수 있다. 그러면 두 번 올리지 않고 붙이기만 한다.
+    uint32_t existing = findModel(load.path);
+    if (existing < loadedModels.size()) {
+        instantiateModel(existing, target);
+        spdlog::info("모델 적재: {} (해석 중에 이미 올라가 장면에만 붙임)", load.path.filename().string());
+        pendingLoad.reset();
+        return;
+    }
+
     // 지오메트리 버퍼를 통째로 다시 만들기 때문에 진행 중인 프레임이 끝난 뒤에 손대야 한다.
     renderer->waitIdle();
-    uint64_t start = SDL_GetTicksNS();
+    uint64_t uploadStart = SDL_GetTicksNS();
 
-    uint32_t modelIndex = ensureModel(path);
+    uint32_t modelIndex = registerModel(load.path, load.model);
     geometry->build();
     renderer->onGeometryChanged();
-    instantiateModel(modelIndex, scenes.active());
+    instantiateModel(modelIndex, target);
 
-    spdlog::info(
-        "모델 적재: {} ({:.1f} ms)", path.filename().string(), static_cast<double>(SDL_GetTicksNS() - start) / 1.0e6);
+    uint64_t end = SDL_GetTicksNS();
+    spdlog::info("모델 적재: {} ({:.1f} ms; 텍스처 {:.1f}, LOD {:.1f}, 업로드 {:.1f})",
+                 load.path.filename().string(),
+                 static_cast<double>(end - load.startTicks) / 1.0e6,
+                 load.timings.textureMs,
+                 load.timings.lodMs,
+                 static_cast<double>(end - uploadStart) / 1.0e6);
+    pendingLoad.reset();
+}
+
+void Application::loadModel(const std::filesystem::path& path) {
+    requestModel(path);
+    while (pendingLoad != nullptr) {
+        pendingLoad->worker.join();
+        completeLoad();
+        startNextLoad();
+    }
+}
+
+editor::LoadStatus Application::loadStatus() const {
+    editor::LoadStatus status;
+    if (pendingLoad == nullptr) {
+        return status;
+    }
+    status.active = true;
+    status.file = pendingLoad->path.filename().string();
+    status.queued = loadQueue.size();
+    switch (pendingLoad->progress.stage.load(std::memory_order_acquire)) {
+    case asset::LoadProgress::Stage::PARSE:
+        status.stage = "파일 해석";
+        break;
+    case asset::LoadProgress::Stage::CONVERT:
+        status.stage = "정점 변환";
+        break;
+    case asset::LoadProgress::Stage::TEXTURES:
+        status.stage = "텍스처 디코딩";
+        break;
+    case asset::LoadProgress::Stage::LOD:
+        status.stage = "LOD 계층 구축";
+        break;
+    case asset::LoadProgress::Stage::UPLOAD:
+    case asset::LoadProgress::Stage::DONE:
+        // 해석이 끝난 뒤 업로드가 시작되기까지의 한 프레임도 같은 글자로 보인다.
+        status.stage = "GPU 업로드";
+        break;
+    default:
+        status.stage = "준비";
+        break;
+    }
+    status.fraction = pendingLoad->progress.fraction();
+    status.indeterminate = pendingLoad->progress.total.load(std::memory_order_relaxed) == 0;
+    return status;
 }
 
 void Application::saveScene(const std::filesystem::path& path) {
@@ -397,12 +572,18 @@ void Application::openScene(const std::filesystem::path& path) {
     scene::SceneFile loaded = scene::readScene(text);
 
     // 적재는 지오메트리 버퍼를 다시 만드므로 진행 중인 프레임이 끝난 뒤에 한다.
+    // ponytail: 장면 파일의 모델은 아직 동기로 올린다. 백그라운드 적재가 도는 중이면 같은 워커를 나눠
+    // 써서 둘 다 느려질 뿐 결과는 옳다.
     renderer->waitIdle();
     std::vector<uint32_t> modelIndices;
     modelIndices.reserve(loaded.models.size());
     for (const std::filesystem::path& modelPath : loaded.models) {
         // 상대 경로는 에셋 뿌리 기준으로 푼다.
-        modelIndices.push_back(ensureModel(modelPath.is_absolute() ? modelPath : assetRoot / modelPath));
+        uint32_t index = ensureModel(modelPath.is_absolute() ? modelPath : assetRoot / modelPath);
+        if (index >= loadedModels.size()) {
+            spdlog::error("장면이 가리키는 모델을 읽지 못해 그 오브젝트는 메쉬 없이 둔다: {}", modelPath.string());
+        }
+        modelIndices.push_back(index);
     }
     if (!loaded.models.empty()) {
         geometry->build();
@@ -415,9 +596,13 @@ void Application::openScene(const std::filesystem::path& path) {
     if (!created.environment.hdrPath.empty() && !created.environment.hdrPath.is_absolute()) {
         created.environment.hdrPath = assetRoot / created.environment.hdrPath;
     }
+    auto resolved = [&](int32_t model) {
+        return model >= 0 && static_cast<size_t>(model) < modelIndices.size() &&
+               modelIndices[static_cast<size_t>(model)] < loadedModels.size();
+    };
     for (size_t i = 0; i < created.objects.size(); ++i) {
         int32_t model = loaded.objectModels[i];
-        if (model >= 0 && static_cast<size_t>(model) < modelIndices.size()) {
+        if (resolved(model)) {
             created.attachMeshRenderer(static_cast<uint32_t>(i),
                                        loadedModels[modelIndices[model]].meshBase + loaded.objectLocalMeshes[i],
                                        created.skinOf(static_cast<uint32_t>(i)));
@@ -425,7 +610,7 @@ void Application::openScene(const std::filesystem::path& path) {
     }
     for (size_t i = 0; i < created.animators.size(); ++i) {
         int32_t model = loaded.animatorModels[i];
-        if (model >= 0 && static_cast<size_t>(model) < modelIndices.size()) {
+        if (resolved(model)) {
             created.animators[i].skeleton = loadedModels[modelIndices[model]].skeleton;
         }
     }
@@ -497,6 +682,10 @@ void Application::run() {
         // 밀린 크기 변경은 UI 가 렌더 타겟을 참조하기 전에 끝내야 한다.
         renderer->prepareFrame();
         renderer->setDisplayExtent(editorUi->desiredRenderExtent());
+        // 백그라운드 해석이 끝난 모델을 올린다. 편집기보다 앞이라 "GPU 업로드" 표시가 올린 프레임에
+        // 그려진 채로 남고, 그 다음 프레임의 pumpLoads 가 실제로 올리는 동안 화면에 보인다.
+        pumpLoads();
+        editorUi->setLoadStatus(loadStatus());
         {
             gfx::ProfilerScope scope(renderer->profiler(), "편집기 UI");
             editorUi->build(scenes, *geometry, deltaSeconds);

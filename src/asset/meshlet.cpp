@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -7,6 +8,7 @@
 #include <meshoptimizer.h>
 #include <spdlog/spdlog.h>
 
+#include "asset/load_progress.h"
 #include "asset/model.h"
 #include "core/job_system.h"
 
@@ -148,8 +150,26 @@ std::vector<std::vector<size_t>> partitionMeshlets(const std::vector<BuildMeshle
 
 } // namespace
 
-void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs) {
+uint64_t lodWorkEstimate(const Mesh& mesh) {
+    // 0 단계 분할이 인덱스 수만큼, 그 뒤 단계가 절반씩 줄어드는 인덱스 수만큼 든다고 보면 합은 세 배쯤이다.
+    return static_cast<uint64_t>(mesh.indices.size()) * 3;
+}
+
+void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs, LoadProgress* progress) {
+    // 이 메쉬가 진행률에 더하는 몫은 어림값과 정확히 같아야 한다. 덜 쓰면 끝에서 메우고, 더 쓰면
+    // (단순화에 실패한 그룹이 많아 단계마다 절반으로 줄지 않을 때) 어림값에서 자른다. 그래야 메쉬
+    // 여럿이 총량 하나를 나눠 쓸 때 한 메쉬가 남의 몫까지 채우지 않는다.
+    uint64_t workBudget = lodWorkEstimate(mesh);
+    std::atomic<uint64_t> workConsumed{0};
+    auto reportWork = [&](uint64_t amount) {
+        uint64_t before = workConsumed.fetch_add(amount, std::memory_order_relaxed);
+        uint64_t remaining = before < workBudget ? workBudget - before : 0;
+        if (progress != nullptr && remaining > 0) {
+            progress->advance(std::min(amount, remaining));
+        }
+    };
     if (mesh.indices.empty() || mesh.vertices.empty()) {
+        reportWork(workBudget);
         return;
     }
 
@@ -166,6 +186,7 @@ void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs) {
 
     std::vector<std::vector<BuildMeshlet>> levels;
     levels.push_back(splitIntoMeshlets(indices, canonical, 0));
+    reportWork(indices.size());
 
     for (uint32_t level = 1; level < MAX_LOD_LEVELS; ++level) {
         std::vector<BuildMeshlet>& previous = levels.back();
@@ -209,18 +230,39 @@ void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs) {
                     continue;
                 }
 
+                // 그룹이 쓰는 정점만 모아 지역 번호로 바꾼다. meshopt_simplify 는 넘긴 정점 수에 비례해
+                // 배열을 만들고 훑으므로, 전체 메쉬를 넘기면 그룹마다 메쉬 전체를 다시 읽는 셈이 된다.
+                // 정점 2천만 개 메쉬에서 그룹 하나가 0.6 초씩 걸리던 것이 이 압축으로 밀리초 아래로 내려간다.
+                std::vector<uint32_t> groupVertices = merged;
+                std::sort(groupVertices.begin(), groupVertices.end());
+                groupVertices.erase(std::unique(groupVertices.begin(), groupVertices.end()), groupVertices.end());
+                std::vector<glm::vec3> groupPositions(groupVertices.size());
+                for (size_t i = 0; i < groupVertices.size(); ++i) {
+                    groupPositions[i] = canonical[groupVertices[i]].position;
+                }
+                std::vector<uint32_t> localIndices(merged.size());
+                for (size_t i = 0; i < merged.size(); ++i) {
+                    localIndices[i] =
+                        static_cast<uint32_t>(std::lower_bound(groupVertices.begin(), groupVertices.end(), merged[i]) -
+                                              groupVertices.begin());
+                }
+
+                // 오차는 절대 단위로 주고받는다. 상대 오차는 넘긴 정점의 범위 기준이라 그룹마다 달라진다.
                 std::vector<uint32_t> simplified(merged.size());
-                float relativeError = 0.0F;
+                float absoluteError = 0.0F;
                 size_t simplifiedCount = meshopt_simplify(simplified.data(),
-                                                          merged.data(),
-                                                          merged.size(),
-                                                          positions,
-                                                          canonical.size(),
-                                                          sizeof(Vertex),
+                                                          localIndices.data(),
+                                                          localIndices.size(),
+                                                          &groupPositions.front().x,
+                                                          groupPositions.size(),
+                                                          sizeof(glm::vec3),
                                                           targetIndexCount,
-                                                          SIMPLIFY_TARGET_ERROR,
-                                                          meshopt_SimplifyLockBorder,
-                                                          &relativeError);
+                                                          SIMPLIFY_TARGET_ERROR * simplifyScale,
+                                                          meshopt_SimplifyLockBorder | meshopt_SimplifyErrorAbsolute,
+                                                          &absoluteError);
+                for (size_t i = 0; i < simplifiedCount; ++i) {
+                    simplified[i] = groupVertices[simplified[i]];
+                }
 
                 bool reduced =
                     static_cast<float>(simplifiedCount) <= static_cast<float>(merged.size()) * MIN_SIMPLIFY_PROGRESS;
@@ -232,8 +274,7 @@ void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs) {
                 }
 
                 glm::vec4 groupSphere = mergeSpheres(childSpheres);
-                float groupError =
-                    childError + (reduced ? relativeError * simplifyScale : simplifyScale * CARRY_ERROR_EPSILON);
+                float groupError = childError + (reduced ? absoluteError : simplifyScale * CARRY_ERROR_EPSILON);
 
                 for (size_t child : group) {
                     previous[child].parentSphere = groupSphere;
@@ -247,6 +288,7 @@ void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs) {
                 }
                 results[groupIndex].reduced = reduced;
                 results[groupIndex].valid = true;
+                reportWork(merged.size());
             }
         };
 
@@ -281,6 +323,10 @@ void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs) {
     for (BuildMeshlet& meshlet : levels.front()) {
         meshlet.errorSphere = meshlet.boundingSphere;
         meshlet.error = 0.0F;
+    }
+
+    if (uint64_t consumed = workConsumed.load(std::memory_order_relaxed); consumed < workBudget) {
+        reportWork(workBudget - consumed);
     }
 
     // GPU 배치로 펼친다. meshlet 마다 정점을 소유하고, 인덱스는 LOD 단계별로 이어 둔다.

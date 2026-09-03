@@ -1,10 +1,14 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <memory>
+#include <thread>
 #include <vector>
 
+#include "asset/load_progress.h"
 #include "asset/model.h"
 #include "core/job_system.h"
 #include "editor/editor.h"
@@ -78,14 +82,41 @@ private:
     };
 
     void loadScenes();
+
+    // 해석된 모델을 GPU 에 올리기 전에 하는 CPU 작업 전부. 텍스처 디코딩과 LOD 계층 구축이다.
+    // 어느 스레드에서든 부를 수 있고 안에서 워커를 나눠 쓴다. 단계별 시간을 ms 로 돌려준다.
+    struct PrepareTimings {
+        double textureMs = 0.0;
+        double lodMs = 0.0;
+    };
+    PrepareTimings prepareAssets(std::vector<asset::Texture*>& allTextures,
+                                 std::vector<asset::Mesh*>& allMeshes,
+                                 asset::LoadProgress* progress);
+    PrepareTimings prepareModel(asset::Model& model, asset::LoadProgress* progress);
+
     // 이미 해석해 둔 모델을 GPU 에 올리고 등록 번호를 돌려준다. 지오메트리 재구축은 부르는 쪽 몫이다.
     uint32_t registerModel(const std::filesystem::path& path, asset::Model& model);
-    // 모델을 아직 올리지 않았으면 해석해서 올리고 등록 번호를 돌려준다.
+    // 같은 파일이 이미 올라가 있으면 그 등록 번호를, 아니면 loadedModels.size() 를 돌려준다.
+    uint32_t findModel(const std::filesystem::path& path) const;
+    // 모델을 아직 올리지 않았으면 해석해서 올리고 등록 번호를 돌려준다. 부르는 스레드에서 끝까지 한다.
+    // 해석에 실패하면 loadedModels.size() 를 돌려준다.
     uint32_t ensureModel(const std::filesystem::path& path);
     // 등록된 모델로 장면에 뿌리 오브젝트와 자식들을 만든다.
     void instantiateModel(uint32_t modelIndex, scene::Scene& scene);
-    // 편집기가 부르는 런타임 적재. 지오메트리 버퍼를 다시 만들고 활성 장면에 붙인다.
+
+    // 편집기가 부르는 런타임 적재. 해석은 백그라운드 스레드가 하고, 끝나면 pumpLoads 가 GPU 에 올려
+    // 활성 장면에 붙인다. 창이 멈추지 않는다. 적재 중에 또 부르면 줄을 서서 차례로 처리한다.
+    void requestModel(const std::filesystem::path& path);
+    // 줄 선 요청 가운데 하나를 백그라운드로 시작한다. 이미 올라간 모델이면 바로 붙인다.
+    void startNextLoad();
+    // 프레임마다 한 번. 백그라운드 해석이 끝났으면 GPU 에 올리고 장면에 붙인다.
+    void pumpLoads();
+    // 해석이 끝나 스레드까지 합류한 pendingLoad 를 GPU 에 올리고 장면에 붙인 뒤 비운다.
+    void completeLoad();
+    // 시작 인자처럼 결과가 바로 필요한 자리에서 쓴다. 요청하고 큐가 빌 때까지 기다린다.
     void loadModel(const std::filesystem::path& path);
+    // 편집기가 진행 막대에 보여줄 상태.
+    editor::LoadStatus loadStatus() const;
     // 장면을 커스텀 JSON 으로 저장하고 읽는다. 읽은 장면은 새 장면으로 추가한 뒤 전환한다.
     void saveScene(const std::filesystem::path& path);
     void openScene(const std::filesystem::path& path);
@@ -98,6 +129,32 @@ private:
     std::unique_ptr<gfx::Renderer> renderer;
     std::unique_ptr<editor::Editor> editorUi;
     core::JobSystem jobs;
+
+    // 백그라운드에서 해석 중인 모델 하나. 스레드는 model 과 progress 만 만지고, GPU 자원과 장면은
+    // 끝난 뒤 메인 스레드가 완성한다. jobs 보다 뒤에 있어야 먼저 파괴되어 워커를 쓰는 채로 남지 않는다.
+    struct PendingLoad {
+        std::filesystem::path path;
+        asset::Model model;
+        asset::LoadProgress progress;
+        std::atomic<bool> finished{false};
+        // 해석에 실패했다. finished 와 함께 세워지고, 메인 스레드가 로그만 남기고 버린다.
+        std::atomic<bool> failed{false};
+        // 업로드 단계를 한 프레임 보여준 뒤 올린다. 큰 모델은 업로드만 몇 초라 표시가 있어야 한다.
+        bool uploadShown = false;
+        // 요청한 순간의 활성 장면. 적재 중에 장면을 옮겨도 요청한 곳에 붙는다.
+        size_t sceneIndex = 0;
+        uint64_t startTicks = 0;
+        PrepareTimings timings;
+        std::thread worker;
+        ~PendingLoad() {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+    };
+    std::unique_ptr<PendingLoad> pendingLoad;
+    std::deque<std::filesystem::path> loadQueue;
+
     scene::SceneManager scenes;
     std::filesystem::path assetRoot;
     std::filesystem::path sceneRoot;

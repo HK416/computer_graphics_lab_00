@@ -245,6 +245,7 @@ public:
     const Scene& active() const { return scenes[activeIndex]; }
     size_t count() const { return scenes.size(); }
     size_t current() const { return activeIndex; }
+    Scene& at(size_t index) { return scenes[index]; }
     const Scene& at(size_t index) const { return scenes[index]; }
 
 private:

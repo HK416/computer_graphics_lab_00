@@ -1358,6 +1358,36 @@ void Editor::buildConsole() {
 }
 
 // F 키로 선택한 오브젝트를 궤도 중심으로 삼는다. 텍스트를 입력하는 중에는 받지 않는다.
+void Editor::buildLoadOverlay() {
+    if (!loadStatus.active) {
+        return;
+    }
+    // 장면 뷰가 아니라 주 뷰포트 아래 가운데에 띄운다. 도킹 배치와 무관하게 늘 같은 자리에 보인다.
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImVec2 position{viewport->WorkPos.x + viewport->WorkSize.x * 0.5F,
+                    viewport->WorkPos.y + viewport->WorkSize.y - 24.0F};
+    ImGui::SetNextWindowPos(position, ImGuiCond_Always, ImVec2{0.5F, 1.0F});
+    ImGui::SetNextWindowBgAlpha(0.9F);
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking |
+                             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
+                             ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs;
+    if (ImGui::Begin("##load_overlay", nullptr, flags)) {
+        ImGui::Text("모델 적재 중: %s", loadStatus.file.c_str());
+        std::string label = loadStatus.stage;
+        if (loadStatus.queued > 0) {
+            label += " (대기 " + std::to_string(loadStatus.queued) + "개)";
+        }
+        if (loadStatus.indeterminate) {
+            // 음수 분율은 끝을 모르는 단계의 흐르는 막대다. 살아 있음을 보이는 것이 목적이다.
+            ImGui::ProgressBar(-1.0F * static_cast<float>(ImGui::GetTime()), ImVec2{360.0F, 0.0F}, label.c_str());
+        } else {
+            std::string percent = label + " " + std::to_string(static_cast<int>(loadStatus.fraction * 100.0F)) + "%";
+            ImGui::ProgressBar(loadStatus.fraction, ImVec2{360.0F, 0.0F}, percent.c_str());
+        }
+    }
+    ImGui::End();
+}
+
 void Editor::focusSelected(scene::Scene& active, const gfx::GeometryStore& geometry) {
     int selectedObject = primarySelection();
     if (selectedObject < 0 || static_cast<size_t>(selectedObject) >= active.objects.size()) {
@@ -1396,6 +1426,7 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
     buildSceneView(scenes.active());
     buildRenderSettings(scenes.active(), deltaSeconds);
     buildConsole();
+    buildLoadOverlay();
     focusSelected(scenes.active(), geometry);
 
     // 적재와 장면 전환은 지오메트리 버퍼를 다시 만들기 때문에 패널을 다 그린 뒤에 처리한다.

@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -30,6 +31,18 @@ namespace editor {
 
 class LogSink;
 
+// 백그라운드 모델 적재의 진행 상황. 애플리케이션이 프레임마다 채우고 편집기는 겹침 창으로 보여 준다.
+struct LoadStatus {
+    bool active = false;
+    std::string file;
+    std::string stage;
+    // 0 과 1 사이. indeterminate 면 끝을 모르는 단계라 무시한다.
+    float fraction = 0.0F;
+    bool indeterminate = false;
+    // 뒤에 줄 서 있는 요청 수.
+    size_t queued = 0;
+};
+
 // Unity 편집기와 비슷한 도킹 구성의 GUI. 장면 뷰는 렌더러의 표시 이미지를 그대로 띄운다.
 class Editor {
 public:
@@ -45,6 +58,7 @@ public:
     void setSceneIo(std::filesystem::path root,
                     std::function<void(const std::filesystem::path&)> saver,
                     std::function<void(const std::filesystem::path&)> opener);
+    void setLoadStatus(LoadStatus status) { loadStatus = std::move(status); }
     void build(scene::SceneManager& scenes, const gfx::GeometryStore& geometry, float deltaSeconds);
     void record(VkCommandBuffer commandBuffer);
 
@@ -63,6 +77,8 @@ private:
     void buildSceneView(scene::Scene& active);
     void buildRenderSettings(scene::Scene& active, float deltaSeconds);
     void buildConsole();
+    // 적재 중일 때만 화면 아래에 진행 막대를 띄운다.
+    void buildLoadOverlay();
     // 장면이 바뀌었으면 되돌리기 기록에 담고, Ctrl+Z / Ctrl+Y 를 처리한다.
     void updateHistory(scene::Scene& active, size_t sceneIndex);
     VkDescriptorSet textureFor(VkImageView view, VkImageLayout layout);
@@ -132,6 +148,7 @@ private:
     // 렌더 설정 패널의 그룹 검색어. 비어 있으면 모든 그룹을 접었다 펼 수 있게 보여 준다.
     std::array<char, 64> settingsFilter{};
     float frameTimeMilliseconds = 0.0F;
+    LoadStatus loadStatus;
 
 public:
     // 통계 표시용. 애플리케이션이 채운다.

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -194,7 +195,12 @@ struct Model {
     Skeleton skeleton;
 };
 
-Model loadGltf(const std::filesystem::path& path);
+struct LoadProgress;
+
+// 파일을 열지 못하거나 지원하지 않는 내용이면 사유를 로그에 남기고 비어 있는 값을 돌려준다. 종료는
+// 부르는 쪽이 정한다. 백그라운드 스레드에서도 부르므로 여기서 프로세스를 끝내면 안 된다.
+// progress 를 주면 파싱과 정점 변환 단계의 진행을 적는다.
+std::optional<Model> loadGltf(const std::filesystem::path& path, LoadProgress* progress = nullptr);
 
 // clip 을 time 위치에서 표본화해 노드마다 세계 변환을 만든다. clip 이 범위를 벗어나면 바인드 포즈다.
 void poseNodes(const Skeleton& skeleton, uint32_t clip, float time, std::vector<glm::mat4>& worlds);
@@ -207,7 +213,11 @@ void skinMatrices(const Skeleton& skeleton,
 
 // 정점 캐시와 오버드로를 최적화한 뒤 meshlet 으로 나누고, 단계별로 묶어 단순화해 LOD DAG 를 만든다.
 // 정점 버퍼는 meshlet 마다 정점을 소유하도록, 인덱스 버퍼는 LOD 단계별로 이어지도록 다시 만들어진다.
-void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs = nullptr);
+// progress 를 주면 lodWorkEstimate(mesh) 만큼을 그룹 단위로 나눠 더한다. 총량은 부르는 쪽이 미리 잡는다.
+void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs = nullptr, LoadProgress* progress = nullptr);
+
+// buildLodHierarchy 가 progress 에 더하는 총량. 단계마다 절반씩 줄어드는 인덱스 수의 합을 어림한 값이다.
+uint64_t lodWorkEstimate(const Mesh& mesh);
 
 // 인코딩된 바이트를 RGBA8 로 푼다. 텍스처마다 독립이라 병렬로 돌릴 수 있다.
 void decodeTexture(Texture& texture);
