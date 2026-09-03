@@ -1015,7 +1015,11 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         if (rasterOnly) {
             ImGui::TextDisabled("경로 추적 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
         } else if (!rayQueryReady) {
-            ImGui::TextDisabled("이 장치는 광선 질의를 지원하지 않는다");
+            if (!renderer.rayTracingBlocked().empty()) {
+                ImGui::TextWrapped("%s", renderer.rayTracingBlocked().c_str());
+            } else {
+                ImGui::TextDisabled("이 장치는 광선 질의를 지원하지 않는다");
+            }
         } else {
             ImGui::TextDisabled("이 거리 안쪽만 광선으로 판정하고 바깥은 그림자 맵을 쓴다");
         }
@@ -1243,6 +1247,9 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         if (!renderer.pathTracingAvailable()) {
             ImGui::SameLine();
             ImGui::TextDisabled("(미지원)");
+            if (!renderer.rayTracingBlocked().empty()) {
+                ImGui::TextWrapped("%s", renderer.rayTracingBlocked().c_str());
+            }
         } else if (renderer.usePathTracing) {
             gfx::PathTraceOptions& options = renderer.pathTrace;
             int bounces = static_cast<int>(options.maxBounces);

@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <glm/mat4x4.hpp>
@@ -294,6 +295,8 @@ public:
     bool useRayQueryShadows = false;
     float rayShadowDistance = 12.0F;
     bool rayQueryShadowsAvailable() const;
+    // 광선 기능이 처음 필요할 때 하위 가속 구조를 세운다. 예산을 넘으면 사유를 남기고 광선 기능을 끈다.
+    bool ensureBottomLevel();
     // 광선 반사: 거칠기가 상한 이하인 불투명 표면의 스페큘러 IBL 을 추적한 반사로 바꾼다. 광선
     // 질의와 IBL 이 있어야 하고, 경로 추적 중에는 그쪽이 반사를 직접 계산하므로 꺼진다.
     bool useReflections = false;
@@ -320,10 +323,12 @@ public:
     LodNetwork lodNetwork;
     uint32_t lastSelectedTriangles = 0;
 
-    // 경로 추적. 하드웨어가 지원할 때만 켤 수 있다.
+    // 경로 추적. 하드웨어가 지원하고 가속 구조가 예산에 들어갈 때만 켤 수 있다.
     bool usePathTracing = false;
     PathTraceOptions pathTrace;
-    bool pathTracingAvailable() const { return rayTracer != nullptr; }
+    bool pathTracingAvailable() const { return rayTracer != nullptr && rayTracingBlockedReason.empty(); }
+    // 하위 가속 구조를 세우지 못한 사유. 비어 있으면 광선 기능을 쓸 수 있다. 편집기가 보여 준다.
+    const std::string& rayTracingBlocked() const { return rayTracingBlockedReason; }
     void invalidateEnvironment() {
         if (environment) {
             environment->invalidate();
@@ -567,6 +572,7 @@ private:
     uint32_t meshletVisibilityCapacity = 0;
     bool visibilityNeedsClear = true;
     PFN_vkCmdDrawIndexedIndirectCount drawIndexedIndirectCount = nullptr;
+    std::string rayTracingBlockedReason;
     VkPipelineLayout postPipelineLayout = VK_NULL_HANDLE;
     VkPipeline compositePipeline = VK_NULL_HANDLE;
     VkPipeline tonemapPipeline = VK_NULL_HANDLE;

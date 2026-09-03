@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <string>
 
 #include <glm/mat4x4.hpp>
@@ -157,38 +159,30 @@ void RayTracer::reserveScratch(Buffer& buffer, VkDeviceSize size, const char* de
                           context.accelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment);
 }
 
-void RayTracer::buildBottomLevel() {
+void RayTracer::invalidateBottomLevel() {
     for (AccelerationStructure& structure : bottomLevels) {
         destroyStructure(structure);
     }
     bottomLevels.clear();
-    bottomLevels.resize(geometry.meshCount());
+    // 상위 구조는 하위 구조 주소를 담고 있어 함께 버린다. ready() 가 거짓이 되어 다음 프레임에 다시 세운다.
+    destroyStructure(topLevel);
+}
 
-    // 빌드는 한 번에 제출한다. 메쉬가 많아도 명령 버퍼 하나로 끝난다.
-    VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-    poolInfo.queueFamilyIndex = context.queueFamilies.graphics;
-    VkCommandPool pool = VK_NULL_HANDLE;
-    VK_CHECK(vkCreateCommandPool(context.device, &poolInfo, nullptr, &pool));
+bool RayTracer::buildBottomLevel(std::string& reason) {
+    invalidateBottomLevel();
+    auto buildStart = std::chrono::steady_clock::now();
 
-    VkCommandBufferAllocateInfo allocateInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    allocateInfo.commandPool = pool;
-    allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocateInfo.commandBufferCount = 1;
-    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-    VK_CHECK(vkAllocateCommandBuffers(context.device, &allocateInfo, &commandBuffer));
-
-    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
-
-    VkDeviceSize scratchNeeded = 0;
-    std::vector<VkAccelerationStructureGeometryKHR> geometries(geometry.meshCount());
-    std::vector<VkAccelerationStructureBuildGeometryInfoKHR> buildInfos(geometry.meshCount());
-    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges(geometry.meshCount());
-    std::vector<VkDeviceSize> scratchOffsets(geometry.meshCount());
-
-    for (uint32_t index = 0; index < geometry.meshCount(); ++index) {
+    // 먼저 크기만 재서 예산에 들어가는지 본다. 넘기면 할당이 시스템 메모리로 넘어가 통과한 뒤 빌드
+    // 중에 장치를 잃으므로, 만들기 전에 거른다.
+    uint32_t meshCount = geometry.meshCount();
+    std::vector<VkAccelerationStructureGeometryKHR> geometries(meshCount);
+    std::vector<VkAccelerationStructureBuildGeometryInfoKHR> buildInfos(meshCount);
+    std::vector<VkAccelerationStructureBuildSizesInfoKHR> sizes(meshCount);
+    std::vector<uint32_t> primitiveCounts(meshCount);
+    VkDeviceSize structureBytes = 0;
+    VkDeviceSize largestScratch = 0;
+    VkDeviceSize totalScratch = 0;
+    for (uint32_t index = 0; index < meshCount; ++index) {
         const GpuMesh& mesh = geometry.mesh(index);
         const GpuMeshLod& lod = geometry.lod(mesh.lodOffset);
 
@@ -217,47 +211,105 @@ void RayTracer::buildBottomLevel() {
         buildInfos[index].geometryCount = 1;
         buildInfos[index].pGeometries = &geometries[index];
 
-        uint32_t primitiveCount = lod.indexCount / 3;
-        VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+        primitiveCounts[index] = lod.indexCount / 3;
+        sizes[index] =
+            VkAccelerationStructureBuildSizesInfoKHR{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
         getBuildSizes(context.device,
                       VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
                       &buildInfos[index],
-                      &primitiveCount,
-                      &sizes);
-
-        bottomLevels[index] =
-            createStructure(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, sizes.accelerationStructureSize);
-        buildInfos[index].dstAccelerationStructure = bottomLevels[index].handle;
-
-        scratchOffsets[index] = scratchNeeded;
-        scratchNeeded += alignUp(sizes.buildScratchSize, 256);
-
-        ranges[index] = {};
-        ranges[index].primitiveCount = primitiveCount;
+                      &primitiveCounts[index],
+                      &sizes[index]);
+        structureBytes += sizes[index].accelerationStructureSize;
+        VkDeviceSize scratch = alignUp(sizes[index].buildScratchSize, 256);
+        largestScratch = std::max(largestScratch, scratch);
+        totalScratch += scratch;
     }
 
-    reserveScratch(scratchBuffer, std::max<VkDeviceSize>(scratchNeeded, 256), "가속 구조 스크래치");
-
-    std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> rangePointers(geometry.meshCount());
-    for (uint32_t index = 0; index < geometry.meshCount(); ++index) {
-        buildInfos[index].scratchData.deviceAddress = scratchBuffer.address + scratchOffsets[index];
-        rangePointers[index] = &ranges[index];
+    // 한 제출에 넣을 스크래치 합의 한도. 전부 합쳐 이 아래면 한 번에, 아니면 이만큼씩 끊어 제출한다.
+    // 메쉬 하나가 이보다 크면 그것만 따로 제출한다.
+    constexpr VkDeviceSize SCRATCH_BATCH_BYTES = 256ULL * 1024 * 1024;
+    VkDeviceSize scratchBytes = std::max(std::min(totalScratch, SCRATCH_BATCH_BYTES), largestScratch);
+    Context::MemoryBudget budget = context.deviceMemoryBudget();
+    VkDeviceSize available = budget.budget > budget.usage ? budget.budget - budget.usage : 0;
+    constexpr double MB = 1024.0 * 1024.0;
+    if (structureBytes + scratchBytes > available) {
+        reason = std::format("하위 가속 구조 {:.0f} MB 와 스크래치 {:.0f} MB 가 남은 GPU 예산 {:.0f} MB 를 넘습니다",
+                             static_cast<double>(structureBytes) / MB,
+                             static_cast<double>(scratchBytes) / MB,
+                             static_cast<double>(available) / MB);
+        return false;
     }
-    cmdBuildAccelerationStructures(
-        commandBuffer, static_cast<uint32_t>(buildInfos.size()), buildInfos.data(), rangePointers.data());
 
-    VK_CHECK(vkEndCommandBuffer(commandBuffer));
+    VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolInfo.queueFamilyIndex = context.queueFamilies.graphics;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateCommandPool(context.device, &poolInfo, nullptr, &pool));
+    VkCommandBufferAllocateInfo allocateInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    allocateInfo.commandPool = pool;
+    allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocateInfo.commandBufferCount = 1;
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VK_CHECK(vkAllocateCommandBuffers(context.device, &allocateInfo, &commandBuffer));
 
-    VkCommandBufferSubmitInfo commandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
-    commandInfo.commandBuffer = commandBuffer;
-    VkSubmitInfo2 submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
-    submitInfo.commandBufferInfoCount = 1;
-    submitInfo.pCommandBufferInfos = &commandInfo;
-    VK_CHECK(vkQueueSubmit2(context.graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE));
-    VK_CHECK(vkQueueWaitIdle(context.graphicsQueue));
+    bottomLevels.resize(meshCount);
+    reserveScratch(scratchBuffer, std::max<VkDeviceSize>(scratchBytes, 256), "가속 구조 스크래치");
+
+    // 스크래치 한도만큼 묶어 제출하고 기다린다. 묶음마다 스크래치를 처음부터 다시 쓴다.
+    uint32_t submissions = 0;
+    uint32_t first = 0;
+    while (first < meshCount) {
+        VkDeviceSize used = 0;
+        uint32_t last = first;
+        std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
+        std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> rangePointers;
+        while (last < meshCount) {
+            VkDeviceSize scratch = alignUp(sizes[last].buildScratchSize, 256);
+            if (last > first && used + scratch > scratchBuffer.size) {
+                break;
+            }
+            bottomLevels[last] =
+                createStructure(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, sizes[last].accelerationStructureSize);
+            buildInfos[last].dstAccelerationStructure = bottomLevels[last].handle;
+            buildInfos[last].scratchData.deviceAddress = scratchBuffer.address + used;
+            used += scratch;
+            ++last;
+        }
+        ranges.resize(last - first);
+        rangePointers.resize(last - first);
+        for (uint32_t index = first; index < last; ++index) {
+            ranges[index - first] = {};
+            ranges[index - first].primitiveCount = primitiveCounts[index];
+            rangePointers[index - first] = &ranges[index - first];
+        }
+
+        VK_CHECK(vkResetCommandPool(context.device, pool, 0));
+        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+        cmdBuildAccelerationStructures(commandBuffer, last - first, &buildInfos[first], rangePointers.data());
+        VK_CHECK(vkEndCommandBuffer(commandBuffer));
+
+        VkCommandBufferSubmitInfo commandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+        commandInfo.commandBuffer = commandBuffer;
+        VkSubmitInfo2 submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+        submitInfo.commandBufferInfoCount = 1;
+        submitInfo.pCommandBufferInfos = &commandInfo;
+        VK_CHECK(vkQueueSubmit2(context.graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE));
+        VK_CHECK(vkQueueWaitIdle(context.graphicsQueue));
+        ++submissions;
+        first = last;
+    }
     vkDestroyCommandPool(context.device, pool, nullptr);
 
-    spdlog::info("하위 가속 구조 {}개 생성", bottomLevels.size());
+    double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - buildStart).count();
+    spdlog::info("하위 가속 구조 {}개 생성: {:.0f} MB, 스크래치 {:.0f} MB, 제출 {}회, {:.1f} ms",
+                 bottomLevels.size(),
+                 static_cast<double>(structureBytes) / MB,
+                 static_cast<double>(scratchBuffer.size) / MB,
+                 submissions,
+                 elapsed);
+    return true;
 }
 
 void RayTracer::barrierBeforeBuild(VkCommandBuffer commandBuffer) {

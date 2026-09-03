@@ -372,8 +372,8 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& 
     createPresentSemaphores();
     // 광선 질의 그림자 파이프라인이 TLAS 디스크립터 배치를 필요로 하므로 먼저 만든다.
     if (context.caps.rayTracingPipeline) {
+        // 하위 가속 구조는 광선 기능이 처음 필요할 때 세운다. 큰 모델은 예산을 넘겨 못 세울 수 있다.
         rayTracer = std::make_unique<RayTracer>(context, geometry, bindless);
-        rayTracer->buildBottomLevel();
     }
     createMeshPipelines();
     createPostPipelines();
@@ -1977,7 +1977,7 @@ bool Renderer::reflectionsActive() const {
 }
 
 bool Renderer::rayQueryShadowsAvailable() const {
-    return context.caps.rayQuery && rayTracer != nullptr;
+    return context.caps.rayQuery && rayTracer != nullptr && rayTracingBlockedReason.empty();
 }
 
 void Renderer::createMeshPipelines() {
@@ -3223,6 +3223,9 @@ void Renderer::updateAccelerationStructures(VkCommandBuffer commandBuffer, const
     // 지난 구조가 가리키던 자리가 덮어써지므로 포즈가 그대로여도 다시 세운다.
     // ponytail: 포즈가 그대로인 스킨 오브젝트까지 매 프레임 다시 세운다. 반쪽을 번갈지 않고 복사로
     // 지난 포즈를 남기면 건너뛸 수 있다.
+    if (!ensureBottomLevel()) {
+        return;
+    }
     if (!sceneChangedThisFrame && skinnedInstances.empty() && rayTracer->ready()) {
         return;
     }
@@ -4228,8 +4231,30 @@ void Renderer::writeCapture() {
 
 void Renderer::onGeometryChanged() {
     if (rayTracer != nullptr) {
-        rayTracer->buildBottomLevel();
+        rayTracer->invalidateBottomLevel();
     }
+    // 모델이 더해져 예산이 바뀌었으니 다음 요청 때 다시 재 본다.
+    rayTracingBlockedReason.clear();
+}
+
+bool Renderer::ensureBottomLevel() {
+    if (rayTracer == nullptr || !rayTracingBlockedReason.empty()) {
+        return false;
+    }
+    if (rayTracer->bottomLevelReady()) {
+        return true;
+    }
+    std::string reason;
+    if (rayTracer->buildBottomLevel(reason)) {
+        return true;
+    }
+    // 폴백은 두지 않는다. 광선 기능을 끄고 편집기에 사유를 보인다.
+    rayTracingBlockedReason = reason;
+    usePathTracing = false;
+    useRayQueryShadows = false;
+    useReflections = false;
+    spdlog::warn("광선 기능을 끕니다: {}", reason);
+    return false;
 }
 
 void Renderer::prepareFrame() {
@@ -4281,6 +4306,11 @@ void Renderer::drawFrame(const scene::Scene& scene) {
     }
 
     uint32_t buildZone = frameProfiler.begin("그리기 명령 구성");
+    // 광선 기능을 쓸 프레임이면 하위 가속 구조를 먼저 확보한다. 예산을 넘겨 못 세우면 여기서 광선
+    // 기능이 꺼지므로 뒤의 모드 판정이 래스터로 떨어져 검은 프레임이 나오지 않는다.
+    if (usePathTracing || useRayQueryShadows || useReflections) {
+        ensureBottomLevel();
+    }
     FrameBatches batches = buildDrawCommands(frame, scene);
     frameProfiler.end(buildZone);
 

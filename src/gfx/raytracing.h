@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include <vulkan/vulkan.h>
@@ -72,8 +73,13 @@ public:
     RayTracer(const RayTracer&) = delete;
     RayTracer& operator=(const RayTracer&) = delete;
 
-    // 메쉬마다 0단계 LOD 로 하위 가속 구조를 만든다. 적재가 끝난 뒤 한 번 호출한다.
-    void buildBottomLevel();
+    // 메쉬마다 0단계 LOD 로 하위 가속 구조를 만든다. 광선 기능이 처음 필요할 때 부른다. 구조와
+    // 스크래치가 남은 GPU 예산을 넘으면 아무것도 만들지 않고 사유를 reason 에 적은 뒤 false 를 돌려준다.
+    // 스크래치 합이 한도를 넘을 때마다 제출을 끊어, 한 번의 제출이 길어져 GPU 가 재설정되는 일을 줄인다.
+    bool buildBottomLevel(std::string& reason);
+    // 지오메트리 버퍼가 바뀌면 옛 주소를 가리키는 하위·상위 구조를 버린다. 다음 요청 때 다시 만든다.
+    void invalidateBottomLevel();
+    bool bottomLevelReady() const { return !bottomLevels.empty(); }
     // 스킨 인스턴스마다 변형 정점으로 하위 가속 구조를 다시 세운다. 포즈가 바뀌면 매 프레임
     // 불러야 한다. 스킨 컴퓨트가 끝난 뒤, updateTopLevel 앞에 온다.
     void updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
