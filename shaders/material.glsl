@@ -109,8 +109,10 @@ HitSurface interpolateHit(InstanceBuffer instances,
 
     vec3 weights = vec3(1.0 - barycentrics.x - barycentrics.y, barycentrics.x, barycentrics.y);
     vec3 localPosition = v0.position * weights.x + v1.position * weights.y + v2.position * weights.z;
-    vec3 localNormal = v0.normal * weights.x + v1.normal * weights.y + v2.normal * weights.z;
-    vec4 localTangent = v0.tangent * weights.x + v1.tangent * weights.y + v2.tangent * weights.z;
+    vec3 localNormal = decodeUnitVector(v0.normal) * weights.x + decodeUnitVector(v1.normal) * weights.y +
+                       decodeUnitVector(v2.normal) * weights.z;
+    vec4 localTangent = decodeTangent(v0.tangent) * weights.x + decodeTangent(v1.tangent) * weights.y +
+                        decodeTangent(v2.tangent) * weights.z;
 
     // 스킨 인스턴스는 지난 포즈의 변형 정점이 따로 있어 모션 벡터가 관절 움직임까지 담는다.
     vec3 previousLocalPosition = localPosition;

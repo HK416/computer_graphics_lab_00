@@ -38,8 +38,9 @@ void main() {
         outCurrentClip[i] = clipPosition;
         outPreviousClip[i] = previousClipPosition(instance, mesh, globalIndex, vertex.position);
         outWorldPosition[i] = worldPosition.xyz;
-        outNormal[i] = normalMatrix * vertex.normal;
-        outTangent[i] = vec4(normalMatrix * vertex.tangent.xyz, vertex.tangent.w);
+        vec4 tangent = decodeTangent(vertex.tangent);
+        outNormal[i] = normalMatrix * decodeUnitVector(vertex.normal);
+        outTangent[i] = vec4(normalMatrix * tangent.xyz, tangent.w);
         outUv[i] = vertex.uv;
         outMaterialIndex[i] = mesh.materialIndex;
         outMeshletIndex[i] = meshletIndex;

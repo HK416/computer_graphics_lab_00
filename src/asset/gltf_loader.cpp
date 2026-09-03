@@ -15,6 +15,7 @@
 
 #include "asset/load_progress.h"
 #include "asset/model.h"
+#include "asset/vertex_pack.h"
 
 namespace asset {
 namespace {
@@ -51,35 +52,43 @@ uint32_t packWeights(const float weights[4]) {
     return packed;
 }
 
+// 적재 중에만 쓰는 풀린 정점. 노멀과 탄젠트를 만들고 나서 Vertex 로 압축한다.
+struct LoadVertex {
+    glm::vec3 position{0.0F};
+    glm::vec3 normal{0.0F};
+    glm::vec4 tangent{0.0F};
+    glm::vec2 uv{0.0F};
+};
+
 // 노멀이 없는 프리미티브는 삼각형 면적 가중 평균으로 채운다.
-void generateNormals(std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices) {
-    for (Vertex& vertex : vertices) {
+void generateNormals(std::vector<LoadVertex>& vertices, const std::vector<uint32_t>& indices) {
+    for (LoadVertex& vertex : vertices) {
         vertex.normal = glm::vec3{0.0F};
     }
     for (size_t i = 0; i + 2 < indices.size(); i += 3) {
-        Vertex& a = vertices[indices[i]];
-        Vertex& b = vertices[indices[i + 1]];
-        Vertex& c = vertices[indices[i + 2]];
+        LoadVertex& a = vertices[indices[i]];
+        LoadVertex& b = vertices[indices[i + 1]];
+        LoadVertex& c = vertices[indices[i + 2]];
         glm::vec3 faceNormal = glm::cross(b.position - a.position, c.position - a.position);
         a.normal += faceNormal;
         b.normal += faceNormal;
         c.normal += faceNormal;
     }
-    for (Vertex& vertex : vertices) {
+    for (LoadVertex& vertex : vertices) {
         float length = glm::length(vertex.normal);
         vertex.normal = length > 0.0F ? vertex.normal / length : glm::vec3{0.0F, 1.0F, 0.0F};
     }
 }
 
 // 탄젠트가 없는데 노멀 맵을 쓰는 재질이 있으면 접선 공간이 깨지므로 UV 로부터 만들어 둔다.
-void generateTangents(std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices) {
+void generateTangents(std::vector<LoadVertex>& vertices, const std::vector<uint32_t>& indices) {
     std::vector<glm::vec3> tangents(vertices.size(), glm::vec3{0.0F});
     std::vector<glm::vec3> bitangents(vertices.size(), glm::vec3{0.0F});
 
     for (size_t i = 0; i + 2 < indices.size(); i += 3) {
-        const Vertex& a = vertices[indices[i]];
-        const Vertex& b = vertices[indices[i + 1]];
-        const Vertex& c = vertices[indices[i + 2]];
+        const LoadVertex& a = vertices[indices[i]];
+        const LoadVertex& b = vertices[indices[i + 1]];
+        const LoadVertex& c = vertices[indices[i + 2]];
 
         glm::vec3 edge1 = b.position - a.position;
         glm::vec3 edge2 = c.position - a.position;
@@ -253,22 +262,26 @@ void appendPrimitive(Model& model, const cgltf_data& data, const cgltf_primitive
     Mesh mesh;
     mesh.name =
         primitive.material != nullptr && primitive.material->name != nullptr ? primitive.material->name : "프리미티브";
-    mesh.vertices.resize(positions->count);
+    std::vector<LoadVertex> loaded(positions->count);
+    bool skinned = joints != nullptr && weights != nullptr;
+    if (skinned) {
+        mesh.skinWeights.resize(positions->count);
+    }
     for (cgltf_size i = 0; i < positions->count; ++i) {
-        Vertex& vertex = mesh.vertices[i];
+        LoadVertex& vertex = loaded[i];
         readFloats(positions, i, glm::value_ptr(vertex.position), 3);
         readFloats(normals, i, glm::value_ptr(vertex.normal), 3);
         readFloats(uvs, i, glm::value_ptr(vertex.uv), 2);
         if (tangents != nullptr) {
             readFloats(tangents, i, glm::value_ptr(vertex.tangent), 4);
         }
-        if (joints != nullptr && weights != nullptr) {
+        if (skinned) {
             cgltf_uint jointIndices[4] = {0, 0, 0, 0};
             float jointWeights[4] = {0.0F, 0.0F, 0.0F, 0.0F};
             cgltf_accessor_read_uint(joints, i, jointIndices, 4);
             readFloats(weights, i, jointWeights, 4);
-            vertex.joints = packJoints(jointIndices);
-            vertex.weights = packWeights(jointWeights);
+            mesh.skinWeights[i].joints = packJoints(jointIndices);
+            mesh.skinWeights[i].weights = packWeights(jointWeights);
         }
     }
 
@@ -285,10 +298,17 @@ void appendPrimitive(Model& model, const cgltf_data& data, const cgltf_primitive
     }
 
     if (normals == nullptr) {
-        generateNormals(mesh.vertices, mesh.indices);
+        generateNormals(loaded, mesh.indices);
     }
     if (tangents == nullptr) {
-        generateTangents(mesh.vertices, mesh.indices);
+        generateTangents(loaded, mesh.indices);
+    }
+    mesh.vertices.resize(loaded.size());
+    for (size_t i = 0; i < loaded.size(); ++i) {
+        mesh.vertices[i].position = loaded[i].position;
+        mesh.vertices[i].normal = packUnitVector(loaded[i].normal);
+        mesh.vertices[i].tangent = packTangent(loaded[i].tangent);
+        mesh.vertices[i].uv = loaded[i].uv;
     }
     computeBounds(mesh);
 

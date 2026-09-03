@@ -49,20 +49,28 @@ struct Texture {
     std::vector<uint8_t> pixels; // RGBA8
 };
 
-// 셰이더의 scalar 레이아웃 정점과 동일한 배치여야 한다.
+// 셰이더의 scalar 레이아웃 정점과 동일한 배치여야 한다. 28 바이트. 위치는 단순화와 가속 구조가
+// float 그대로 읽어야 하고, UV 는 half 로 줄이면 4K 텍스처에서 텍셀 두 개씩 어긋나 float 로 둔다.
 struct Vertex {
     glm::vec3 position;
-    glm::vec3 normal;
-    glm::vec4 tangent;
-    glm::vec2 uv;
-    // 스킨 조인트 넷을 바이트 하나씩, 가중치 넷을 unorm8 로 담는다. 스킨이 없으면 둘 다 0 이다.
+    // 8진법 snorm16x2. asset/vertex_pack.h 로 넣고 셰이더의 decodeUnitVector 로 푼다.
+    uint32_t normal = 0;
+    // 방향은 8진법 snorm16x2, 손 방향(w 부호)은 y 의 최하위 비트. packTangent/decodeTangent.
+    uint32_t tangent = 0;
+    glm::vec2 uv{0.0F};
+};
+static_assert(sizeof(Vertex) == 28, "정점 배치가 셰이더와 어긋난다");
+
+// 스킨 정점 하나의 조인트 넷(바이트씩)과 가중치 넷(unorm8). 스킨 메쉬만 가지며 정점과 순서가 같다.
+// 정점에서 떼어 둔 것은 스킨이 없는 대다수 메쉬가 정점마다 8 바이트를 버리지 않게 하려는 것이다.
+struct SkinWeight {
     uint32_t joints = 0;
     uint32_t weights = 0;
 };
 
-// 스킨 하나가 가질 수 있는 조인트 수. 정점이 조인트 번호를 바이트 하나에 담기 때문에 생기는 한계다.
+// 스킨 하나가 가질 수 있는 조인트 수. 스킨 가중치가 조인트 번호를 바이트 하나에 담기 때문에 생기는 한계다.
 //
-// ponytail: 더 큰 스켈레톤이 필요하면 정점의 joints 를 uvec2 로 넓혀 16비트씩 담으면 된다.
+// ponytail: 더 큰 스켈레톤이 필요하면 SkinWeight::joints 를 uvec2 로 넓혀 16비트씩 담으면 된다.
 inline constexpr size_t MAX_SKIN_JOINTS = 256;
 
 enum class AnimationPath : uint32_t {
@@ -146,6 +154,8 @@ struct Mesh {
     // 원본 정점 그대로. 모든 LOD 단계와 meshlet 이 이 하나를 공유한다. meshlet 마다 복제하면 경계
     // 정점과 LOD 단계마다 사본이 생겨 원본의 세 배가 되므로 그렇게 하지 않는다.
     std::vector<Vertex> vertices;
+    // 스킨 메쉬만 정점 수만큼 갖는다. 스킨 컴퓨트가 정점과 같은 번호로 읽는다.
+    std::vector<SkinWeight> skinWeights;
     // meshlet 단위로 삼각형이 연속되도록 재배열된다. 고전 경로와 광선 경로가 쓴다.
     std::vector<uint32_t> indices;
 

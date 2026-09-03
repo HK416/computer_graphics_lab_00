@@ -23,8 +23,9 @@ void main() {
 
     mat3 normalMatrix = mat3(instance.normalMatrix);
     outWorldPosition = worldPosition.xyz;
-    outNormal = normalMatrix * vertex.normal;
-    outTangent = vec4(normalMatrix * vertex.tangent.xyz, vertex.tangent.w);
+    vec4 tangent = decodeTangent(vertex.tangent);
+    outNormal = normalMatrix * decodeUnitVector(vertex.normal);
+    outTangent = vec4(normalMatrix * tangent.xyz, tangent.w);
     outUv = vertex.uv;
     outMaterialIndex = mesh.materialIndex;
     // 정점은 meshlet 끼리 공유하므로 정점으로는 meshlet 을 모른다. 명령 하나가 meshlet 하나이니

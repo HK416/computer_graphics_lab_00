@@ -7,15 +7,56 @@
 #include "bindless.glsl"
 
 // 아래 구조체는 src/gfx/geometry.h 및 src/asset/model.h 의 정의와 배치가 일치해야 한다.
+// 28 바이트. 노멀과 탄젠트는 8진법 snorm16x2 로 접혀 있어 decodeUnitVector/decodeTangent 로 푼다.
 struct Vertex {
     vec3 position;
-    vec3 normal;
-    vec4 tangent;
+    uint normal;
+    uint tangent;
     vec2 uv;
-    // 조인트 넷을 바이트 하나씩, 가중치 넷을 unorm8 로 담는다. 스킨이 없으면 둘 다 0 이다.
+};
+
+// 스킨 정점의 조인트 넷(바이트씩)과 가중치 넷(unorm8). 스킨 메쉬만 정점과 같은 순서로 갖는다.
+struct SkinWeight {
     uint joints;
     uint weights;
 };
+
+// ---- 정점 속성 압축. src/asset/vertex_pack.h 와 같은 계산이어야 한다. ----
+
+vec2 octahedralWrap(vec2 v) {
+    return (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+}
+
+// 단위 벡터를 8진법 매핑으로 [-1, 1]² 에 펴서 snorm16 둘에 담는다. 길이가 0 이면 +Z 다.
+uint encodeUnitVector(vec3 n) {
+    float sum = abs(n.x) + abs(n.y) + abs(n.z);
+    if (sum <= 0.0) {
+        return packSnorm2x16(vec2(0.0));
+    }
+    n /= sum;
+    vec2 projected = n.z >= 0.0 ? n.xy : octahedralWrap(n.xy);
+    return packSnorm2x16(projected);
+}
+
+vec3 decodeUnitVector(uint packed) {
+    vec2 f = unpackSnorm2x16(packed);
+    vec3 n = vec3(f, 1.0 - abs(f.x) - abs(f.y));
+    float t = clamp(-n.z, 0.0, 1.0);
+    n.xy += vec2(n.x >= 0.0 ? -t : t, n.y >= 0.0 ? -t : t);
+    return normalize(n);
+}
+
+// 탄젠트의 손 방향(w 부호)은 y 성분의 최하위 비트다. 1 이면 +, 0 이면 -.
+#define TANGENT_SIGN_BIT 0x10000u
+
+uint encodeTangent(vec4 tangent) {
+    uint packed = encodeUnitVector(tangent.xyz) & ~TANGENT_SIGN_BIT;
+    return tangent.w >= 0.0 ? (packed | TANGENT_SIGN_BIT) : packed;
+}
+
+vec4 decodeTangent(uint packed) {
+    return vec4(decodeUnitVector(packed & ~TANGENT_SIGN_BIT), (packed & TANGENT_SIGN_BIT) != 0u ? 1.0 : -1.0);
+}
 
 struct Mesh {
     vec4 boundingSphere;
@@ -202,6 +243,9 @@ layout(buffer_reference, scalar) readonly buffer VertexBuffer {
 // 스킨 컴퓨트가 변형 결과를 쓰는 곳. 읽기는 VertexBuffer 로 같은 주소를 가리킨다.
 layout(buffer_reference, scalar) writeonly buffer SkinnedVertexBuffer {
     Vertex items[];
+};
+layout(buffer_reference, scalar) readonly buffer SkinWeightBuffer {
+    SkinWeight items[];
 };
 layout(buffer_reference, scalar) readonly buffer IndexBuffer {
     uint items[];

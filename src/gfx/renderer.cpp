@@ -116,14 +116,17 @@ struct CullPushConstants {
     VkDeviceAddress drawMeshlets;
 };
 
+// shaders/skin.comp 의 푸시 상수와 배치가 같아야 한다.
 struct SkinPushConstants {
     VkDeviceAddress source;
     VkDeviceAddress destination;
     VkDeviceAddress joints;
+    VkDeviceAddress weights;
     uint32_t sourceOffset;
     uint32_t destinationOffset;
     uint32_t jointOffset;
     uint32_t vertexCount;
+    uint32_t weightOffset;
 };
 
 // shaders/skin_bounds.comp 의 푸시 상수와 배치가 같아야 한다.
@@ -2706,6 +2709,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                                                   skinnedVertexCursor,
                                                   jointOffset,
                                                   vertexCount,
+                                                  geometry.meshSkinOffset(scene.meshOf(index)),
                                                   mesh.meshletOffset,
                                                   mesh.meshletCount,
                                                   skinnedMeshletCursor});
@@ -3167,10 +3171,12 @@ void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame)
         SkinPushConstants pushConstants{geometry.vertexBuffer.address,
                                         skinnedVertexBuffer.address,
                                         frame.jointBuffer.address,
+                                        geometry.skinWeightBuffer.address,
                                         dispatch.sourceOffset,
                                         currentBase + dispatch.destinationOffset,
                                         dispatch.jointOffset,
-                                        dispatch.vertexCount};
+                                        dispatch.vertexCount,
+                                        dispatch.skinWeightOffset};
         vkCmdPushConstants(
             commandBuffer, skinPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
         vkCmdDispatch(commandBuffer, (dispatch.vertexCount + SKIN_GROUP_SIZE - 1) / SKIN_GROUP_SIZE, 1, 1);

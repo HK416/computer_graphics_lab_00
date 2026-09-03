@@ -45,7 +45,7 @@ ctest --test-dir build/debug --output-on-failure
 ```
 
 테스트 이름: `lod_network` `animation` `camera` `scene` `scene_io` `profiler` `shadow` `upscaler`
-`concurrency`.
+`concurrency` `vertex_pack`.
 
 선택 기능:
 

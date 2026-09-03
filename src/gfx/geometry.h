@@ -77,6 +77,9 @@ inline constexpr uint32_t INVALID_INSTANCE_SLOT = 0xFFFFFFFFU;
 // 스킨 결과를 따로 뽑아 두지 않은 인스턴스의 정점 오프셋.
 inline constexpr uint32_t NO_SKINNED_VERTICES = 0xFFFFFFFFU;
 
+// 스킨 가중치가 없는 메쉬의 가중치 오프셋. 스킨 컴퓨트가 이 값이면 정점을 그대로 복사한다.
+inline constexpr uint32_t NO_SKIN_WEIGHTS = 0xFFFFFFFFU;
+
 struct GpuInstance {
     glm::mat4 model;
     // 지난 프레임의 세계 변환. 모션 벡터 전용이며, 이전 값이 없으면 model 과 같은 값이 들어간다.
@@ -117,6 +120,8 @@ public:
     const std::string& meshName(uint32_t index) const { return meshNames[index]; }
     // 스킨 결과 버퍼를 잡고 가속 구조 범위를 정하는 데 쓴다. GpuMesh 는 정점 수를 담지 않는다.
     uint32_t meshVertexCount(uint32_t index) const { return meshVertexCounts[index]; }
+    // 스킨 가중치 버퍼에서 이 메쉬의 구간이 시작하는 위치. 스킨이 없으면 NO_SKIN_WEIGHTS.
+    uint32_t meshSkinOffset(uint32_t index) const { return meshSkinOffsets[index]; }
     uint32_t meshCount() const { return static_cast<uint32_t>(meshes.size()); }
     uint32_t meshletCount() const { return static_cast<uint32_t>(meshlets.size()); }
     const GpuMeshLod& lod(uint32_t index) const { return lods[index]; }
@@ -124,6 +129,8 @@ public:
     uint32_t maxLodCount() const { return maxLods; }
 
     Buffer vertexBuffer;
+    // 스킨 메쉬의 정점별 조인트와 가중치. 정점과 떼어 두어 스킨 없는 메쉬는 자리를 쓰지 않는다.
+    Buffer skinWeightBuffer;
     Buffer indexBuffer;
     Buffer meshBuffer;
     Buffer materialBuffer;
@@ -137,6 +144,7 @@ public:
 private:
     Context& context;
     std::vector<asset::Vertex> vertices;
+    std::vector<asset::SkinWeight> skinWeights;
     std::vector<uint32_t> indices;
     std::vector<GpuMesh> meshes;
     std::vector<GpuMeshlet> meshlets;
@@ -148,6 +156,7 @@ private:
     std::vector<asset::Material> sourceMaterials;
     std::vector<std::string> meshNames;
     std::vector<uint32_t> meshVertexCounts;
+    std::vector<uint32_t> meshSkinOffsets;
 };
 
 } // namespace gfx

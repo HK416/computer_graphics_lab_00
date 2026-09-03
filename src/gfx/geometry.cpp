@@ -20,6 +20,7 @@ GeometryStore::~GeometryStore() {
     destroyBuffer(context, materialBuffer);
     destroyBuffer(context, meshBuffer);
     destroyBuffer(context, indexBuffer);
+    destroyBuffer(context, skinWeightBuffer);
     destroyBuffer(context, vertexBuffer);
 }
 
@@ -74,6 +75,12 @@ uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<ui
         meshes.push_back(mesh);
         meshNames.push_back(source.name);
         meshVertexCounts.push_back(static_cast<uint32_t>(source.vertices.size()));
+        if (source.skinWeights.empty()) {
+            meshSkinOffsets.push_back(NO_SKIN_WEIGHTS);
+        } else {
+            meshSkinOffsets.push_back(static_cast<uint32_t>(skinWeights.size()));
+            skinWeights.insert(skinWeights.end(), source.skinWeights.begin(), source.skinWeights.end());
+        }
 
         for (const asset::Meshlet& sourceMeshlet : source.meshlets) {
             GpuMeshlet meshlet{};
@@ -127,6 +134,7 @@ void GeometryStore::build() {
     destroyBuffer(context, materialBuffer);
     destroyBuffer(context, meshBuffer);
     destroyBuffer(context, indexBuffer);
+    destroyBuffer(context, skinWeightBuffer);
     destroyBuffer(context, vertexBuffer);
 
     // 하위 가속 구조는 이 두 버퍼를 그대로 입력으로 읽는다. 용도 비트가 없으면 규격 위반이라
@@ -142,6 +150,12 @@ void GeometryStore::build() {
                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | accelerationInput,
                      MemoryLocation::DEVICE,
                      "정점");
+    // 스킨 메쉬가 하나도 없어도 주소를 넘겨야 하므로 빈 버퍼는 만들지 않고 한 칸을 둔다.
+    skinWeightBuffer = createBuffer(context,
+                                    std::max<size_t>(skinWeights.size(), 1) * sizeof(asset::SkinWeight),
+                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                    MemoryLocation::DEVICE,
+                                    "스킨 가중치");
     indexBuffer = createBuffer(context,
                                indices.size() * sizeof(uint32_t),
                                VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | accelerationInput,
@@ -182,6 +196,9 @@ void GeometryStore::build() {
 
     Uploader uploader(context);
     uploader.uploadBuffer(vertexBuffer, 0, vertices.data(), vertexBuffer.size);
+    if (!skinWeights.empty()) {
+        uploader.uploadBuffer(skinWeightBuffer, 0, skinWeights.data(), skinWeightBuffer.size);
+    }
     uploader.uploadBuffer(indexBuffer, 0, indices.data(), indexBuffer.size);
     uploader.uploadBuffer(meshBuffer, 0, meshes.data(), meshBuffer.size);
     uploader.uploadBuffer(materialBuffer, 0, materials.data(), materialBuffer.size);

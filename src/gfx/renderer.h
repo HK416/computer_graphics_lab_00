@@ -84,6 +84,8 @@ struct SkinDispatch {
     uint32_t destinationOffset;
     uint32_t jointOffset;
     uint32_t vertexCount;
+    // 스킨 가중치 버퍼에서 이 메쉬의 구간. 없으면 NO_SKIN_WEIGHTS.
+    uint32_t skinWeightOffset;
     // 경계 구를 다시 잴 meshlet 구간과 결과 위치.
     uint32_t meshletOffset;
     uint32_t meshletCount;
