@@ -11,7 +11,7 @@ layout(location = 3) out vec4 outReflectionWeight;
 
 // 디버그 모드는 셰이딩 대신 중간 값을 그대로 보여준다.
 vec4 debugColor() {
-    switch (pushConstants.debugMode) {
+    switch (sceneDebugMode()) {
     case DEBUG_MODE_MESHLET:
         return vec4(debugPalette(inMeshletIndex), 1.0);
     case DEBUG_MODE_NORMAL:
@@ -73,5 +73,5 @@ void main() {
     vec4 shaded = shadeSurface(normalRoughness, reflectionWeight);
     outNormalRoughness = normalRoughness;
     outReflectionWeight = vec4(reflectionWeight, 1.0);
-    outColor = pushConstants.debugMode != DEBUG_MODE_SHADED ? debugColor() : shaded;
+    outColor = sceneDebugMode() != DEBUG_MODE_SHADED ? debugColor() : shaded;
 }

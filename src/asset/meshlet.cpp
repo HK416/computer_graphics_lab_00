@@ -329,12 +329,13 @@ void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs, LoadProgress* progress
         reportWork(workBudget - consumed);
     }
 
-    // GPU 배치로 펼친다. meshlet 마다 정점을 소유하고, 인덱스는 LOD 단계별로 이어 둔다.
-    mesh.vertices.clear();
+    // GPU 배치로 펼친다. 정점은 원본 그대로 두고 모든 단계가 공유한다. meshlet 은 쓰는 정점의
+    // 번호 목록을 갖고, 인덱스는 그 번호를 풀어 LOD 단계별로 이어 둔다.
+    mesh.vertices = std::move(canonical);
     mesh.indices.clear();
     mesh.meshlets.clear();
     mesh.meshletTriangles.clear();
-    mesh.vertexMeshlets.clear();
+    mesh.meshletVertices.clear();
     mesh.lods.clear();
     mesh.lods.reserve(levels.size());
 
@@ -353,19 +354,15 @@ void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs, LoadProgress* progress
             meshlet.parentError = source.parentError;
             meshlet.level = source.level;
             meshlet.indexOffset = static_cast<uint32_t>(mesh.indices.size());
-            meshlet.vertexOffset = static_cast<uint32_t>(mesh.vertices.size());
+            meshlet.vertexOffset = static_cast<uint32_t>(mesh.meshletVertices.size());
             meshlet.triangleOffset = static_cast<uint32_t>(mesh.meshletTriangles.size());
             meshlet.vertexCount = static_cast<uint32_t>(source.vertices.size());
             meshlet.triangleCount = static_cast<uint32_t>(source.triangles.size() / 3);
 
-            auto meshletIndex = static_cast<uint32_t>(mesh.meshlets.size());
-            for (uint32_t vertex : source.vertices) {
-                mesh.vertices.push_back(canonical[vertex]);
-                mesh.vertexMeshlets.push_back(meshletIndex);
-            }
+            mesh.meshletVertices.insert(mesh.meshletVertices.end(), source.vertices.begin(), source.vertices.end());
             for (uint8_t local : source.triangles) {
                 mesh.meshletTriangles.push_back(local);
-                mesh.indices.push_back(meshlet.vertexOffset + local);
+                mesh.indices.push_back(source.vertices[local]);
             }
             mesh.meshlets.push_back(meshlet);
         }

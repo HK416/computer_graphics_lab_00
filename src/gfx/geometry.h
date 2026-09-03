@@ -42,7 +42,7 @@ struct GpuMeshlet {
     float error;
     float parentError;
     uint32_t indexOffset;    // 전역 인덱스 버퍼 기준
-    uint32_t vertexOffset;   // 전역 정점 버퍼 기준
+    uint32_t vertexOffset;   // 전역 meshlet 정점 목록 기준. 목록의 값이 전역 정점 번호다.
     uint32_t triangleOffset; // 전역 meshlet 삼각형 버퍼 기준
     uint32_t vertexCount;
     uint32_t triangleCount;
@@ -131,8 +131,8 @@ public:
     Buffer lodBuffer;
     // meshlet 안의 지역 정점 인덱스. 8비트 저장을 요구하지 않으려고 uint32 로 펼쳐 둔다.
     Buffer meshletTriangleBuffer;
-    // 정점마다 속한 전역 meshlet 번호.
-    Buffer vertexMeshletBuffer;
+    // meshlet 마다 쓰는 정점의 전역 번호. mesh shader 가 지역 인덱스를 이 목록으로 풀어 정점을 읽는다.
+    Buffer meshletVertexBuffer;
 
 private:
     Context& context;
@@ -143,7 +143,7 @@ private:
     std::vector<GpuMeshLod> lods;
     uint32_t maxLods = 1;
     std::vector<uint32_t> meshletTriangles;
-    std::vector<uint32_t> vertexMeshlets;
+    std::vector<uint32_t> meshletVertices;
     std::vector<GpuMaterial> materials;
     std::vector<asset::Material> sourceMaterials;
     std::vector<std::string> meshNames;

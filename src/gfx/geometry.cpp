@@ -13,7 +13,7 @@ namespace gfx {
 GeometryStore::GeometryStore(Context& context) : context(context) {}
 
 GeometryStore::~GeometryStore() {
-    destroyBuffer(context, vertexMeshletBuffer);
+    destroyBuffer(context, meshletVertexBuffer);
     destroyBuffer(context, meshletTriangleBuffer);
     destroyBuffer(context, lodBuffer);
     destroyBuffer(context, meshletBuffer);
@@ -58,6 +58,7 @@ uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<ui
     for (const asset::Mesh& source : model.meshes) {
         auto vertexBase = static_cast<uint32_t>(vertices.size());
         auto triangleBase = static_cast<uint32_t>(meshletTriangles.size());
+        auto meshletVertexBase = static_cast<uint32_t>(meshletVertices.size());
 
         GpuMesh mesh{};
         mesh.boundingSphere = glm::vec4{source.boundsCenter, source.boundsRadius};
@@ -83,7 +84,7 @@ uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<ui
             meshlet.error = sourceMeshlet.error;
             meshlet.parentError = sourceMeshlet.parentError;
             meshlet.indexOffset = mesh.indexOffset + sourceMeshlet.indexOffset;
-            meshlet.vertexOffset = vertexBase + sourceMeshlet.vertexOffset;
+            meshlet.vertexOffset = meshletVertexBase + sourceMeshlet.vertexOffset;
             meshlet.triangleOffset = triangleBase + sourceMeshlet.triangleOffset;
             meshlet.vertexCount = sourceMeshlet.vertexCount;
             meshlet.triangleCount = sourceMeshlet.triangleCount;
@@ -101,8 +102,9 @@ uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<ui
         for (uint8_t local : source.meshletTriangles) {
             meshletTriangles.push_back(local);
         }
-        for (uint32_t meshletIndex : source.vertexMeshlets) {
-            vertexMeshlets.push_back(mesh.meshletOffset + meshletIndex);
+        // 목록의 값은 전역 정점 번호로 바꿔 둔다. 셰이더가 메쉬 오프셋을 더하지 않아도 된다.
+        for (uint32_t vertex : source.meshletVertices) {
+            meshletVertices.push_back(vertexBase + vertex);
         }
 
         vertices.insert(vertices.end(), source.vertices.begin(), source.vertices.end());
@@ -118,7 +120,7 @@ void GeometryStore::build() {
 
     // 런타임에 모델을 더 얹으면 다시 불린다. 이전 버퍼를 먼저 버려야 하며, 호출 전에 장치가
     // 놀고 있어야 한다.
-    destroyBuffer(context, vertexMeshletBuffer);
+    destroyBuffer(context, meshletVertexBuffer);
     destroyBuffer(context, meshletTriangleBuffer);
     destroyBuffer(context, lodBuffer);
     destroyBuffer(context, meshletBuffer);
@@ -134,16 +136,15 @@ void GeometryStore::build() {
         accelerationInput = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     }
 
-    vertexBuffer = createBuffer(context,
-                                vertices.size() * sizeof(asset::Vertex),
-                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                    accelerationInput,
-                                MemoryLocation::DEVICE,
-                                "정점");
+    vertexBuffer =
+        createBuffer(context,
+                     vertices.size() * sizeof(asset::Vertex),
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | accelerationInput,
+                     MemoryLocation::DEVICE,
+                     "정점");
     indexBuffer = createBuffer(context,
                                indices.size() * sizeof(uint32_t),
-                               VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                   accelerationInput,
+                               VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | accelerationInput,
                                MemoryLocation::DEVICE,
                                "인덱스");
     meshBuffer = createBuffer(context,
@@ -167,11 +168,11 @@ void GeometryStore::build() {
                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                          MemoryLocation::DEVICE,
                                          "meshlet 삼각형");
-    vertexMeshletBuffer = createBuffer(context,
-                                       vertexMeshlets.size() * sizeof(uint32_t),
+    meshletVertexBuffer = createBuffer(context,
+                                       meshletVertices.size() * sizeof(uint32_t),
                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                        MemoryLocation::DEVICE,
-                                       "정점별 meshlet");
+                                       "meshlet 정점 목록");
 
     lodBuffer = createBuffer(context,
                              lods.size() * sizeof(GpuMeshLod),
@@ -187,7 +188,7 @@ void GeometryStore::build() {
     uploader.uploadBuffer(meshletBuffer, 0, meshlets.data(), meshletBuffer.size);
     uploader.uploadBuffer(lodBuffer, 0, lods.data(), lodBuffer.size);
     uploader.uploadBuffer(meshletTriangleBuffer, 0, meshletTriangles.data(), meshletTriangleBuffer.size);
-    uploader.uploadBuffer(vertexMeshletBuffer, 0, vertexMeshlets.data(), vertexMeshletBuffer.size);
+    uploader.uploadBuffer(meshletVertexBuffer, 0, meshletVertices.data(), meshletVertexBuffer.size);
     uploader.flush();
 
     spdlog::info("지오메트리 업로드: 정점 {}, 인덱스 {}, 메쉬 {}, 재질 {}, meshlet {}",

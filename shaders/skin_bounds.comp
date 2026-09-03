@@ -20,7 +20,15 @@ layout(push_constant) uniform SkinBoundsPushConstants {
     uint meshVertexOffset;
     uint skinnedVertexOffset;
     uint boundsOffset;
+    // meshlet 이 쓰는 정점의 전역 번호 목록.
+    MeshletVertexBuffer meshletVertices;
 } push;
+
+// meshlet 의 i 번째 정점을 변형 정점 구간의 번호로. 목록의 전역 번호에서 메쉬 시작을 빼면 지역 번호다.
+uint skinnedIndex(Meshlet meshlet, uint i) {
+    uint globalVertex = push.meshletVertices.items[meshlet.vertexOffset + i];
+    return push.skinnedVertexOffset + (globalVertex - push.meshVertexOffset);
+}
 
 shared vec3 minima[64];
 shared vec3 maxima[64];
@@ -33,12 +41,11 @@ void main() {
         return;
     }
     Meshlet meshlet = push.meshlets.items[push.meshletOffset + index];
-    uint base = push.skinnedVertexOffset + (meshlet.vertexOffset - push.meshVertexOffset);
 
     vec3 minimum = vec3(1e30);
     vec3 maximum = vec3(-1e30);
     for (uint i = local; i < meshlet.vertexCount; i += 64u) {
-        vec3 position = push.skinnedVertices.items[base + i].position;
+        vec3 position = push.skinnedVertices.items[skinnedIndex(meshlet, i)].position;
         minimum = min(minimum, position);
         maximum = max(maximum, position);
     }
@@ -58,7 +65,7 @@ void main() {
     vec3 center = (minima[0] + maxima[0]) * 0.5;
     float farthest = 0.0;
     for (uint i = local; i < meshlet.vertexCount; i += 64u) {
-        farthest = max(farthest, distance(push.skinnedVertices.items[base + i].position, center));
+        farthest = max(farthest, distance(push.skinnedVertices.items[skinnedIndex(meshlet, i)].position, center));
     }
     distances[local] = farthest;
     barrier();

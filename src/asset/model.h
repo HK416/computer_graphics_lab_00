@@ -125,7 +125,7 @@ struct Meshlet {
     float error = 0.0F;
     float parentError = 0.0F;
     uint32_t indexOffset = 0;    // Mesh::indices 기준. meshlet 의 삼각형이 연속으로 놓인다.
-    uint32_t vertexOffset = 0;   // Mesh::vertices 기준. meshlet 마다 정점을 따로 소유한다.
+    uint32_t vertexOffset = 0;   // Mesh::meshletVertices 기준. 이 meshlet 이 쓰는 정점 번호가 연속으로 놓인다.
     uint32_t triangleOffset = 0; // Mesh::meshletTriangles 기준
     uint32_t vertexCount = 0;
     uint32_t triangleCount = 0;
@@ -143,16 +143,18 @@ struct MeshLod {
 
 struct Mesh {
     std::string name;
+    // 원본 정점 그대로. 모든 LOD 단계와 meshlet 이 이 하나를 공유한다. meshlet 마다 복제하면 경계
+    // 정점과 LOD 단계마다 사본이 생겨 원본의 세 배가 되므로 그렇게 하지 않는다.
     std::vector<Vertex> vertices;
-    // meshlet 단위로 삼각형이 연속되도록 재배열된다.
+    // meshlet 단위로 삼각형이 연속되도록 재배열된다. 고전 경로와 광선 경로가 쓴다.
     std::vector<uint32_t> indices;
 
     std::vector<Meshlet> meshlets;
     std::vector<MeshLod> lods;
-    // meshlet 안에서만 쓰는 지역 정점 인덱스. mesh shader 경로가 그대로 쓴다.
+    // meshlet 마다 쓰는 정점의 번호(vertices 기준). mesh shader 가 이 번호로 정점을 읽는다.
+    std::vector<uint32_t> meshletVertices;
+    // meshlet 안에서만 쓰는 지역 정점 인덱스. meshletVertices 구간 안의 위치다.
     std::vector<uint8_t> meshletTriangles;
-    // 정점마다 속한 meshlet 번호. flat 보간으로 프래그먼트까지 내려 시각화에 쓴다.
-    std::vector<uint32_t> vertexMeshlets;
     glm::vec3 boundsCenter{0.0F};
     float boundsRadius = 0.0F;
     uint32_t materialIndex = 0;
@@ -212,7 +214,7 @@ void skinMatrices(const Skeleton& skeleton,
                   std::vector<glm::mat4>& out);
 
 // 정점 캐시와 오버드로를 최적화한 뒤 meshlet 으로 나누고, 단계별로 묶어 단순화해 LOD DAG 를 만든다.
-// 정점 버퍼는 meshlet 마다 정점을 소유하도록, 인덱스 버퍼는 LOD 단계별로 이어지도록 다시 만들어진다.
+// 정점 버퍼는 그대로 두고, meshlet 마다 쓰는 정점 번호 목록과 LOD 단계별로 이어진 인덱스 버퍼를 만든다.
 // progress 를 주면 lodWorkEstimate(mesh) 만큼을 그룹 단위로 나눠 더한다. 총량은 부르는 쪽이 미리 잡는다.
 void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs = nullptr, LoadProgress* progress = nullptr);
 

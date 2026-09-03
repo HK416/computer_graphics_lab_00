@@ -75,6 +75,8 @@ struct GpuCamera {
     // 높이 안개. rgb 색, w 밀도. fogParameters 는 x 기준 높이, y 감쇠.
     glm::vec4 fog;
     glm::vec4 fogParameters;
+    // x 디버그 뷰. 푸시 상수가 128 바이트에 꽉 차서 여기로 옮겼다.
+    glm::uvec4 flags;
 };
 
 // shaders/scene_data.glsl 의 MeshletGroup 과 배치가 같아야 한다.
@@ -111,6 +113,7 @@ struct CullPushConstants {
     VkDeviceAddress network;
     VkDeviceAddress skinnedBounds;
     VkDeviceAddress visibility;
+    VkDeviceAddress drawMeshlets;
 };
 
 struct SkinPushConstants {
@@ -133,6 +136,7 @@ struct SkinBoundsPushConstants {
     uint32_t meshVertexOffset;
     uint32_t skinnedVertexOffset;
     uint32_t boundsOffset;
+    VkDeviceAddress meshletVertices;
 };
 
 // skin.comp 의 local_size_x 와 같아야 한다.
@@ -157,18 +161,18 @@ struct ScenePushConstants {
     VkDeviceAddress camera;
     VkDeviceAddress meshlets;
     VkDeviceAddress meshletTriangles;
-    VkDeviceAddress vertexMeshlets;
+    VkDeviceAddress meshletVertices;
+    VkDeviceAddress drawMeshlets;
     VkDeviceAddress meshletGroups;
     VkDeviceAddress skinnedVertices;
     VkDeviceAddress skinnedBounds;
     VkDeviceAddress lights;
     VkDeviceAddress shadowMatrices;
     uint32_t meshletGroupBase;
-    uint32_t debugMode;
-    VkDeviceAddress meshletVisibility;
     uint32_t cullPhase;
+    VkDeviceAddress meshletVisibility;
 };
-static_assert(sizeof(ScenePushConstants) <= 128, "푸시 상수는 규격이 보장하는 128 바이트 안에 있어야 한다");
+static_assert(sizeof(ScenePushConstants) == 128, "푸시 상수는 규격이 보장하는 128 바이트에 꼭 맞춰 두었다");
 
 // shaders/depth_only.vert 의 DepthPushConstants 와 배치가 같아야 한다.
 struct DepthPushConstants {
@@ -451,9 +455,11 @@ Renderer::~Renderer() {
         destroyBuffer(context, frame.jointBuffer);
         destroyBuffer(context, frame.lodNetworkBuffer);
         destroyBuffer(context, frame.drawCountBuffer);
+        destroyBuffer(context, frame.meshletDrawMeshletBuffer);
         destroyBuffer(context, frame.meshletDrawBuffer);
         destroyBuffer(context, frame.meshTaskIndirectBuffer);
         destroyBuffer(context, frame.meshletGroupBuffer);
+        destroyBuffer(context, frame.drawMeshletBuffer);
         destroyBuffer(context, frame.drawBuffer);
         destroyBuffer(context, frame.instanceBuffer);
         destroyBuffer(context, frame.cameraBuffer);
@@ -955,6 +961,7 @@ void Renderer::reserveInstances(Frame& frame, uint32_t instanceCount) {
     uint32_t capacity = std::max(instanceCount, std::max(frame.instanceCapacity * 2, MINIMUM_INSTANCE_CAPACITY));
     destroyBuffer(context, frame.instanceBuffer);
     destroyBuffer(context, frame.drawBuffer);
+    destroyBuffer(context, frame.drawMeshletBuffer);
     frame.instanceBuffer = createBuffer(context,
                                         static_cast<VkDeviceSize>(capacity) * sizeof(GpuInstance),
                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -965,6 +972,11 @@ void Renderer::reserveInstances(Frame& frame, uint32_t instanceCount) {
                                     VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                     MemoryLocation::HOST_WRITE,
                                     "간접 그리기 명령");
+    frame.drawMeshletBuffer = createBuffer(context,
+                                           static_cast<VkDeviceSize>(capacity) * sizeof(uint32_t),
+                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                           MemoryLocation::HOST_WRITE,
+                                           "명령별 meshlet");
     frame.instanceCapacity = capacity;
 }
 
@@ -1177,12 +1189,18 @@ void Renderer::reserveMeshletDraws(Frame& frame, uint32_t drawCount) {
     }
     uint32_t capacity = std::max(drawCount, std::max(frame.meshletDrawCapacity * 2, MINIMUM_INSTANCE_CAPACITY));
     destroyBuffer(context, frame.meshletDrawBuffer);
+    destroyBuffer(context, frame.meshletDrawMeshletBuffer);
     frame.meshletDrawBuffer = createBuffer(context,
                                            static_cast<VkDeviceSize>(capacity) * sizeof(VkDrawIndexedIndirectCommand),
                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
                                                VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                            MemoryLocation::DEVICE,
                                            "meshlet 그리기 명령");
+    frame.meshletDrawMeshletBuffer = createBuffer(context,
+                                                  static_cast<VkDeviceSize>(capacity) * sizeof(uint32_t),
+                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                  MemoryLocation::DEVICE,
+                                                  "meshlet 명령별 meshlet");
     frame.meshletDrawCapacity = capacity;
 }
 
@@ -2637,6 +2655,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     // 그리기 명령은 CPU 사본에 먼저 쓴다. 그림자 시점마다 이 명령을 골라 복사하는데, 매핑된 쓰기 결합
     // 메모리를 읽으면 캐시가 없어 오브젝트 만 개에서 프레임당 100 ms 를 넘긴다.
     drawCommands.resize(scene.objects.size());
+    drawMeshletData.resize(scene.objects.size());
     auto* draws = drawCommands.data();
     std::vector<GpuMeshletGroup> groupData(totalGroups);
     auto* groups = groupData.data();
@@ -2701,6 +2720,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         draws[slot].vertexOffset = mesh.vertexOffset;
         // 셰이더는 gl_InstanceIndex 로 인스턴스 배열을 참조한다.
         draws[slot].firstInstance = slot;
+        // 명령 하나가 LOD 단계 하나를 통째로 그리므로 meshlet 은 그 단계의 첫 것으로 대표한다.
+        drawMeshletData[slot] = lod.meshletOffset;
 
         auto [meshletBase, meshletTotal] = meshletRangeFor(index);
         for (uint32_t group = 0; needMeshletGroups && group < groupsFor(index); ++group) {
@@ -2715,6 +2736,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
 
     std::copy_n(
         drawCommands.data(), drawCommands.size(), static_cast<VkDrawIndexedIndirectCommand*>(frame.drawBuffer.mapped));
+    std::copy_n(drawMeshletData.data(), drawMeshletData.size(), static_cast<uint32_t*>(frame.drawMeshletBuffer.mapped));
     std::copy_n(groupData.data(), groupData.size(), static_cast<GpuMeshletGroup*>(frame.meshletGroupBuffer.mapped));
 
     // 그리지 않은 오브젝트도 지난 변환을 갱신해 둔다. 숨겼다 다시 보인 오브젝트가 오래된 자리에서
@@ -2852,6 +2874,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     camera->jitter = glm::vec4{jitterNdc, reflectionsActive() ? reflectionRoughnessCutoff : 0.0F, reflectionIntensity};
     camera->fog = glm::vec4{scene.post.fogColor, scene.post.fogDensity};
     camera->fogParameters = glm::vec4{scene.post.fogHeight, scene.post.fogFalloff, 0.0F, 0.0F};
+    camera->flags = glm::uvec4{debugMode, 0U, 0U, 0U};
     previousViewProjection = unjitteredViewProjection;
     temporalResetThisFrame = temporalReset;
 
@@ -2920,14 +2943,15 @@ void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer,
             }
             vkCmdSetCullMode(commandBuffer, sided == 1 ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT);
 
+            // 구간 시작을 알려 준다. 태스크 셰이더는 gl_WorkGroupID 가, 고전 경로의 정점 셰이더는
+            // gl_DrawID 가 호출마다 0 부터 시작해 meshlet 그룹과 명령별 meshlet 번호를 이 값에 더해 찾는다.
+            vkCmdPushConstants(commandBuffer,
+                               meshPipelineLayout,
+                               scenePushStages,
+                               offsetof(ScenePushConstants, meshletGroupBase),
+                               sizeof(uint32_t),
+                               &batch.first);
             if (meshPath) {
-                // 태스크 셰이더는 gl_WorkGroupID 가 0 부터 시작하므로 구간 시작을 따로 알려 준다.
-                vkCmdPushConstants(commandBuffer,
-                                   meshPipelineLayout,
-                                   scenePushStages,
-                                   offsetof(ScenePushConstants, meshletGroupBase),
-                                   sizeof(uint32_t),
-                                   &batch.first);
                 drawMeshTasksIndirect(commandBuffer,
                                       frame.meshTaskIndirectBuffer.handle,
                                       (mode * 2 + sided) * TASK_STRIDE,
@@ -3078,6 +3102,7 @@ void Renderer::recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches&
     pushConstants.network = frame.lodNetworkBuffer.address;
     pushConstants.skinnedBounds = skinnedBoundsBuffer.address;
     pushConstants.visibility = meshletVisibilityBuffer.address;
+    pushConstants.drawMeshlets = frame.meshletDrawMeshletBuffer.address;
     if (useNeuralLod) {
         pushConstants.flags |= CULL_FLAG_NEURAL_LOD;
     }
@@ -3093,8 +3118,9 @@ void Renderer::recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches&
     VkMemoryBarrier2 cullBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
     cullBarrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     cullBarrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-    cullBarrier.dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
-    cullBarrier.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+    // 명령은 간접 그리기가, 명령별 meshlet 번호는 정점 셰이더가 읽는다.
+    cullBarrier.dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
+    cullBarrier.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
     VkDependencyInfo cullDependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     cullDependency.memoryBarrierCount = 1;
     cullDependency.pMemoryBarriers = &cullBarrier;
@@ -3166,7 +3192,8 @@ void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame)
                                               dispatch.meshletCount,
                                               dispatch.sourceOffset,
                                               currentBase + dispatch.destinationOffset,
-                                              dispatch.boundsOffset};
+                                              dispatch.boundsOffset,
+                                              geometry.meshletVertexBuffer.address};
         vkCmdPushConstants(commandBuffer,
                            skinBoundsPipelineLayout,
                            VK_SHADER_STAGE_COMPUTE_BIT,
@@ -3560,6 +3587,7 @@ void Renderer::recordCommands(Frame& frame,
             frameProfiler.end(cullZone, commandBuffer);
         }
 
+        // 고전 경로의 명령별 meshlet 은 컴퓨트 컬링이면 컬 셰이더가, 아니면 CPU 가 채운 것을 쓴다.
         ScenePushConstants scenePushConstants{geometry.vertexBuffer.address,
                                               geometry.meshBuffer.address,
                                               frame.instanceBuffer.address,
@@ -3567,16 +3595,17 @@ void Renderer::recordCommands(Frame& frame,
                                               frame.cameraBuffer.address,
                                               geometry.meshletBuffer.address,
                                               geometry.meshletTriangleBuffer.address,
-                                              geometry.vertexMeshletBuffer.address,
+                                              geometry.meshletVertexBuffer.address,
+                                              computeCullPath ? frame.meshletDrawMeshletBuffer.address
+                                                              : frame.drawMeshletBuffer.address,
                                               frame.meshletGroupBuffer.address,
                                               skinnedVertexBuffer.address,
                                               skinnedBoundsBuffer.address,
                                               frame.lightBuffer.address,
                                               frame.shadowMatrixBuffer.address,
                                               0,
-                                              debugMode,
-                                              meshletVisibilityBuffer.address,
-                                              firstPhase};
+                                              firstPhase,
+                                              meshletVisibilityBuffer.address};
         // 광선 질의 그림자나 반사를 쓰면 TLAS 를 집합 1 로 함께 묶고, 장면이 바뀌었으면 먼저 다시
         // 만든다. 반사만 켜도 광선 질의 변종 프래그먼트가 돌지만, ambient.w 가 0 이라 그림자는
         // 그림자 맵을 그대로 쓴다.

@@ -23,6 +23,8 @@ layout(push_constant) uniform CullPushConstants {
     // 스킨 인스턴스의 meshlet 경계 구. 변형 정점에서 프레임마다 다시 잰 것이다.
     SkinnedBoundsBuffer skinnedBounds;
     VisibilityBuffer visibility;
+    // 명령마다 그리는 meshlet 번호. 정점 셰이더가 디버그 뷰에 쓴다.
+    DrawMeshletBuffer drawMeshlets;
 } cull;
 
 #define CULL_FLAG_FRUSTUM 1u
@@ -96,5 +98,6 @@ void main() {
         command.vertexOffset = mesh.vertexOffset;
         command.firstInstance = instanceIndex;
         cull.drawCommands.items[instance.bucketBase + slot] = command;
+        cull.drawMeshlets.items[instance.bucketBase + slot] = mesh.meshletOffset + i;
     }
 }

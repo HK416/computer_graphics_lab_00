@@ -350,10 +350,13 @@ private:
         Buffer cameraBuffer;
         Buffer instanceBuffer;
         Buffer drawBuffer;
+        // drawBuffer 의 명령마다 그리는 meshlet. LOD 단위 명령이라 그 단계의 첫 meshlet 을 적는다.
+        Buffer drawMeshletBuffer;
         Buffer meshletGroupBuffer;
         Buffer meshTaskIndirectBuffer;
-        // 컴퓨트 컬링이 채우는 meshlet 단위 간접 그리기 명령과 버킷별 개수.
+        // 컴퓨트 컬링이 채우는 meshlet 단위 간접 그리기 명령과 버킷별 개수, 명령마다의 meshlet 번호.
         Buffer meshletDrawBuffer;
+        Buffer meshletDrawMeshletBuffer;
         Buffer drawCountBuffer;
         Buffer lodNetworkBuffer;
         // 스킨 인스턴스의 조인트 행렬을 이어 붙인다. 인스턴스마다 jointOffset 으로 자기 구간을 찾는다.
@@ -604,6 +607,8 @@ private:
     // 가 든다. CPU 사본을 채운 뒤 한 번에 복사한다. 그림자 시점별 압축도 이 사본에서 읽는다.
     std::vector<GpuInstance> instanceData;
     std::vector<VkDrawIndexedIndirectCommand> drawCommands;
+    // drawCommands 와 나란히 간다. 명령마다 그리는 LOD 단계의 첫 meshlet.
+    std::vector<uint32_t> drawMeshletData;
     std::vector<VkDrawIndexedIndirectCommand> shadowDrawData;
     uint64_t lastTopologyRevision = 0;
     uint32_t pathSampleCount = 0;

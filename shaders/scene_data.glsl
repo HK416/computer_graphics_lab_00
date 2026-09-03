@@ -11,7 +11,8 @@ layout(push_constant) uniform PushConstants {
     CameraBuffer camera;
     MeshletBuffer meshlets;
     MeshletTriangleBuffer meshletTriangles;
-    VertexMeshletBuffer vertexMeshlets;
+    MeshletVertexBuffer meshletVertices;
+    DrawMeshletBuffer drawMeshlets;
     MeshletGroupBuffer meshletGroups;
     // 스킨 컴퓨트가 뽑아 둔 변형 정점. 이번 포즈와 지난 포즈가 반쪽씩 들어 있고, 인스턴스의
     // 오프셋이 각각을 가리킨다. 광선 경로도 같은 버퍼를 읽는다.
@@ -20,15 +21,19 @@ layout(push_constant) uniform PushConstants {
     SkinnedBoundsBuffer skinnedBounds;
     LightBuffer lights;
     ShadowMatrixBuffer shadowMatrices;
-    // 재질 경로마다 meshlet 그룹 구간이 달라 디스패치 직전에 갱신한다.
+    // 재질 경로마다 meshlet 그룹(태스크 셰이더) 또는 명령(고전 경로) 구간이 달라 그리기 직전에 갱신한다.
     uint meshletGroupBase;
-    uint debugMode;
-    // meshlet 가시성 비트와 두 패스 컬링 단계(culling.glsl 의 CULL_PHASE_*). 여기까지 124 바이트라
-    // 규격이 보장하는 128 바이트에 거의 닿는다. 더 늘려야 하면 버퍼 주소로 옮긴다.
-    VisibilityBuffer meshletVisibility;
+    // 두 패스 컬링 단계(culling.glsl 의 CULL_PHASE_*).
     uint cullPhase;
+    // meshlet 가시성 비트. 여기까지 꼭 128 바이트라 규격이 보장하는 한도에 닿아 있다. 더 넣을 수
+    // 없으니 디버그 뷰처럼 프레임에 한 번 정해지는 값은 Camera 로 간다.
+    VisibilityBuffer meshletVisibility;
 }
 pushConstants;
+
+uint sceneDebugMode() {
+    return pushConstants.camera.item.flags.x;
+}
 
 // 전역 정점 번호로 정점을 읽는다. 스킨 인스턴스는 변형 정점 구간에서 같은 지역 번호를 읽는다.
 Vertex fetchVertex(Instance instance, Mesh mesh, uint globalIndex) {

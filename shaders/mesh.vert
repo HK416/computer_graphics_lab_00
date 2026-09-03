@@ -27,5 +27,7 @@ void main() {
     outTangent = vec4(normalMatrix * vertex.tangent.xyz, vertex.tangent.w);
     outUv = vertex.uv;
     outMaterialIndex = mesh.materialIndex;
-    outMeshletIndex = pushConstants.vertexMeshlets.items[gl_VertexIndex];
+    // 정점은 meshlet 끼리 공유하므로 정점으로는 meshlet 을 모른다. 명령 하나가 meshlet 하나이니
+    // 명령 번호로 찾는다. gl_DrawID 는 호출마다 0 부터라 버킷 구간의 시작을 더한다.
+    outMeshletIndex = pushConstants.drawMeshlets.items[pushConstants.meshletGroupBase + gl_DrawID];
 }

@@ -28,7 +28,7 @@ void main() {
 
     mat3 normalMatrix = mat3(instance.normalMatrix);
     for (uint i = gl_LocalInvocationIndex; i < meshlet.vertexCount; i += MESHLET_GROUP_SIZE) {
-        uint globalIndex = meshlet.vertexOffset + i;
+        uint globalIndex = pushConstants.meshletVertices.items[meshlet.vertexOffset + i];
         Vertex vertex = fetchVertex(instance, mesh, globalIndex);
         vec4 worldPosition = instance.model * vec4(vertex.position, 1.0);
 

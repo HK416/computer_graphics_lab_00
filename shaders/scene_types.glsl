@@ -138,6 +138,9 @@ struct Camera {
     vec4 fog;
     // x 기준 높이, y 높이 감쇠. zw 는 예약.
     vec4 fogParameters;
+    // x 디버그 뷰(DEBUG_MODE_*). 푸시 상수가 128 바이트에 꽉 차서 프레임에 한 번 정해지는 값은 여기로
+    // 온다. yzw 예약.
+    uvec4 flags;
 };
 
 // 화면 UV 와 깊이에서 월드 위치를 되돌린다. 역 뷰프로젝션 하나면 되므로 시야 공간을 따로 두지 않는다.
@@ -232,7 +235,13 @@ layout(buffer_reference, scalar) readonly buffer MeshletBuffer {
 layout(buffer_reference, scalar) readonly buffer MeshletTriangleBuffer {
     uint items[];
 };
-layout(buffer_reference, scalar) readonly buffer VertexMeshletBuffer {
+// meshlet 마다 쓰는 정점의 전역 번호. meshlet 의 vertexOffset 부터 vertexCount 개다.
+layout(buffer_reference, scalar) readonly buffer MeshletVertexBuffer {
+    uint items[];
+};
+// 간접 그리기 명령마다 그 명령이 그리는 meshlet 번호. 고전 경로의 정점 셰이더가 gl_DrawID 로 읽어
+// 디버그 뷰에 쓴다. CPU 가 만든 LOD 단위 명령에는 그 단계의 첫 meshlet 이 들어 있다.
+layout(buffer_reference, scalar) readonly buffer DrawMeshletBuffer {
     uint items[];
 };
 layout(buffer_reference, scalar) readonly buffer MeshletGroupBuffer {
