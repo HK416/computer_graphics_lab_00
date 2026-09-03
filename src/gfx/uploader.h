@@ -20,6 +20,10 @@ public:
     Uploader& operator=(const Uploader&) = delete;
 
     void uploadBuffer(const Buffer& target, VkDeviceSize offset, const void* data, VkDeviceSize size);
+    // 장치 버퍼 사이의 복사. 지오메트리 버퍼를 키울 때 옛 내용을 새 버퍼 앞쪽으로 옮기는 데 쓴다.
+    // 두 버퍼 모두 그래픽스 큐가 소유하고 있어야 하며(이미 업로드가 끝난 버퍼), 그래서 그래픽스 큐에
+    // 기록한다. 원본은 flush 가 끝날 때까지 살아 있어야 한다.
+    void copyBuffer(const Buffer& source, const Buffer& target, VkDeviceSize size);
     void uploadImage(const Image& target, const void* data, VkDeviceSize size, VkImageLayout finalLayout);
 
     void flush();

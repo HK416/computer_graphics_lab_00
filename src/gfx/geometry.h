@@ -13,6 +13,7 @@
 namespace gfx {
 
 struct Context;
+class Uploader;
 
 // 아래 세 구조체는 shaders/scene_data.glsl 의 scalar 레이아웃 정의와 일치해야 한다.
 struct GpuMesh {
@@ -103,6 +104,10 @@ struct GpuInstance {
 };
 
 // 모든 모델의 정점과 인덱스를 하나의 버퍼로 합쳐 간접 그리기 한 번으로 장면 전체를 그릴 수 있게 한다.
+//
+// 정점·인덱스·meshlet 목록 같은 큰 배열은 업로드하고 나면 CPU 에 남기지 않는다. 모델이 더해지면 GPU
+// 버퍼를 새 크기로 잡고 옛 내용을 GPU 안에서 옮긴 뒤 새 모델 몫만 올린다. 메쉬·재질·meshlet 표는
+// 렌더러가 CPU 에서도 읽으므로 그대로 둔다.
 class GeometryStore {
 public:
     explicit GeometryStore(Context& context);
@@ -113,6 +118,8 @@ public:
     // 모델을 누적하고 이 모델의 메쉬가 시작되는 전역 인덱스를 돌려준다.
     // textureSlots 는 model.textures 와 같은 순서의 bindless 슬롯 번호다.
     uint32_t addModel(const asset::Model& model, const std::vector<uint32_t>& textureSlots);
+    // 마지막 build 뒤에 더해진 모델을 GPU 에 올린다. 버퍼를 새로 잡으므로 호출 전에 장치가 놀고
+    // 있어야 하고, 부르는 쪽이 주소를 다시 읽어야 한다(가속 구조 등).
     void build();
 
     const GpuMesh& mesh(uint32_t index) const { return meshes[index]; }
@@ -142,17 +149,42 @@ public:
     Buffer meshletVertexBuffer;
 
 private:
+    // 큰 배열 하나. total 은 GPU 에 올라간 것까지 합친 개수이고 pending 은 아직 올리지 않은 꼬리다.
+    // build 가 꼬리를 올리고 비운다.
+    template <typename T> struct GrowingArray {
+        std::vector<T> pending;
+        size_t total = 0;
+        size_t uploaded = 0;
+        // 다음에 넣을 원소의 전역 번호.
+        size_t next() const { return total; }
+        void append(const T* data, size_t count) {
+            pending.insert(pending.end(), data, data + count);
+            total += count;
+        }
+    };
+    // 버퍼를 array.total 크기로 키우고 꼬리를 올린다. 옛 버퍼는 flush 뒤에 지우도록 retired 에 넣는다.
+    template <typename T>
+    void growAndUpload(Uploader& uploader,
+                       Buffer& buffer,
+                       GrowingArray<T>& array,
+                       VkBufferUsageFlags usage,
+                       const char* name,
+                       std::vector<Buffer>& retired);
+
     Context& context;
-    std::vector<asset::Vertex> vertices;
-    std::vector<asset::SkinWeight> skinWeights;
-    std::vector<uint32_t> indices;
+    GrowingArray<asset::Vertex> vertices;
+    GrowingArray<asset::SkinWeight> skinWeights;
+    GrowingArray<uint32_t> indices;
+    GrowingArray<uint32_t> meshletTriangles;
+    GrowingArray<uint32_t> meshletVertices;
     std::vector<GpuMesh> meshes;
     std::vector<GpuMeshlet> meshlets;
     std::vector<GpuMeshLod> lods;
     uint32_t maxLods = 1;
-    std::vector<uint32_t> meshletTriangles;
-    std::vector<uint32_t> meshletVertices;
     std::vector<GpuMaterial> materials;
+    // 마지막 build 때의 표 크기. 표만 자란 경우(메쉬 없는 모델)도 다시 올리게 한다.
+    size_t uploadedMeshCount = 0;
+    size_t uploadedMaterialCount = 0;
     std::vector<asset::Material> sourceMaterials;
     std::vector<std::string> meshNames;
     std::vector<uint32_t> meshVertexCounts;

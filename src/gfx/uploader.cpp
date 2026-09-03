@@ -124,6 +124,41 @@ void Uploader::uploadBuffer(const Buffer& target, VkDeviceSize offset, const voi
     vkCmdPipelineBarrier2(graphicsCommands, &dependency);
 }
 
+void Uploader::copyBuffer(const Buffer& source, const Buffer& target, VkDeviceSize size) {
+    if (size == 0) {
+        return;
+    }
+    if (size > source.size || size > target.size) {
+        core::fatal("복사 범위가 버퍼를 벗어납니다 ({} > {} 또는 {})", size, source.size, target.size);
+    }
+    beginRecording();
+
+    VkBufferCopy2 region{VK_STRUCTURE_TYPE_BUFFER_COPY_2};
+    region.size = size;
+    VkCopyBufferInfo2 copyInfo{VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2};
+    copyInfo.srcBuffer = source.handle;
+    copyInfo.dstBuffer = target.handle;
+    copyInfo.regionCount = 1;
+    copyInfo.pRegions = &region;
+    vkCmdCopyBuffer2(graphicsCommands, &copyInfo);
+
+    // 같은 제출 안의 스테이징 획득 배리어와는 구간이 겹치지 않는다. 뒤따르는 프레임이 읽도록 열어 둔다.
+    VkBufferMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer = target.handle;
+    barrier.offset = 0;
+    barrier.size = size;
+    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.bufferMemoryBarrierCount = 1;
+    dependency.pBufferMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(graphicsCommands, &dependency);
+}
+
 void Uploader::uploadImage(const Image& target, const void* data, VkDeviceSize size, VkImageLayout finalLayout) {
     if (size == 0) {
         return;

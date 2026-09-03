@@ -57,13 +57,13 @@ uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<ui
     }
 
     for (const asset::Mesh& source : model.meshes) {
-        auto vertexBase = static_cast<uint32_t>(vertices.size());
-        auto triangleBase = static_cast<uint32_t>(meshletTriangles.size());
-        auto meshletVertexBase = static_cast<uint32_t>(meshletVertices.size());
+        auto vertexBase = static_cast<uint32_t>(vertices.next());
+        auto triangleBase = static_cast<uint32_t>(meshletTriangles.next());
+        auto meshletVertexBase = static_cast<uint32_t>(meshletVertices.next());
 
         GpuMesh mesh{};
         mesh.boundingSphere = glm::vec4{source.boundsCenter, source.boundsRadius};
-        mesh.indexOffset = static_cast<uint32_t>(indices.size());
+        mesh.indexOffset = static_cast<uint32_t>(indices.next());
         mesh.indexCount = static_cast<uint32_t>(source.indices.size());
         mesh.vertexOffset = static_cast<int32_t>(vertexBase);
         mesh.materialIndex = materialBase + source.materialIndex;
@@ -78,8 +78,8 @@ uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<ui
         if (source.skinWeights.empty()) {
             meshSkinOffsets.push_back(NO_SKIN_WEIGHTS);
         } else {
-            meshSkinOffsets.push_back(static_cast<uint32_t>(skinWeights.size()));
-            skinWeights.insert(skinWeights.end(), source.skinWeights.begin(), source.skinWeights.end());
+            meshSkinOffsets.push_back(static_cast<uint32_t>(skinWeights.next()));
+            skinWeights.append(source.skinWeights.data(), source.skinWeights.size());
         }
 
         for (const asset::Meshlet& sourceMeshlet : source.meshlets) {
@@ -106,117 +106,130 @@ uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<ui
             lod.meshletCount = sourceLod.meshletCount;
             lods.push_back(lod);
         }
-        for (uint8_t local : source.meshletTriangles) {
-            meshletTriangles.push_back(local);
+        // 8비트 지역 인덱스를 uint32 로, 목록의 값은 전역 정점 번호로 바꿔 둔다. 셰이더가 메쉬 오프셋을
+        // 더하지 않아도 된다.
+        std::vector<uint32_t> widened(source.meshletTriangles.begin(), source.meshletTriangles.end());
+        meshletTriangles.append(widened.data(), widened.size());
+        std::vector<uint32_t> globalVertices(source.meshletVertices.size());
+        for (size_t i = 0; i < globalVertices.size(); ++i) {
+            globalVertices[i] = vertexBase + source.meshletVertices[i];
         }
-        // 목록의 값은 전역 정점 번호로 바꿔 둔다. 셰이더가 메쉬 오프셋을 더하지 않아도 된다.
-        for (uint32_t vertex : source.meshletVertices) {
-            meshletVertices.push_back(vertexBase + vertex);
-        }
+        meshletVertices.append(globalVertices.data(), globalVertices.size());
 
-        vertices.insert(vertices.end(), source.vertices.begin(), source.vertices.end());
-        indices.insert(indices.end(), source.indices.begin(), source.indices.end());
+        vertices.append(source.vertices.data(), source.vertices.size());
+        indices.append(source.indices.data(), source.indices.size());
     }
     return firstMesh;
+}
+
+template <typename T>
+void GeometryStore::growAndUpload(Uploader& uploader,
+                                  Buffer& buffer,
+                                  GrowingArray<T>& array,
+                                  VkBufferUsageFlags usage,
+                                  const char* name,
+                                  std::vector<Buffer>& retired) {
+    // 주소는 늘 유효해야 하므로 비어 있어도 한 칸은 둔다.
+    VkDeviceSize newSize = static_cast<VkDeviceSize>(std::max<size_t>(array.total, 1)) * sizeof(T);
+    VkDeviceSize uploadedBytes = static_cast<VkDeviceSize>(array.uploaded) * sizeof(T);
+    if (buffer.handle == VK_NULL_HANDLE || buffer.size < newSize) {
+        // ponytail: 꼭 필요한 크기로만 잡아 여유를 두지 않는다. 모델을 더할 때마다 전체를 한 번 옮기고
+        // 그 순간 GPU 에 옛 버퍼와 새 버퍼가 함께 있다. 자주 더한다면 배수로 키우는 편이 낫다.
+        Buffer replacement = createBuffer(context,
+                                          newSize,
+                                          usage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                          MemoryLocation::DEVICE,
+                                          name);
+        if (buffer.handle != VK_NULL_HANDLE) {
+            uploader.copyBuffer(buffer, replacement, std::min(uploadedBytes, buffer.size));
+            retired.push_back(buffer);
+        }
+        buffer = replacement;
+    }
+    if (!array.pending.empty()) {
+        uploader.uploadBuffer(buffer, uploadedBytes, array.pending.data(), array.pending.size() * sizeof(T));
+    }
 }
 
 void GeometryStore::build() {
     if (meshes.empty()) {
         core::fatal("장면에 그릴 메쉬가 없습니다");
     }
+    bool nothingNew = vertices.pending.empty() && skinWeights.pending.empty() && indices.pending.empty() &&
+                      meshletTriangles.pending.empty() && meshletVertices.pending.empty() &&
+                      meshes.size() == uploadedMeshCount && materials.size() == uploadedMaterialCount;
+    if (nothingNew && vertexBuffer.handle != VK_NULL_HANDLE) {
+        return;
+    }
 
-    // 런타임에 모델을 더 얹으면 다시 불린다. 이전 버퍼를 먼저 버려야 하며, 호출 전에 장치가
-    // 놀고 있어야 한다.
-    destroyBuffer(context, meshletVertexBuffer);
-    destroyBuffer(context, meshletTriangleBuffer);
-    destroyBuffer(context, lodBuffer);
-    destroyBuffer(context, meshletBuffer);
-    destroyBuffer(context, materialBuffer);
-    destroyBuffer(context, meshBuffer);
-    destroyBuffer(context, indexBuffer);
-    destroyBuffer(context, skinWeightBuffer);
-    destroyBuffer(context, vertexBuffer);
-
-    // 하위 가속 구조는 이 두 버퍼를 그대로 입력으로 읽는다. 용도 비트가 없으면 규격 위반이라
+    // 하위 가속 구조는 정점과 인덱스 버퍼를 그대로 입력으로 읽는다. 용도 비트가 없으면 규격 위반이라
     // 드라이버가 어떤 구조를 세울지 정해져 있지 않다. 광선 확장이 없는 장치에는 붙일 수 없다.
     VkBufferUsageFlags accelerationInput = 0;
     if (context.caps.rayTracingPipeline || context.caps.rayQuery) {
         accelerationInput = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     }
 
-    vertexBuffer =
-        createBuffer(context,
-                     vertices.size() * sizeof(asset::Vertex),
-                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | accelerationInput,
-                     MemoryLocation::DEVICE,
-                     "정점");
-    // 스킨 메쉬가 하나도 없어도 주소를 넘겨야 하므로 빈 버퍼는 만들지 않고 한 칸을 둔다.
-    skinWeightBuffer = createBuffer(context,
-                                    std::max<size_t>(skinWeights.size(), 1) * sizeof(asset::SkinWeight),
-                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                    MemoryLocation::DEVICE,
-                                    "스킨 가중치");
-    indexBuffer = createBuffer(context,
-                               indices.size() * sizeof(uint32_t),
-                               VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | accelerationInput,
-                               MemoryLocation::DEVICE,
-                               "인덱스");
-    meshBuffer = createBuffer(context,
-                              meshes.size() * sizeof(GpuMesh),
+    // 큰 배열은 GPU 안에서 옮겨 키우고 꼬리만 올린다. 옛 버퍼는 복사가 끝난 뒤에 지운다.
+    Uploader uploader(context);
+    std::vector<Buffer> retired;
+    growAndUpload(
+        uploader, vertexBuffer, vertices, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | accelerationInput, "정점", retired);
+    growAndUpload(uploader, skinWeightBuffer, skinWeights, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "스킨 가중치", retired);
+    growAndUpload(
+        uploader, indexBuffer, indices, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | accelerationInput, "인덱스", retired);
+    growAndUpload(uploader,
+                  meshletTriangleBuffer,
+                  meshletTriangles,
+                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                  "meshlet 삼각형",
+                  retired);
+    growAndUpload(uploader,
+                  meshletVertexBuffer,
+                  meshletVertices,
+                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                  "meshlet 정점 목록",
+                  retired);
+
+    // 표는 작고 렌더러가 CPU 에서도 읽으므로 통째로 다시 올린다. 호출 전에 장치가 놀고 있어야 한다.
+    auto rebuildTable = [&](Buffer& buffer, const void* data, size_t bytes, const char* name) {
+        destroyBuffer(context, buffer);
+        buffer = createBuffer(context,
+                              bytes,
                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                               MemoryLocation::DEVICE,
-                              "메쉬");
-    materialBuffer = createBuffer(context,
-                                  materials.size() * sizeof(GpuMaterial),
-                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                  MemoryLocation::DEVICE,
-                                  "재질");
-
-    meshletBuffer = createBuffer(context,
-                                 meshlets.size() * sizeof(GpuMeshlet),
-                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                 MemoryLocation::DEVICE,
-                                 "meshlet");
-    meshletTriangleBuffer = createBuffer(context,
-                                         meshletTriangles.size() * sizeof(uint32_t),
-                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                         MemoryLocation::DEVICE,
-                                         "meshlet 삼각형");
-    meshletVertexBuffer = createBuffer(context,
-                                       meshletVertices.size() * sizeof(uint32_t),
-                                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                       MemoryLocation::DEVICE,
-                                       "meshlet 정점 목록");
-
-    lodBuffer = createBuffer(context,
-                             lods.size() * sizeof(GpuMeshLod),
-                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                             MemoryLocation::DEVICE,
-                             "LOD");
-
-    Uploader uploader(context);
-    uploader.uploadBuffer(vertexBuffer, 0, vertices.data(), vertexBuffer.size);
-    if (!skinWeights.empty()) {
-        uploader.uploadBuffer(skinWeightBuffer, 0, skinWeights.data(), skinWeightBuffer.size);
-    }
-    uploader.uploadBuffer(indexBuffer, 0, indices.data(), indexBuffer.size);
-    uploader.uploadBuffer(meshBuffer, 0, meshes.data(), meshBuffer.size);
-    uploader.uploadBuffer(materialBuffer, 0, materials.data(), materialBuffer.size);
-    uploader.uploadBuffer(meshletBuffer, 0, meshlets.data(), meshletBuffer.size);
-    uploader.uploadBuffer(lodBuffer, 0, lods.data(), lodBuffer.size);
-    uploader.uploadBuffer(meshletTriangleBuffer, 0, meshletTriangles.data(), meshletTriangleBuffer.size);
-    uploader.uploadBuffer(meshletVertexBuffer, 0, meshletVertices.data(), meshletVertexBuffer.size);
+                              name);
+        uploader.uploadBuffer(buffer, 0, data, bytes);
+    };
+    rebuildTable(meshBuffer, meshes.data(), meshes.size() * sizeof(GpuMesh), "메쉬");
+    rebuildTable(materialBuffer, materials.data(), materials.size() * sizeof(GpuMaterial), "재질");
+    rebuildTable(meshletBuffer, meshlets.data(), meshlets.size() * sizeof(GpuMeshlet), "meshlet");
+    rebuildTable(lodBuffer, lods.data(), lods.size() * sizeof(GpuMeshLod), "LOD");
     uploader.flush();
 
+    for (Buffer& buffer : retired) {
+        destroyBuffer(context, buffer);
+    }
+    // 올린 꼬리는 버린다. 다음 build 는 GPU 의 옛 버퍼에서 옮기므로 CPU 사본이 필요 없다.
+    auto settle = [](auto& array) {
+        array.uploaded = array.total;
+        array.pending.clear();
+        array.pending.shrink_to_fit();
+    };
+    settle(vertices);
+    settle(skinWeights);
+    settle(indices);
+    settle(meshletTriangles);
+    settle(meshletVertices);
+    uploadedMeshCount = meshes.size();
+    uploadedMaterialCount = materials.size();
+
     spdlog::info("지오메트리 업로드: 정점 {}, 인덱스 {}, 메쉬 {}, 재질 {}, meshlet {}",
-                 vertices.size(),
-                 indices.size(),
+                 vertices.total,
+                 indices.total,
                  meshes.size(),
                  materials.size(),
                  meshlets.size());
     spdlog::info("LOD 단계 최대 {}, 총 LOD 항목 {}", maxLods, lods.size());
-
-    // CPU 사본은 남겨 둔다. 런타임에 모델을 더할 때 전체 버퍼를 다시 만들어야 하기 때문이다.
 }
 
 } // namespace gfx
