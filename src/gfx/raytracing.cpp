@@ -164,6 +164,7 @@ void RayTracer::invalidateBottomLevel() {
         destroyStructure(structure);
     }
     bottomLevels.clear();
+    bottomLevelBuilt = false;
     // 상위 구조는 하위 구조 주소를 담고 있어 함께 버린다. ready() 가 거짓이 되어 다음 프레임에 다시 세운다.
     destroyStructure(topLevel);
 }
@@ -179,10 +180,15 @@ bool RayTracer::buildBottomLevel(std::string& reason) {
     std::vector<VkAccelerationStructureBuildGeometryInfoKHR> buildInfos(meshCount);
     std::vector<VkAccelerationStructureBuildSizesInfoKHR> sizes(meshCount);
     std::vector<uint32_t> primitiveCounts(meshCount);
+    // 해제된 무덤 메쉬는 세우지 않고 핸들을 null 로 둔다. 정점 수 0 에서 maxVertex 가 아래로 넘친다.
+    auto live = [this](uint32_t index) { return geometry.meshLive(index) && geometry.meshVertexCount(index) > 0; };
     VkDeviceSize structureBytes = 0;
     VkDeviceSize largestScratch = 0;
     VkDeviceSize totalScratch = 0;
     for (uint32_t index = 0; index < meshCount; ++index) {
+        if (!live(index)) {
+            continue;
+        }
         const GpuMesh& mesh = geometry.mesh(index);
         const GpuMeshLod& lod = geometry.lod(mesh.lodOffset);
 
@@ -263,9 +269,15 @@ bool RayTracer::buildBottomLevel(std::string& reason) {
         uint32_t last = first;
         std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
         std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> rangePointers;
+        // 무덤 메쉬는 묶음에 넣지 않는다. 구조 생성도 빌드 명령도 살아 있는 메쉬만 모은다.
+        std::vector<VkAccelerationStructureBuildGeometryInfoKHR> batchInfos;
         while (last < meshCount) {
+            if (!live(last)) {
+                ++last;
+                continue;
+            }
             VkDeviceSize scratch = alignUp(sizes[last].buildScratchSize, 256);
-            if (last > first && used + scratch > scratchBuffer.size) {
+            if (!batchInfos.empty() && used + scratch > scratchBuffer.size) {
                 break;
             }
             bottomLevels[last] =
@@ -273,21 +285,25 @@ bool RayTracer::buildBottomLevel(std::string& reason) {
             buildInfos[last].dstAccelerationStructure = bottomLevels[last].handle;
             buildInfos[last].scratchData.deviceAddress = scratchBuffer.address + used;
             used += scratch;
+            batchInfos.push_back(buildInfos[last]);
+            ranges.push_back(VkAccelerationStructureBuildRangeInfoKHR{primitiveCounts[last], 0, 0, 0});
             ++last;
         }
-        ranges.resize(last - first);
-        rangePointers.resize(last - first);
-        for (uint32_t index = first; index < last; ++index) {
-            ranges[index - first] = {};
-            ranges[index - first].primitiveCount = primitiveCounts[index];
-            rangePointers[index - first] = &ranges[index - first];
+        if (batchInfos.empty()) {
+            first = last;
+            continue;
+        }
+        rangePointers.resize(ranges.size());
+        for (size_t i = 0; i < ranges.size(); ++i) {
+            rangePointers[i] = &ranges[i];
         }
 
         VK_CHECK(vkResetCommandPool(context.device, pool, 0));
         VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
-        cmdBuildAccelerationStructures(commandBuffer, last - first, &buildInfos[first], rangePointers.data());
+        cmdBuildAccelerationStructures(
+            commandBuffer, static_cast<uint32_t>(batchInfos.size()), batchInfos.data(), rangePointers.data());
         VK_CHECK(vkEndCommandBuffer(commandBuffer));
 
         VkCommandBufferSubmitInfo commandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
@@ -301,10 +317,15 @@ bool RayTracer::buildBottomLevel(std::string& reason) {
         first = last;
     }
     vkDestroyCommandPool(context.device, pool, nullptr);
+    bottomLevelBuilt = true;
 
+    size_t built = 0;
+    for (const AccelerationStructure& structure : bottomLevels) {
+        built += structure.handle != VK_NULL_HANDLE ? 1 : 0;
+    }
     double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - buildStart).count();
     spdlog::info("하위 가속 구조 {}개 생성: {:.0f} MB, 스크래치 {:.0f} MB, 제출 {}회, {:.1f} ms",
-                 bottomLevels.size(),
+                 built,
                  static_cast<double>(structureBytes) / MB,
                  static_cast<double>(scratchBuffer.size) / MB,
                  submissions,
@@ -437,7 +458,7 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
     for (uint32_t index = 0; index < sceneToTrace.objects.size(); ++index) {
         uint32_t mesh = sceneToTrace.meshOf(index);
         if (index >= instanceSlots.size() || instanceSlots[index] == INVALID_INSTANCE_SLOT ||
-            mesh >= bottomLevels.size()) {
+            mesh >= bottomLevels.size() || bottomLevels[mesh].handle == VK_NULL_HANDLE) {
             continue;
         }
         // 스킨 오브젝트는 이번 프레임의 포즈로 다시 세운 구조를 가리킨다. 바인드 포즈 구조를

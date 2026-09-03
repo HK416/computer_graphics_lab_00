@@ -6,6 +6,7 @@
 #include <format>
 #include <fstream>
 #include <limits>
+#include <numbers>
 #include <optional>
 #include <vector>
 
@@ -13,6 +14,7 @@
 #include <spdlog/spdlog.h>
 
 #include "asset/model.h"
+#include "asset/vertex_pack.h"
 #include "core/error.h"
 #include "gfx/uploader.h"
 #include "scene/scene_io.h"
@@ -76,6 +78,61 @@ void frameCamera(scene::Scene& scene, const gfx::GeometryStore& geometry) {
     }
 }
 
+// 내장 모델은 파일이 없어 이 이름을 경로 자리에 쓴다. 장면 파일에도 이 이름 그대로 적힌다.
+constexpr const char* BUILTIN_SPHERE_NAME = "<builtin:sphere>";
+
+// 반지름 1 의 위도·경도 구. 유체 입자와 «메쉬 › 구» 프리미티브가 쓴다. 입자는 수만 개가 그려지므로
+// 삼각형을 아낀다(16×12 분할, 384 삼각형).
+asset::Model makeSphereModel() {
+    constexpr uint32_t SEGMENTS = 16;
+    constexpr uint32_t RINGS = 12;
+
+    asset::Model model;
+    model.name = BUILTIN_SPHERE_NAME;
+
+    asset::Material material;
+    material.name = "구";
+    material.baseColorFactor = glm::vec4{0.35F, 0.55F, 0.9F, 1.0F};
+    material.metallicFactor = 0.0F;
+    material.roughnessFactor = 0.2F;
+    model.materials.push_back(material);
+
+    asset::Mesh mesh;
+    mesh.name = "구";
+    mesh.materialIndex = 0;
+    for (uint32_t ring = 0; ring <= RINGS; ++ring) {
+        float theta = std::numbers::pi_v<float> * static_cast<float>(ring) / static_cast<float>(RINGS);
+        for (uint32_t segment = 0; segment <= SEGMENTS; ++segment) {
+            float phi = 2.0F * std::numbers::pi_v<float> * static_cast<float>(segment) / static_cast<float>(SEGMENTS);
+            glm::vec3 normal{std::sin(theta) * std::cos(phi), std::cos(theta), std::sin(theta) * std::sin(phi)};
+            asset::Vertex vertex;
+            vertex.position = normal;
+            vertex.normal = asset::packUnitVector(normal);
+            vertex.tangent = asset::packTangent(glm::vec4{-std::sin(phi), 0.0F, std::cos(phi), 1.0F});
+            vertex.uv = glm::vec2{static_cast<float>(segment) / static_cast<float>(SEGMENTS),
+                                  static_cast<float>(ring) / static_cast<float>(RINGS)};
+            mesh.vertices.push_back(vertex);
+        }
+    }
+    // 바깥을 보는 반시계 감기. 극에서는 삼각형 하나가 퇴화하므로 그 줄은 하나만 넣는다.
+    for (uint32_t ring = 0; ring < RINGS; ++ring) {
+        for (uint32_t segment = 0; segment < SEGMENTS; ++segment) {
+            uint32_t a = ring * (SEGMENTS + 1) + segment;
+            uint32_t b = a + SEGMENTS + 1;
+            if (ring > 0) {
+                mesh.indices.insert(mesh.indices.end(), {a, a + 1, b});
+            }
+            if (ring + 1 < RINGS) {
+                mesh.indices.insert(mesh.indices.end(), {a + 1, b + 1, b});
+            }
+        }
+    }
+    mesh.boundsCenter = glm::vec3{0.0F};
+    mesh.boundsRadius = 1.0F;
+    model.meshes.push_back(std::move(mesh));
+    return model;
+}
+
 } // namespace
 
 Application::Application(const Options& options) : jobs(options.threadCount), options(options) {
@@ -96,6 +153,7 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     bindless = std::make_unique<gfx::BindlessTextures>(*context);
     textures = std::make_unique<gfx::TextureCache>(*context, *bindless);
     geometry = std::make_unique<gfx::GeometryStore>(*context);
+    registerBuiltinModels();
     loadScenes();
     renderer = std::make_unique<gfx::Renderer>(*context, *geometry, *bindless, window);
     editorUi = std::make_unique<editor::Editor>(*context, *renderer, window);
@@ -133,17 +191,11 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
         sceneRoot,
         [this](const std::filesystem::path& path) { saveScene(path); },
         [this](const std::filesystem::path& path) { openScene(path); });
-    // 에셋 장면은 그대로 두고 빈 장면을 하나 더 만들어 활성화한다. 지오메트리 버퍼가 비는 일이 없다.
-    if (options.emptyScene) {
-        scene::Scene& created = scenes.create("빈 장면");
-        addDefaultLight(created);
-        scenes.setActive(scenes.count() - 1);
-    }
     // 렌더러가 있어야 지오메트리 재구축을 알릴 수 있으므로 여기서 연다.
     for (const std::filesystem::path& path : options.modelPaths) {
         loadModel(path);
     }
-    if (options.emptyScene && !options.modelPaths.empty()) {
+    if (!options.modelPaths.empty()) {
         frameCamera(scenes.active(), *geometry);
     }
     if (!options.scenePath.empty()) {
@@ -169,80 +221,20 @@ void Application::loadScenes() {
     assetRoot = std::filesystem::path(CG_LAB_ASSET_ROOT) / "assets";
     sceneRoot = std::filesystem::path(CG_LAB_ASSET_ROOT) / "scenes";
 
-    std::vector<std::filesystem::path> files;
-    std::error_code error;
-    for (const auto& entry : std::filesystem::directory_iterator(assetRoot, error)) {
-        if (entry.is_regular_file() && (entry.path().extension() == ".glb" || entry.path().extension() == ".gltf")) {
-            files.push_back(entry.path());
-        }
-    }
-    if (files.empty()) {
-        core::fatal("{} 에서 glTF 에셋을 찾지 못했습니다", assetRoot.string());
-    }
-    std::ranges::sort(files);
-
-    // glTF 파싱과 LOD 계층 구성은 서로 독립이므로 워커에 흩뿌린다. 적재 시간의 대부분이 여기다.
-    uint64_t loadStart = SDL_GetTicksNS();
-    std::vector<asset::Model> models(files.size());
-    jobs.parallelFor(static_cast<uint32_t>(files.size()), 1, [&files, &models, this](uint32_t begin, uint32_t end) {
-        for (uint32_t i = begin; i < end; ++i) {
-            std::optional<asset::Model> loaded = asset::loadGltf(files[i], nullptr, &jobs, loadSettings());
-            if (!loaded) {
-                core::fatal("기본 에셋을 읽지 못했습니다: {}", files[i].string());
-            }
-            models[i] = std::move(*loaded);
-        }
-    });
-
-    double parseMs = static_cast<double>(SDL_GetTicksNS() - loadStart) / 1.0e6;
-
-    // 텍스처 디코딩과 LOD 구성 모두 모델 경계를 넘어 하나의 목록으로 펼쳐야 워커에 고르게 퍼진다.
-    std::vector<asset::Texture*> allTextures;
-    std::vector<asset::Mesh*> allMeshes;
-    for (asset::Model& model : models) {
-        for (asset::Texture& texture : model.textures) {
-            allTextures.push_back(&texture);
-        }
-        for (asset::Mesh& mesh : model.meshes) {
-            allMeshes.push_back(&mesh);
-        }
-    }
-    PrepareTimings timings = prepareAssets(allTextures, allMeshes, nullptr);
-
-    size_t meshletTotal = 0;
-    size_t maxLodLevels = 0;
-    for (const asset::Mesh* mesh : allMeshes) {
-        meshletTotal += mesh->meshlets.size();
-        maxLodLevels = std::max(maxLodLevels, mesh->lods.size());
-    }
-    spdlog::info(
-        "에셋 적재 완료: 메쉬 {}, meshlet {}, LOD {}단계, {:.1f} ms (해석 {:.1f}, 텍스처 {:.1f}, LOD {:.1f}), 워커 {}",
-        allMeshes.size(),
-        meshletTotal,
-        maxLodLevels,
-        static_cast<double>(SDL_GetTicksNS() - loadStart) / 1.0e6,
-        parseMs,
-        timings.textureMs,
-        timings.lodMs,
-        jobs.workerCount());
-
-    // GPU 자원 생성은 순서를 지켜 한 스레드에서만 한다.
-    for (size_t i = 0; i < files.size(); ++i) {
-        if (!fitsGpuBudget(models[i])) {
-            core::fatal("기본 에셋이 GPU 메모리 예산에 들어가지 않습니다: {}", files[i].string());
-        }
-        uint32_t modelIndex = registerModel(files[i], models[i]);
-        scene::Scene& created = scenes.create(files[i].stem().string());
-        addDefaultLight(created);
-        instantiateModel(modelIndex, created);
-    }
+    // Unity 처럼 빈 장면 하나로 시작한다. public/assets 의 glTF 는 편집기 «모델 불러오기» 나 --model 로 올린다.
+    scene::Scene& created = scenes.create("GameScene");
+    addDefaultLight(created);
+    created.refresh();
     geometry->build();
-    for (size_t i = 0; i < scenes.count(); ++i) {
-        scenes.setActive(i);
-        frameCamera(scenes.active(), *geometry);
-    }
-    scenes.setActive(std::min(options.initialScene, scenes.count() - 1));
-    spdlog::info("장면 {}개 준비 완료, 현재 장면: {}", scenes.count(), scenes.active().name);
+    scenes.setActive(0);
+    spdlog::info("기본 장면 준비 완료: {}", created.name);
+}
+
+void Application::registerBuiltinModels() {
+    asset::Model sphere = makeSphereModel();
+    asset::buildLodHierarchy(sphere.meshes[0], &jobs);
+    uint32_t model = registerModel(std::filesystem::path{BUILTIN_SPHERE_NAME}, sphere, true);
+    sphereMesh = loadedModels[model].meshBase;
 }
 
 Application::PrepareTimings Application::prepareAssets(std::vector<asset::Texture*>& allTextures,
@@ -352,14 +344,15 @@ bool Application::fitsGpuBudget(const asset::Model& model) const {
 uint32_t Application::findModel(const std::filesystem::path& path) const {
     std::error_code error;
     for (uint32_t i = 0; i < loadedModels.size(); ++i) {
-        if (std::filesystem::equivalent(loadedModels[i].path, path, error)) {
+        // 내장 모델은 파일이 없어 equivalent 가 실패하므로 이름을 먼저 견준다.
+        if (loadedModels[i].path == path || std::filesystem::equivalent(loadedModels[i].path, path, error)) {
             return i;
         }
     }
     return static_cast<uint32_t>(loadedModels.size());
 }
 
-uint32_t Application::registerModel(const std::filesystem::path& path, asset::Model& model) {
+uint32_t Application::registerModel(const std::filesystem::path& path, asset::Model& model, bool builtin) {
     gfx::Uploader uploader(*context);
     std::vector<uint32_t> textureSlots;
     textureSlots.reserve(model.textures.size());
@@ -369,6 +362,7 @@ uint32_t Application::registerModel(const std::filesystem::path& path, asset::Mo
 
     LoadedModel entry;
     entry.path = path;
+    entry.builtin = builtin;
     entry.meshBase = geometry->addModel(model, textureSlots);
     entry.meshCount = static_cast<uint32_t>(model.meshes.size());
     entry.skeleton = std::move(model.skeleton);
@@ -637,8 +631,9 @@ void Application::openScene(const std::filesystem::path& path) {
     std::vector<uint32_t> modelIndices;
     modelIndices.reserve(loaded.models.size());
     for (const std::filesystem::path& modelPath : loaded.models) {
-        // 상대 경로는 에셋 뿌리 기준으로 푼다.
-        uint32_t index = ensureModel(modelPath.is_absolute() ? modelPath : assetRoot / modelPath);
+        // 상대 경로는 에셋 뿌리 기준으로 푼다. 내장 모델 이름은 그대로 찾는다.
+        bool builtin = modelPath.generic_string().rfind("<builtin:", 0) == 0;
+        uint32_t index = ensureModel(modelPath.is_absolute() || builtin ? modelPath : assetRoot / modelPath);
         if (index >= loadedModels.size()) {
             spdlog::error("장면이 가리키는 모델을 읽지 못해 그 오브젝트는 메쉬 없이 둔다: {}", modelPath.string());
         }

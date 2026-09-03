@@ -79,7 +79,8 @@ public:
     bool buildBottomLevel(std::string& reason);
     // 지오메트리 버퍼가 바뀌면 옛 주소를 가리키는 하위·상위 구조를 버린다. 다음 요청 때 다시 만든다.
     void invalidateBottomLevel();
-    bool bottomLevelReady() const { return !bottomLevels.empty(); }
+    // 메쉬가 하나도 없어도 «세웠다»가 참이어야 한다. 비어 있음으로 판단하면 빈 장면에서 매 프레임 다시 세운다.
+    bool bottomLevelReady() const { return bottomLevelBuilt; }
     // 스킨 인스턴스마다 변형 정점으로 하위 가속 구조를 다시 세운다. 포즈가 바뀌면 매 프레임
     // 불러야 한다. 스킨 컴퓨트가 끝난 뒤, updateTopLevel 앞에 온다.
     void updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
@@ -133,7 +134,9 @@ private:
     GeometryStore& geometry;
     BindlessTextures& bindless;
 
+    // 메쉬 번호마다 하나. 해제된 무덤 메쉬는 핸들이 null 이다.
     std::vector<AccelerationStructure> bottomLevels;
+    bool bottomLevelBuilt = false;
     // 스킨 인스턴스마다 하나. 포즈가 바뀔 때마다 같은 자리에 다시 세운다.
     std::vector<AccelerationStructure> skinnedBottomLevels;
     AccelerationStructure topLevel;

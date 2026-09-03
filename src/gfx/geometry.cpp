@@ -184,9 +184,7 @@ void GeometryStore::growAndUpload(Uploader& uploader,
 }
 
 void GeometryStore::build() {
-    if (meshes.empty()) {
-        core::fatal("장면에 그릴 메쉬가 없습니다");
-    }
+    // 메쉬가 하나도 없어도 돌아간다. 기본 장면은 비어 있고, 모델은 편집기에서 올린다.
     bool nothingNew = vertices.pending.empty() && skinWeights.pending.empty() && indices.pending.empty() &&
                       meshletTriangles.pending.empty() && meshletVertices.pending.empty() &&
                       meshes.size() == uploadedMeshCount && materials.size() == uploadedMaterialCount;
@@ -225,8 +223,9 @@ void GeometryStore::build() {
     // 표는 작고 렌더러가 CPU 에서도 읽으므로 통째로 다시 올린다. 호출 전에 장치가 놀고 있어야 한다.
     auto rebuildTable = [&](Buffer& buffer, const void* data, size_t bytes, const char* name) {
         destroyBuffer(context, buffer);
+        // 표가 비어도 주소는 유효해야 하므로 한 칸은 잡는다.
         buffer = createBuffer(context,
-                              bytes,
+                              std::max<size_t>(bytes, 16),
                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                               MemoryLocation::DEVICE,
                               name);

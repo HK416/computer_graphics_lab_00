@@ -2387,7 +2387,7 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
     glm::vec3 maximum{std::numeric_limits<float>::lowest()};
     bool hasBounds = false;
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
-        if (scene.meshOf(index) >= geometry.meshCount() || !scene.visibleCached(index)) {
+        if (!geometry.meshLive(scene.meshOf(index)) || !scene.visibleCached(index)) {
             continue;
         }
         const glm::mat4& world = scene.world(index);
@@ -2574,7 +2574,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     };
     // 조상이 숨겨져 있으면 자식도 그리지 않는다. 변환만 담는 노드는 메쉬가 없어 걸러진다.
     auto drawable = [this, &scene](uint32_t index) {
-        return scene.visibleCached(index) && scene.meshOf(index) < geometry.meshCount();
+        return scene.visibleCached(index) && geometry.meshLive(scene.meshOf(index));
     };
 
     FrameBatches batches{};
@@ -3003,7 +3003,7 @@ void Renderer::updateLodNetwork(const scene::Scene& scene, Frame& frame, float p
 
     uint32_t candidateCount = 0;
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
-        if (scene.objects[index].visible && scene.meshOf(index) < geometry.meshCount()) {
+        if (scene.objects[index].visible && geometry.meshLive(scene.meshOf(index))) {
             candidateCount += geometry.mesh(scene.meshOf(index)).meshletCount;
         }
     }
@@ -3020,7 +3020,7 @@ void Renderer::updateLodNetwork(const scene::Scene& scene, Frame& frame, float p
     uint32_t candidateIndex = 0;
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
         const scene::Object& object = scene.objects[index];
-        if (!object.visible || scene.meshOf(index) >= geometry.meshCount()) {
+        if (!object.visible || !geometry.meshLive(scene.meshOf(index))) {
             continue;
         }
         const GpuMesh& mesh = geometry.mesh(scene.meshOf(index));

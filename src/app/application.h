@@ -30,7 +30,6 @@ struct Options {
     std::filesystem::path screenshotPath;
     // 몇 프레임째를 저장할지. 시간축 업스케일처럼 여러 프레임을 쌓는 기능은 뒤쪽을 봐야 한다.
     uint64_t screenshotFrame = 8;
-    size_t initialScene = 0;
     // 지정하면 시작할 때 이 장면 파일을 연다.
     std::filesystem::path scenePath;
     // 시작할 때 불러올 glTF 모델들. 편집기의 "모델" 단추와 같은 경로를 탄다.
@@ -55,8 +54,6 @@ struct Options {
     bool meshShader = true;
     // 시작할 때 광선 반사를 켠다. 광선 질의가 없으면 렌더러가 스스로 끈다.
     bool reflections = false;
-    // 빈 장면을 하나 만들어 그것으로 시작한다. --model 로 올린 모델만 보고 싶을 때 쓴다.
-    bool emptyScene = false;
     // 프레임마다 카메라를 이만큼(도) 궤도 회전한다. 정지 화면에서는 드러나지 않는 팝인을 재현한다.
     float orbitDegreesPerFrame = 0.0F;
     float triangleBudget = 0.0F;
@@ -83,9 +80,14 @@ private:
         uint32_t meshCount = 0;
         asset::Skeleton skeleton;
         std::vector<asset::Instance> instances;
+        // 코드로 만든 내장 모델(구). 파일이 없고 해제 대상도 아니다.
+        bool builtin = false;
     };
 
+    // 기본 장면 «GameScene» 하나를 만든다. 에셋은 편집기나 --model 로 올린다.
     void loadScenes();
+    // 파일 없이 코드로 만드는 모델. 유체 입자와 «메쉬 › 구» 프리미티브가 쓰는 구 하나다.
+    void registerBuiltinModels();
 
     // 해석된 모델을 GPU 에 올리기 전에 하는 CPU 작업 전부. 텍스처 디코딩과 LOD 계층 구축이다.
     // 어느 스레드에서든 부를 수 있고 안에서 워커를 나눠 쓴다. 단계별 시간을 ms 로 돌려준다.
@@ -104,7 +106,7 @@ private:
     // 실행 인자에서 나온 적재 방식.
     asset::LoadSettings loadSettings() const;
     // 이미 해석해 둔 모델을 GPU 에 올리고 등록 번호를 돌려준다. 지오메트리 재구축은 부르는 쪽 몫이다.
-    uint32_t registerModel(const std::filesystem::path& path, asset::Model& model);
+    uint32_t registerModel(const std::filesystem::path& path, asset::Model& model, bool builtin = false);
     // 같은 파일이 이미 올라가 있으면 그 등록 번호를, 아니면 loadedModels.size() 를 돌려준다.
     uint32_t findModel(const std::filesystem::path& path) const;
     // 모델을 아직 올리지 않았으면 해석해서 올리고 등록 번호를 돌려준다. 부르는 스레드에서 끝까지 한다.
@@ -168,6 +170,8 @@ private:
     std::filesystem::path assetRoot;
     std::filesystem::path sceneRoot;
     std::vector<LoadedModel> loadedModels;
+    // 내장 구의 전역 메쉬 번호.
+    uint32_t sphereMesh = scene::INVALID_MESH;
     float orbitDegreesPerFrame = 0.0F;
     Options options;
 };
