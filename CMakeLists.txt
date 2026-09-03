@@ -174,6 +174,7 @@ add_executable(cg_lab
     src/app/application.cpp
     src/asset/animation.cpp
     src/asset/gltf_loader.cpp
+    src/asset/ktx2_loader.cpp
     src/asset/meshlet.cpp
     src/core/error.cpp
     src/core/job_system.cpp

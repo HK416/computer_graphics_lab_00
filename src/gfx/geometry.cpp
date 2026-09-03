@@ -51,7 +51,13 @@ uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<ui
         material.occlusionTexture = resolveTexture(source.occlusionTexture, textureSlots);
         material.emissiveTexture = resolveTexture(source.emissiveTexture, textureSlots);
         material.alphaMode = static_cast<uint32_t>(source.alphaMode);
-        material.flags = source.doubleSided ? 1U : 0U;
+        material.flags = source.doubleSided ? MATERIAL_FLAG_DOUBLE_SIDED : 0U;
+        if (source.normalTexture != asset::INVALID_TEXTURE && source.normalTexture < model.textures.size()) {
+            asset::TextureFormat normalFormat = model.textures[source.normalTexture].format;
+            if (normalFormat == asset::TextureFormat::BC4 || normalFormat == asset::TextureFormat::BC5) {
+                material.flags |= MATERIAL_FLAG_TWO_CHANNEL_NORMAL;
+            }
+        }
         materials.push_back(material);
         sourceMaterials.push_back(source);
     }

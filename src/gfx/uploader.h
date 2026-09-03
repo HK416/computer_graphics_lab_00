@@ -24,7 +24,14 @@ public:
     // 두 버퍼 모두 그래픽스 큐가 소유하고 있어야 하며(이미 업로드가 끝난 버퍼), 그래서 그래픽스 큐에
     // 기록한다. 원본은 flush 가 끝날 때까지 살아 있어야 한다.
     void copyBuffer(const Buffer& source, const Buffer& target, VkDeviceSize size);
+    // 밉 0 만 올리고 나머지는 블릿으로 만든다. 블릿할 수 없는 압축 포맷에는 쓸 수 없다.
     void uploadImage(const Image& target, const void* data, VkDeviceSize size, VkImageLayout finalLayout);
+    // 밉 단계가 모두 담긴 데이터를 그대로 올린다. levelBytes 는 단계마다의 바이트 수이고 data 에 그 순서로
+    // 이어져 있다. 블릿이 없어 압축 포맷도 된다.
+    void uploadImageLevels(const Image& target,
+                           const void* data,
+                           const std::vector<VkDeviceSize>& levelBytes,
+                           VkImageLayout finalLayout);
 
     void flush();
 

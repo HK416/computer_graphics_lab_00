@@ -65,9 +65,14 @@ struct GpuMaterial {
     uint32_t occlusionTexture;
     uint32_t emissiveTexture;
     uint32_t alphaMode;
-    uint32_t flags; // bit 0: 양면
+    uint32_t flags; // MATERIAL_FLAG_*
     uint32_t padding;
 };
+
+// GpuMaterial::flags. shaders/scene_types.glsl 의 MATERIAL_FLAG_* 와 같아야 한다.
+inline constexpr uint32_t MATERIAL_FLAG_DOUBLE_SIDED = 1U;
+// 노멀 맵이 두 채널(BC4/BC5)이라 셰이더가 z 를 복원한다.
+inline constexpr uint32_t MATERIAL_FLAG_TWO_CHANNEL_NORMAL = 2U;
 
 // 스킨이 없는 인스턴스의 조인트 오프셋. 셰이더가 이 값으로 스키닝 여부를 가른다.
 inline constexpr uint32_t NO_JOINTS = 0xFFFFFFFFU;

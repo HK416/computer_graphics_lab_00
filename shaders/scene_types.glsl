@@ -99,6 +99,11 @@ struct Meshlet {
 #define ALPHA_MODE_CUTOFF 1u
 #define ALPHA_MODE_TRANSLUCENT 2u
 
+// Material.flags. src/gfx/geometry.h 의 MATERIAL_FLAG_* 와 같아야 한다.
+#define MATERIAL_FLAG_DOUBLE_SIDED 1u
+// 노멀 맵이 두 채널(BC5)이라 z 를 xy 에서 복원한다.
+#define MATERIAL_FLAG_TWO_CHANNEL_NORMAL 2u
+
 struct Material {
     vec4 baseColorFactor;
     vec4 emissiveAndCutoff;

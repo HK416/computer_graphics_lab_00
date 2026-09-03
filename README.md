@@ -124,6 +124,20 @@ float 둘이다. 탄젠트의 손 방향은 y 성분의 최하위 비트에 넣�
 `shaders/scene_types.glsl` 이 같은 식이어야 하며, 스킨 컴퓨트는 풀어서 돌린 뒤 다시 접는다.
 `vertex_pack` 테스트가 왕복 오차를 0.02도 아래로 확인한다.
 
+### 미리 압축된 텍스처 (KTX2)
+
+PNG/JPEG 는 RGBA8 로 풀어 올리고 GPU 가 밉을 만든다. 큰 모델은 텍스처를 **KTX2 에 BC 로 미리 압축**해
+두는 편이 낫다. 디코딩이 없어 적재가 빠르고 GPU 메모리가 4~8 배 준다. glTF 는 `KHR_texture_basisu`
+로 KTX2 이미지를 가리키고, 적재기는 파일 앞의 KTX2 식별자를 보고 가른다.
+
+- 읽는 것: 초압축 없는 KTX2, 2D 한 장, BC1/BC3/BC4/BC5/BC7 또는 RGBA8, 담긴 밉을 그대로 씀. Basis
+  Universal 이나 zstd 로 초압축된 파일은 트랜스코더가 없어 사유를 남기고 뺀다.
+- 만드는 법: KTX-Software 의 `ktx create --format BC7_SRGB_BLOCK --generate-mipmap in.png out.ktx2`
+  (노멀 맵은 `BC5_UNORM_BLOCK`). 파일의 색 공간은 무시하고 재질 슬롯으로 sRGB 여부를 정한다.
+- 노멀 맵이 BC4/BC5 면 재질에 두 채널 플래그가 붙고 셰이더가 z 를 복원한다.
+- 압축 포맷은 블릿할 수 없어 밉이 파일에 있어야 한다. 한 단계만 있으면 그 단계로만 샘플링한다.
+- `textureCompressionBC` 가 없는 장치에서는 폴백 없이 텍스처를 빼고 경고한다.
+
 LOD 계층을 만들 때 그룹마다 `meshopt_simplify` 를 부르는데, 이 함수는 **넘긴 정점 수에 비례해**
 배열을 만들고 훑는다. 그룹은 수백 정점인데 메쉬 전체를 넘기면 호출마다 메쉬 전체를 다시 읽는
 셈이라, 정점 2천만 개 메쉬에서는 그룹 하나에 0.6 초가 들었다. 그래서 그룹이 쓰는 정점만 모아

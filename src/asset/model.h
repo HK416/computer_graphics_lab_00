@@ -37,6 +37,14 @@ struct SamplerDesc {
     bool operator==(const SamplerDesc&) const = default;
 };
 
+// 텍스처 화소 포맷. RGBA8 는 stb 가 푼 것이고 나머지는 KTX2 에 미리 압축된 블록이다. 색 공간(sRGB)은
+// 재질 슬롯이 정하므로 여기 넣지 않고 GPU 포맷을 고를 때 붙인다.
+enum class TextureFormat : uint32_t { RGBA8, BC1, BC3, BC4, BC5, BC7 };
+
+bool isBlockCompressed(TextureFormat format);
+// 밉 단계 하나가 차지하는 바이트 수. 블록 포맷은 4x4 블록 단위로 올림한다.
+size_t textureLevelBytes(TextureFormat format, uint32_t width, uint32_t height);
+
 struct Texture {
     std::string name;
     uint32_t width = 0;
@@ -46,7 +54,11 @@ struct Texture {
     SamplerDesc sampler;
     // 적재 직후에는 인코딩된 바이트만 담고, 디코딩은 나중에 병렬로 한다.
     std::vector<uint8_t> encoded;
-    std::vector<uint8_t> pixels; // RGBA8
+    TextureFormat format = TextureFormat::RGBA8;
+    // pixels 에 담긴 밉 단계 수. 1 이면 GPU 가 밉을 만든다(RGBA8 만 가능).
+    uint32_t mipLevels = 1;
+    // 밉 0 부터 차례로 이어 붙인 화소. 단계마다 textureLevelBytes 만큼이다.
+    std::vector<uint8_t> pixels;
 };
 
 // 셰이더의 scalar 레이아웃 정점과 동일한 배치여야 한다. 28 바이트. 위치는 단순화와 가속 구조가
@@ -231,7 +243,13 @@ void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs = nullptr, LoadProgress
 // buildLodHierarchy 가 progress 에 더하는 총량. 단계마다 절반씩 줄어드는 인덱스 수의 합을 어림한 값이다.
 uint64_t lodWorkEstimate(const Mesh& mesh);
 
-// 인코딩된 바이트를 RGBA8 로 푼다. 텍스처마다 독립이라 병렬로 돌릴 수 있다.
+// 인코딩된 바이트를 푼다. PNG/JPEG 는 RGBA8 한 장으로, KTX2 는 담긴 블록과 밉을 그대로 꺼낸다.
+// 텍스처마다 독립이라 병렬로 돌릴 수 있다.
 void decodeTexture(Texture& texture);
+
+// KTX2 식별자로 시작하는지.
+bool isKtx2(const std::vector<uint8_t>& bytes);
+// 초압축 없는 KTX2(BC1/3/4/5/7 또는 RGBA8, 2D 한 장)를 푼다. 실패하면 사유를 로그에 남기고 false.
+bool loadKtx2(const std::vector<uint8_t>& bytes, Texture& texture);
 
 } // namespace asset

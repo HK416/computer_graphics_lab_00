@@ -293,6 +293,90 @@ void Uploader::uploadImage(const Image& target, const void* data, VkDeviceSize s
                  1);
 }
 
+void Uploader::uploadImageLevels(const Image& target,
+                                 const void* data,
+                                 const std::vector<VkDeviceSize>& levelBytes,
+                                 VkImageLayout finalLayout) {
+    VkDeviceSize total = 0;
+    for (VkDeviceSize bytes : levelBytes) {
+        total += bytes;
+    }
+    if (total == 0 || levelBytes.size() != target.mipLevels) {
+        core::fatal(
+            "이미지 밉 단계 수가 맞지 않습니다 ({} 단계 데이터, 이미지는 {})", levelBytes.size(), target.mipLevels);
+    }
+    beginRecording();
+
+    VkBuffer staging = createStaging(data, total, "이미지 업로드 스테이징");
+    uint32_t transferFamily = needsOwnershipTransfer ? context.queueFamilies.transfer : VK_QUEUE_FAMILY_IGNORED;
+    uint32_t graphicsFamily = needsOwnershipTransfer ? context.queueFamilies.graphics : VK_QUEUE_FAMILY_IGNORED;
+
+    imageBarrier(transferCommands,
+                 target.handle,
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_NONE,
+                 0,
+                 VK_PIPELINE_STAGE_2_COPY_BIT,
+                 VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+    std::vector<VkBufferImageCopy2> regions(levelBytes.size());
+    VkDeviceSize offset = 0;
+    for (uint32_t level = 0; level < levelBytes.size(); ++level) {
+        VkBufferImageCopy2& region = regions[level];
+        region = VkBufferImageCopy2{VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2};
+        region.bufferOffset = offset;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = level;
+        region.imageSubresource.layerCount = target.arrayLayers;
+        region.imageExtent = {
+            std::max(target.extent.width >> level, 1U), std::max(target.extent.height >> level, 1U), 1};
+        offset += levelBytes[level];
+    }
+    VkCopyBufferToImageInfo2 copyInfo{VK_STRUCTURE_TYPE_COPY_BUFFER_TO_IMAGE_INFO_2};
+    copyInfo.srcBuffer = staging;
+    copyInfo.dstImage = target.handle;
+    copyInfo.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    copyInfo.regionCount = static_cast<uint32_t>(regions.size());
+    copyInfo.pRegions = regions.data();
+    vkCmdCopyBufferToImage2(transferCommands, &copyInfo);
+
+    // uploadImage 와 같은 순서다. 놓기와 받기는 레이아웃을 바꾸지 않고 소유권만 넘기고, 최종 레이아웃
+    // 전이는 그래픽스 큐가 따로 한다. 큐 패밀리가 같으면 앞의 둘은 아무것도 하지 않는 배리어가 된다.
+    imageBarrier(transferCommands,
+                 target.handle,
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_COPY_BIT,
+                 VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_NONE,
+                 0,
+                 transferFamily,
+                 graphicsFamily);
+    imageBarrier(graphicsCommands,
+                 target.handle,
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_NONE,
+                 0,
+                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                 VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 transferFamily,
+                 graphicsFamily);
+    imageBarrier(graphicsCommands,
+                 target.handle,
+                 VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 finalLayout,
+                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                 VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                 VK_ACCESS_2_MEMORY_READ_BIT);
+}
+
 void Uploader::flush() {
     if (!recording) {
         return;

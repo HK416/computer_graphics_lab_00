@@ -482,7 +482,10 @@ std::optional<Model> loadGltf(const std::filesystem::path& path, LoadProgress* p
         texture.name = source.name != nullptr ? source.name : "텍스처";
         texture.srgb = srgbFlags[i];
         texture.sampler = toSamplerDesc(source.sampler);
-        if (source.image == nullptr || !loadTextureSource(*source.image, baseDirectory, texture)) {
+        // KHR_texture_basisu 가 가리키는 KTX2 를 우선한다. 미리 압축된 에셋은 그쪽에만 이미지가 있다.
+        const cgltf_image* image =
+            source.has_basisu && source.basisu_image != nullptr ? source.basisu_image : source.image;
+        if (image == nullptr || !loadTextureSource(*image, baseDirectory, texture)) {
             spdlog::warn("텍스처를 해석하지 못했습니다: {} ({})", texture.name, model.name);
         }
         model.textures.push_back(std::move(texture));
@@ -563,6 +566,14 @@ void decodeTexture(Texture& texture) {
     if (texture.encoded.empty()) {
         return;
     }
+    if (isKtx2(texture.encoded)) {
+        if (!loadKtx2(texture.encoded, texture)) {
+            texture.pixels.clear();
+        }
+        texture.encoded.clear();
+        texture.encoded.shrink_to_fit();
+        return;
+    }
     int width = 0;
     int height = 0;
     int channels = 0;
@@ -576,6 +587,8 @@ void decodeTexture(Texture& texture) {
     }
     texture.width = static_cast<uint32_t>(width);
     texture.height = static_cast<uint32_t>(height);
+    texture.format = TextureFormat::RGBA8;
+    texture.mipLevels = 1;
     texture.pixels.assign(decoded, decoded + static_cast<size_t>(width) * height * 4);
     stbi_image_free(decoded);
 }

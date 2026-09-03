@@ -66,6 +66,10 @@ vec3 perturbNormal(Material material, vec3 normal, vec3 tangent, float tangentSi
     vec3 orthogonalTangent = normalize(tangent - normal * dot(normal, tangent));
     vec3 bitangent = cross(normal, orthogonalTangent) * tangentSign;
     vec3 sampled = sampleBindless(material.normalTexture, uv).xyz * 2.0 - 1.0;
+    if ((material.flags & MATERIAL_FLAG_TWO_CHANNEL_NORMAL) != 0u) {
+        // BC5 는 xy 만 담는다. 접선 공간 노멀은 z 가 늘 양수라 단위 길이에서 되돌린다.
+        sampled.z = sqrt(max(1.0 - dot(sampled.xy, sampled.xy), 0.0));
+    }
     sampled.xy *= material.normalScale;
     return normalize(mat3(orthogonalTangent, bitangent, normal) * sampled);
 }
