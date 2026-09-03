@@ -17,6 +17,7 @@
 #include "asset/load_progress.h"
 #include "asset/model.h"
 #include "asset/vertex_pack.h"
+#include "core/job_system.h"
 
 namespace asset {
 namespace {
@@ -35,6 +36,18 @@ void readFloats(const cgltf_accessor* accessor, cgltf_size index, float* out, cg
     if (accessor == nullptr || cgltf_accessor_read_float(accessor, index, out, count) == 0) {
         std::fill_n(out, count, 0.0F);
     }
+}
+
+// 접근자 하나를 통째로 float 배열로 푼다. 정점마다 cgltf_accessor_read_float 를 부르는 것보다 훨씬 빠르다.
+// 접근자가 없거나 덜 풀리면 나머지는 0 이다.
+std::vector<float> unpackFloats(const cgltf_accessor* accessor, cgltf_size vertexCount, cgltf_size components) {
+    std::vector<float> values(vertexCount * components, 0.0F);
+    // 성분 수가 다른 접근자(규격 위반)는 풀면 어긋나므로 0 으로 둔다.
+    if (accessor != nullptr && !values.empty() && cgltf_num_components(accessor->type) == components) {
+        cgltf_size unpacked = cgltf_accessor_unpack_floats(accessor, values.data(), values.size());
+        std::fill(values.begin() + static_cast<std::ptrdiff_t>(std::min(unpacked, values.size())), values.end(), 0.0F);
+    }
+    return values;
 }
 
 // 조인트 번호 넷을 바이트 하나씩 담는다. 스킨 하나의 조인트 수는 MAX_SKIN_JOINTS 로 제한된다.
@@ -301,10 +314,13 @@ void weldVertices(std::vector<LoadVertex>& vertices,
     meshopt_remapIndexBuffer(indices.data(), indices.data(), indices.size(), remap.data());
 }
 
-void appendPrimitive(Model& model, const cgltf_data& data, const cgltf_primitive& primitive, WeldStats& weld) {
+// 프리미티브 하나를 Mesh 로 바꾼다. 삼각형이 아니거나 위치가 없으면 false. 프리미티브끼리 독립이라
+// 워커에 나눠 돌린다. defaultMaterial 은 재질이 없는 프리미티브가 쓸 마지막 재질의 번호다.
+bool convertPrimitive(
+    const cgltf_data& data, const cgltf_primitive& primitive, uint32_t defaultMaterial, Mesh& mesh, WeldStats& weld) {
     const cgltf_accessor* positions = findAttribute(primitive, cgltf_attribute_type_position, 0);
     if (positions == nullptr || primitive.type != cgltf_primitive_type_triangles) {
-        return;
+        return false;
     }
     const cgltf_accessor* normals = findAttribute(primitive, cgltf_attribute_type_normal, 0);
     const cgltf_accessor* tangents = findAttribute(primitive, cgltf_attribute_type_tangent, 0);
@@ -312,29 +328,38 @@ void appendPrimitive(Model& model, const cgltf_data& data, const cgltf_primitive
     const cgltf_accessor* joints = findAttribute(primitive, cgltf_attribute_type_joints, 0);
     const cgltf_accessor* weights = findAttribute(primitive, cgltf_attribute_type_weights, 0);
 
-    Mesh mesh;
     mesh.name =
         primitive.material != nullptr && primitive.material->name != nullptr ? primitive.material->name : "프리미티브";
-    std::vector<LoadVertex> loaded(positions->count);
+    cgltf_size count = positions->count;
+    std::vector<LoadVertex> loaded(count);
+    {
+        // 속성마다 통째로 풀어 두고 정점 배열로 옮긴다. 정점 1억 개짜리 스캔에서 정점마다 접근자를 읽던
+        // 16 초가 이 방식으로 줄어든다.
+        std::vector<float> positionData = unpackFloats(positions, count, 3);
+        std::vector<float> normalData = unpackFloats(normals, count, 3);
+        std::vector<float> uvData = unpackFloats(uvs, count, 2);
+        std::vector<float> tangentData = tangents != nullptr ? unpackFloats(tangents, count, 4) : std::vector<float>{};
+        for (cgltf_size i = 0; i < count; ++i) {
+            LoadVertex& vertex = loaded[i];
+            vertex.position = glm::vec3{positionData[i * 3], positionData[i * 3 + 1], positionData[i * 3 + 2]};
+            vertex.normal = glm::vec3{normalData[i * 3], normalData[i * 3 + 1], normalData[i * 3 + 2]};
+            vertex.uv = glm::vec2{uvData[i * 2], uvData[i * 2 + 1]};
+            if (tangents != nullptr) {
+                vertex.tangent = glm::vec4{
+                    tangentData[i * 4], tangentData[i * 4 + 1], tangentData[i * 4 + 2], tangentData[i * 4 + 3]};
+            }
+        }
+    }
     bool skinned = joints != nullptr && weights != nullptr;
     if (skinned) {
-        mesh.skinWeights.resize(positions->count);
-    }
-    for (cgltf_size i = 0; i < positions->count; ++i) {
-        LoadVertex& vertex = loaded[i];
-        readFloats(positions, i, glm::value_ptr(vertex.position), 3);
-        readFloats(normals, i, glm::value_ptr(vertex.normal), 3);
-        readFloats(uvs, i, glm::value_ptr(vertex.uv), 2);
-        if (tangents != nullptr) {
-            readFloats(tangents, i, glm::value_ptr(vertex.tangent), 4);
-        }
-        if (skinned) {
+        // 조인트는 정수 접근자라 float 로 풀지 않는다. 스킨 메쉬는 작아 정점마다 읽어도 된다.
+        mesh.skinWeights.resize(count);
+        std::vector<float> weightData = unpackFloats(weights, count, 4);
+        for (cgltf_size i = 0; i < count; ++i) {
             cgltf_uint jointIndices[4] = {0, 0, 0, 0};
-            float jointWeights[4] = {0.0F, 0.0F, 0.0F, 0.0F};
             cgltf_accessor_read_uint(joints, i, jointIndices, 4);
-            readFloats(weights, i, jointWeights, 4);
             mesh.skinWeights[i].joints = packJoints(jointIndices);
-            mesh.skinWeights[i].weights = packWeights(jointWeights);
+            mesh.skinWeights[i].weights = packWeights(&weightData[i * 4]);
         }
     }
 
@@ -366,11 +391,11 @@ void appendPrimitive(Model& model, const cgltf_data& data, const cgltf_primitive
     }
     computeBounds(mesh);
 
-    mesh.materialIndex = static_cast<uint32_t>(model.materials.size() - 1);
+    mesh.materialIndex = defaultMaterial;
     if (primitive.material != nullptr) {
         mesh.materialIndex = static_cast<uint32_t>(primitive.material - data.materials);
     }
-    model.meshes.push_back(std::move(mesh));
+    return true;
 }
 
 AnimationPath toAnimationPath(cgltf_animation_path_type path) {
@@ -498,7 +523,7 @@ void appendNode(Model& model,
 
 } // namespace
 
-std::optional<Model> loadGltf(const std::filesystem::path& path, LoadProgress* progress) {
+std::optional<Model> loadGltf(const std::filesystem::path& path, LoadProgress* progress, core::JobSystem* jobs) {
     using Clock = std::chrono::steady_clock;
     auto elapsedMs = [](Clock::time_point since) {
         return std::chrono::duration<double, std::milli>(Clock::now() - since).count();
@@ -570,17 +595,53 @@ std::optional<Model> loadGltf(const std::filesystem::path& path, LoadProgress* p
         }
         progress->begin(LoadProgress::Stage::CONVERT, primitiveCount);
     }
-    std::vector<PrimitiveRange> meshRanges(data->meshes_count);
-    WeldStats weld;
+    // 프리미티브는 서로 독립이라 워커에 나눈다. 결과는 파일 순서대로 다시 모은다.
+    struct PrimitiveJob {
+        cgltf_size meshIndex = 0;
+        const cgltf_primitive* primitive = nullptr;
+        Mesh mesh;
+        WeldStats weld;
+        bool valid = false;
+    };
+    std::vector<PrimitiveJob> primitiveJobs;
     for (cgltf_size i = 0; i < data->meshes_count; ++i) {
-        meshRanges[i].first = static_cast<uint32_t>(model.meshes.size());
         for (cgltf_size j = 0; j < data->meshes[i].primitives_count; ++j) {
-            appendPrimitive(model, *data, data->meshes[i].primitives[j], weld);
+            primitiveJobs.push_back(PrimitiveJob{i, &data->meshes[i].primitives[j]});
+        }
+    }
+    auto defaultMaterial = static_cast<uint32_t>(model.materials.size() - 1);
+    auto convert = [&](uint32_t begin, uint32_t end) {
+        for (uint32_t k = begin; k < end; ++k) {
+            PrimitiveJob& job = primitiveJobs[k];
+            job.valid = convertPrimitive(*data, *job.primitive, defaultMaterial, job.mesh, job.weld);
             if (progress != nullptr) {
                 progress->advance();
             }
         }
-        meshRanges[i].count = static_cast<uint32_t>(model.meshes.size()) - meshRanges[i].first;
+    };
+    if (jobs != nullptr) {
+        jobs->parallelFor(static_cast<uint32_t>(primitiveJobs.size()), 1, convert);
+    } else {
+        convert(0, static_cast<uint32_t>(primitiveJobs.size()));
+    }
+
+    std::vector<PrimitiveRange> meshRanges(data->meshes_count);
+    WeldStats weld;
+    for (cgltf_size i = 0; i < data->meshes_count; ++i) {
+        meshRanges[i].first = static_cast<uint32_t>(model.meshes.size());
+        meshRanges[i].count = 0;
+    }
+    for (PrimitiveJob& job : primitiveJobs) {
+        weld.before += job.weld.before;
+        weld.after += job.weld.after;
+        if (!job.valid) {
+            continue;
+        }
+        if (meshRanges[job.meshIndex].count == 0) {
+            meshRanges[job.meshIndex].first = static_cast<uint32_t>(model.meshes.size());
+        }
+        ++meshRanges[job.meshIndex].count;
+        model.meshes.push_back(std::move(job.mesh));
     }
 
     const cgltf_scene* scene = data->scene != nullptr ? data->scene : (data->scenes_count > 0 ? data->scenes : nullptr);

@@ -223,8 +223,9 @@ struct LoadProgress;
 
 // 파일을 열지 못하거나 지원하지 않는 내용이면 사유를 로그에 남기고 비어 있는 값을 돌려준다. 종료는
 // 부르는 쪽이 정한다. 백그라운드 스레드에서도 부르므로 여기서 프로세스를 끝내면 안 된다.
-// progress 를 주면 파싱과 정점 변환 단계의 진행을 적는다.
-std::optional<Model> loadGltf(const std::filesystem::path& path, LoadProgress* progress = nullptr);
+// progress 를 주면 파싱과 정점 변환 단계의 진행을 적는다. jobs 를 주면 프리미티브 변환을 워커에 나눈다.
+std::optional<Model>
+loadGltf(const std::filesystem::path& path, LoadProgress* progress = nullptr, core::JobSystem* jobs = nullptr);
 
 // clip 을 time 위치에서 표본화해 노드마다 세계 변환을 만든다. clip 이 범위를 벗어나면 바인드 포즈다.
 void poseNodes(const Skeleton& skeleton, uint32_t clip, float time, std::vector<glm::mat4>& worlds);

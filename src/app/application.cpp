@@ -184,9 +184,9 @@ void Application::loadScenes() {
     // glTF 파싱과 LOD 계층 구성은 서로 독립이므로 워커에 흩뿌린다. 적재 시간의 대부분이 여기다.
     uint64_t loadStart = SDL_GetTicksNS();
     std::vector<asset::Model> models(files.size());
-    jobs.parallelFor(static_cast<uint32_t>(files.size()), 1, [&files, &models](uint32_t begin, uint32_t end) {
+    jobs.parallelFor(static_cast<uint32_t>(files.size()), 1, [&files, &models, this](uint32_t begin, uint32_t end) {
         for (uint32_t i = begin; i < end; ++i) {
-            std::optional<asset::Model> loaded = asset::loadGltf(files[i]);
+            std::optional<asset::Model> loaded = asset::loadGltf(files[i], nullptr, &jobs);
             if (!loaded) {
                 core::fatal("기본 에셋을 읽지 못했습니다: {}", files[i].string());
             }
@@ -273,19 +273,20 @@ Application::PrepareTimings Application::prepareAssets(std::vector<asset::Textur
         }
         progress->begin(asset::LoadProgress::Stage::LOD, work);
     }
-    // 메쉬가 적으면 메쉬 단위 분배만으로는 워커가 놀기 때문에 계층 구성 안쪽까지 나눈다.
-    if (allMeshes.size() >= jobs.workerCount()) {
-        jobs.parallelFor(
-            static_cast<uint32_t>(allMeshes.size()), 1, [&allMeshes, progress](uint32_t begin, uint32_t end) {
-                for (uint32_t i = begin; i < end; ++i) {
-                    asset::buildLodHierarchy(*allMeshes[i], nullptr, progress);
-                }
-            });
-    } else {
-        for (asset::Mesh* mesh : allMeshes) {
-            asset::buildLodHierarchy(*mesh, &jobs, progress);
-        }
-    }
+    // 메쉬끼리 나누고, 큰 메쉬는 그 안의 그룹도 나눈다. 큐가 여러 생산자를 받으므로 워커 안에서 다시
+    // 나눠도 된다. 메쉬가 적고 하나가 크면 메쉬 단위만으로는 워커가 놀고, 메쉬가 많으면 그룹 단위만으로는
+    // 0 단계 분할처럼 메쉬 안에서 직렬인 부분이 줄을 서므로 둘 다 필요하다. 작은 메쉬는 중첩하지 않는다.
+    // 그룹을 기다리는 워커가 큐에 먼저 들어온 다른 메쉬 작업을 집어 들어 대기가 겹겹이 쌓이는데, 작은
+    // 메쉬 수만 개가 그러면 스택이 깊어진다.
+    constexpr size_t NESTED_LOD_INDEX_THRESHOLD = 300000;
+    core::JobSystem* jobsPointer = &jobs;
+    jobs.parallelFor(
+        static_cast<uint32_t>(allMeshes.size()), 1, [&allMeshes, progress, jobsPointer](uint32_t begin, uint32_t end) {
+            for (uint32_t i = begin; i < end; ++i) {
+                bool large = allMeshes[i]->indices.size() >= NESTED_LOD_INDEX_THRESHOLD;
+                asset::buildLodHierarchy(*allMeshes[i], large ? jobsPointer : nullptr, progress);
+            }
+        });
     timings.lodMs = static_cast<double>(SDL_GetTicksNS() - lodStart) / 1.0e6;
     return timings;
 }
@@ -377,7 +378,7 @@ uint32_t Application::ensureModel(const std::filesystem::path& path) {
     if (existing < loadedModels.size()) {
         return existing;
     }
-    std::optional<asset::Model> loaded = asset::loadGltf(path);
+    std::optional<asset::Model> loaded = asset::loadGltf(path, nullptr, &jobs);
     if (!loaded) {
         return static_cast<uint32_t>(loadedModels.size());
     }
@@ -453,7 +454,7 @@ void Application::startNextLoad() {
         PendingLoad* load = pendingLoad.get();
         // 스레드는 load 가 가리키는 것만 만진다. pendingLoad 는 스레드를 합류한 뒤에만 비운다.
         load->worker = std::thread([this, load]() {
-            std::optional<asset::Model> loaded = asset::loadGltf(load->path, &load->progress);
+            std::optional<asset::Model> loaded = asset::loadGltf(load->path, &load->progress, &jobs);
             if (loaded) {
                 load->model = std::move(*loaded);
                 load->timings = prepareModel(load->model, &load->progress);
