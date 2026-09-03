@@ -144,6 +144,8 @@ public:
     // 스킨 가중치 버퍼에서 이 메쉬의 구간이 시작하는 위치. 스킨이 없으면 NO_SKIN_WEIGHTS.
     uint32_t meshSkinOffset(uint32_t index) const { return meshSkinOffsets[index]; }
     uint32_t meshCount() const { return static_cast<uint32_t>(meshes.size()); }
+    // 해제된 모델의 메쉬는 번호를 지키려고 빈 항목(무덤)으로 남는다. 그리거나 가속 구조를 세우기 전에 본다.
+    bool meshLive(uint32_t index) const { return index < meshes.size() && meshes[index].lodCount > 0; }
     uint32_t meshletCount() const { return static_cast<uint32_t>(meshlets.size()); }
     const GpuMeshLod& lod(uint32_t index) const { return lods[index]; }
     const GpuMeshlet& meshlet(uint32_t index) const { return meshlets[index]; }

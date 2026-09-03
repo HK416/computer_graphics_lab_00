@@ -66,7 +66,24 @@ public:
     bool viewportHovered() const { return sceneHovered && !gizmoUsing; }
 
 private:
-    void buildDockspace();
+    // 도킹 호스트와 메뉴바. 어느 창에서 요청한 팝업이든 여기서 연다(ID 스택이 창마다 달라 한곳에 모은다).
+    void buildDockspace(scene::SceneManager& scenes, const gfx::GeometryStore& geometry);
+    void buildMenuBar(scene::SceneManager& scenes, const gfx::GeometryStore& geometry);
+    void buildPopups(scene::SceneManager& scenes);
+    // 메뉴바 «오브젝트», 계층 우클릭이 함께 쓰는 생성 항목. parent 가 음수면 뿌리에 만든다.
+    void buildCreateItems(scene::Scene& active, const gfx::GeometryStore& geometry, int parent);
+    // 메뉴·우클릭·단축키가 공유하는 편집 동작.
+    void createEmptyObject(scene::Scene& active, int parent);
+    void createMeshObject(scene::Scene& active, const gfx::GeometryStore& geometry, uint32_t meshIndex, int parent);
+    void createLightObject(scene::Scene& active, scene::LightType type, int parent);
+    void newScene(scene::SceneManager& scenes);
+    void duplicateSelection(scene::Scene& active);
+    void deleteSelection(scene::Scene& active);
+    void unparentSelection(scene::Scene& active);
+    // 부모를 바꾸되 화면에서의 위치는 그대로 둔다. 순환이면 아무것도 하지 않는다.
+    void reparent(scene::Scene& active, int child, int parent);
+    // Ctrl+N/O/S/D, Delete. 글자를 입력하는 중에는 받지 않는다.
+    void handleShortcuts(scene::SceneManager& scenes, const gfx::GeometryStore& geometry);
     void buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStore& geometry);
     // F 키로 선택한 오브젝트를 궤도 중심으로 옮긴다.
     void focusSelected(scene::Scene& active, const gfx::GeometryStore& geometry);
@@ -119,6 +136,9 @@ private:
     // 계층 순회 도중 부모를 바꾸면 그리기가 어긋나므로 순회가 끝난 뒤에 적용한다.
     int pendingChild = -1;
     int pendingParent = -1;
+    // 메뉴·우클릭에서 고른 편집 동작. 오브젝트 배열을 바꾸는 일은 패널을 다 그린 뒤 한 번에 한다.
+    // 계층 순회 중에 지우거나 더하면 순회가 들고 있는 참조가 끊어진다.
+    std::function<void()> deferred;
     std::function<void(const std::filesystem::path&)> modelLoader;
     std::filesystem::path modelRoot;
     std::vector<std::filesystem::path> modelFiles;
@@ -133,6 +153,14 @@ private:
     std::filesystem::path pendingSceneSave;
     std::filesystem::path pendingSceneOpen;
     std::array<char, 256> sceneNameInput{};
+    // 메뉴나 우클릭에서 요청한 팝업. 다음 프레임 도킹 호스트가 연다.
+    enum class PopupRequest { NONE, SAVE_SCENE, OPEN_SCENE, LOAD_MODEL };
+    PopupRequest popupRequest = PopupRequest::NONE;
+    // 메뉴 «편집»에서 고른 되돌리기/다시 실행. updateHistory 가 단축키와 같은 길로 처리한다.
+    bool menuUndo = false;
+    bool menuRedo = false;
+    // 렌더 설정은 도킹되지 않는 떠 있는 창이다. 메뉴 «설정»으로 여닫는다.
+    bool showRenderSettings = false;
     // 장면 뷰에 보여줄 렌더 타깃. 음수면 표시 이미지(기본)다. 층이나 밉이 있는 대상은 slice 로 고른다.
     int selectedTarget = -1;
     int selectedSlice = 0;

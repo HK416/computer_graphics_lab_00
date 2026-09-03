@@ -57,7 +57,7 @@ int pickObject(const scene::Scene& scene, const gfx::GeometryStore& geometry, co
     float bestDistance = std::numeric_limits<float>::max();
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
         uint32_t mesh = scene.meshOf(index);
-        if (mesh >= geometry.meshCount() || !scene.visibleInTree(index)) {
+        if (!geometry.meshLive(mesh) || !scene.visibleInTree(index)) {
             continue;
         }
         const glm::mat4& world = scene.worldMatrix(index);
@@ -225,7 +225,7 @@ VkDescriptorSet Editor::textureFor(VkImageView view, VkImageLayout layout) {
     return set;
 }
 
-void Editor::buildDockspace() {
+void Editor::buildDockspace(scene::SceneManager& scenes, const gfx::GeometryStore& geometry) {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
@@ -255,23 +255,329 @@ void Editor::buildDockspace() {
 
         ImGui::DockBuilderDockWindow(WINDOW_HIERARCHY, left);
         ImGui::DockBuilderDockWindow(WINDOW_INSPECTOR, right);
-        ImGui::DockBuilderDockWindow(WINDOW_SETTINGS, right);
         ImGui::DockBuilderDockWindow(WINDOW_CONSOLE, bottom);
         ImGui::DockBuilderDockWindow(WINDOW_SCENE, center);
         ImGui::DockBuilderFinish(dockspaceId);
     }
     ImGui::DockSpace(dockspaceId, ImVec2{0.0F, 0.0F}, ImGuiDockNodeFlags_None);
 
-    if (ImGui::BeginMenuBar()) {
-        if (ImGui::BeginMenu("창")) {
-            if (ImGui::MenuItem("배치 초기화")) {
-                layoutBuilt = false;
-            }
-            ImGui::EndMenu();
-        }
-        ImGui::EndMenuBar();
-    }
+    buildMenuBar(scenes, geometry);
+    buildPopups(scenes);
     ImGui::End();
+}
+
+void Editor::buildMenuBar(scene::SceneManager& scenes, const gfx::GeometryStore& geometry) {
+    if (!ImGui::BeginMenuBar()) {
+        return;
+    }
+    scene::Scene& active = scenes.active();
+    bool anySelected = hasSelection();
+
+    if (ImGui::BeginMenu("파일")) {
+        if (ImGui::MenuItem("새 장면", "Ctrl+N")) {
+            deferred = [this, &scenes] { newScene(scenes); };
+        }
+        if (ImGui::MenuItem("장면 열기...", "Ctrl+O")) {
+            popupRequest = PopupRequest::OPEN_SCENE;
+        }
+        if (ImGui::MenuItem("장면 저장...", "Ctrl+S")) {
+            popupRequest = PopupRequest::SAVE_SCENE;
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("모델 불러오기...")) {
+            popupRequest = PopupRequest::LOAD_MODEL;
+        }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("편집")) {
+        const History* history = scenes.current() < histories.size() ? &histories[scenes.current()] : nullptr;
+        if (ImGui::MenuItem("되돌리기", "Ctrl+Z", false, history != nullptr && !history->undoStack.empty())) {
+            menuUndo = true;
+        }
+        if (ImGui::MenuItem("다시 실행", "Ctrl+Y", false, history != nullptr && !history->redoStack.empty())) {
+            menuRedo = true;
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("복제", "Ctrl+D", false, anySelected)) {
+            deferred = [this, &active] { duplicateSelection(active); };
+        }
+        if (ImGui::MenuItem("삭제", "Delete", false, anySelected)) {
+            deferred = [this, &active] { deleteSelection(active); };
+        }
+        if (ImGui::MenuItem("부모 해제", nullptr, false, anySelected)) {
+            deferred = [this, &active] { unparentSelection(active); };
+        }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("오브젝트")) {
+        buildCreateItems(active, geometry, -1);
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("설정")) {
+        ImGui::MenuItem("렌더 설정", nullptr, &showRenderSettings);
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("창")) {
+        if (ImGui::MenuItem("배치 초기화")) {
+            layoutBuilt = false;
+        }
+        ImGui::EndMenu();
+    }
+    ImGui::EndMenuBar();
+}
+
+void Editor::buildPopups(scene::SceneManager& scenes) {
+    // 팝업은 요청한 다음 프레임에 연다. 메뉴나 우클릭 메뉴 안에서 바로 열면 그 메뉴의 ID 스택에 묶여
+    // 메뉴가 닫히는 순간 함께 닫힌다.
+    switch (popupRequest) {
+    case PopupRequest::SAVE_SCENE: {
+        std::string suggested = scenes.active().name + ".json";
+        std::copy_n(suggested.c_str(), std::min(suggested.size() + 1, sceneNameInput.size()), sceneNameInput.begin());
+        sceneNameInput.back() = '\0';
+        ImGui::OpenPopup("장면 저장");
+        break;
+    }
+    case PopupRequest::OPEN_SCENE: {
+        sceneFiles.clear();
+        std::error_code error;
+        for (const auto& entry : std::filesystem::directory_iterator(sceneRoot, error)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".json") {
+                sceneFiles.push_back(entry.path());
+            }
+        }
+        std::ranges::sort(sceneFiles);
+        ImGui::OpenPopup("장면 열기");
+        break;
+    }
+    case PopupRequest::LOAD_MODEL: {
+        // 팝업을 열 때마다 다시 훑는다. 실행 중에 파일이 늘어날 수 있다.
+        modelFiles.clear();
+        std::error_code error;
+        for (const auto& entry : std::filesystem::directory_iterator(modelRoot, error)) {
+            std::filesystem::path extension = entry.path().extension();
+            if (entry.is_regular_file() && (extension == ".glb" || extension == ".gltf")) {
+                modelFiles.push_back(entry.path());
+            }
+        }
+        std::ranges::sort(modelFiles);
+        ImGui::OpenPopup("모델 선택");
+        break;
+    }
+    default:
+        break;
+    }
+    popupRequest = PopupRequest::NONE;
+
+    if (ImGui::BeginPopup("장면 저장")) {
+        ImGui::TextDisabled("%s", sceneRoot.string().c_str());
+        ImGui::SetNextItemWidth(280.0F);
+        ImGui::InputText("파일 이름", sceneNameInput.data(), sceneNameInput.size());
+        ImGui::SameLine();
+        if (ImGui::Button("저장##확인") && sceneNameInput[0] != '\0') {
+            pendingSceneSave = sceneRoot / sceneNameInput.data();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    if (ImGui::BeginPopup("장면 열기")) {
+        if (sceneFiles.empty()) {
+            ImGui::TextDisabled("%s 에 저장된 장면이 없습니다", sceneRoot.string().c_str());
+        }
+        for (const std::filesystem::path& file : sceneFiles) {
+            if (ImGui::Selectable(file.filename().string().c_str())) {
+                pendingSceneOpen = file;
+            }
+        }
+        ImGui::EndPopup();
+    }
+    if (ImGui::BeginPopup("모델 선택")) {
+        if (modelFiles.empty()) {
+            ImGui::TextDisabled("%s 에 glTF 파일이 없습니다", modelRoot.string().c_str());
+        }
+        for (const std::filesystem::path& file : modelFiles) {
+            if (ImGui::Selectable(file.filename().string().c_str())) {
+                pendingModel = file;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::Separator();
+        ImGui::SetNextItemWidth(320.0F);
+        ImGui::InputText("경로", modelPathInput.data(), modelPathInput.size());
+        ImGui::SameLine();
+        if (ImGui::Button("열기") && modelPathInput[0] != '\0') {
+            pendingModel = std::filesystem::path{modelPathInput.data()};
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void Editor::buildCreateItems(scene::Scene& active, const gfx::GeometryStore& geometry, int parent) {
+    if (ImGui::MenuItem("빈 오브젝트")) {
+        deferred = [this, &active, parent] { createEmptyObject(active, parent); };
+    }
+    if (ImGui::BeginMenu("메쉬")) {
+        // ponytail: 메쉬가 수백 개면 메뉴가 화면을 넘는다. 그때는 검색 칸을 둔다.
+        if (geometry.meshCount() == 0) {
+            ImGui::TextDisabled("올라온 메쉬가 없습니다");
+        }
+        for (uint32_t meshIndex = 0; meshIndex < geometry.meshCount(); ++meshIndex) {
+            if (!geometry.meshLive(meshIndex)) {
+                continue;
+            }
+            const asset::Material& material = geometry.material(geometry.mesh(meshIndex).materialIndex);
+            std::string label = std::to_string(meshIndex) + ": " + geometry.meshName(meshIndex) + " / " + material.name;
+            if (ImGui::MenuItem(label.c_str())) {
+                deferred = [this, &active, &geometry, meshIndex, parent] {
+                    createMeshObject(active, geometry, meshIndex, parent);
+                };
+            }
+        }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("조명")) {
+        constexpr std::array<const char*, 4> LIGHT_NAMES{"방향광", "점광", "스폿광", "영역광"};
+        for (uint32_t type = 0; type < LIGHT_NAMES.size(); ++type) {
+            if (ImGui::MenuItem(LIGHT_NAMES[type])) {
+                deferred = [this, &active, type, parent] {
+                    createLightObject(active, static_cast<scene::LightType>(type), parent);
+                };
+            }
+        }
+        ImGui::EndMenu();
+    }
+}
+
+void Editor::createEmptyObject(scene::Scene& active, int parent) {
+    scene::Object object;
+    object.name = "빈 오브젝트";
+    object.parent = parent;
+    // 뿌리에 만들면 카메라 앞에 두고, 자식으로 만들면 부모 자리에 둔다.
+    if (parent < 0) {
+        object.transform.position = active.camera.position + active.camera.forward() * 2.0F;
+    }
+    active.objects.push_back(std::move(object));
+    selectOnly(static_cast<int>(active.objects.size()) - 1);
+}
+
+void Editor::createMeshObject(scene::Scene& active,
+                              const gfx::GeometryStore& geometry,
+                              uint32_t meshIndex,
+                              int parent) {
+    if (meshIndex >= geometry.meshCount()) {
+        return;
+    }
+    scene::Object object;
+    object.name = geometry.meshName(meshIndex);
+    object.parent = parent;
+    if (parent < 0) {
+        // 새 오브젝트는 카메라 앞쪽, 바운딩 반지름을 고려한 거리에 놓는다.
+        float radius = std::max(geometry.mesh(meshIndex).boundingSphere.w, 0.1F);
+        object.transform.position = active.camera.position + active.camera.forward() * (radius * 3.0F);
+    }
+    active.objects.push_back(std::move(object));
+    auto index = static_cast<uint32_t>(active.objects.size() - 1);
+    active.attachMeshRenderer(index, meshIndex);
+    selectOnly(static_cast<int>(index));
+}
+
+void Editor::createLightObject(scene::Scene& active, scene::LightType type, int parent) {
+    constexpr std::array<const char*, 4> LIGHT_NAMES{"방향광", "점광", "스폿광", "영역광"};
+    scene::Light light;
+    light.type = type;
+    active.lights.push_back(light);
+
+    scene::Object object;
+    object.name = LIGHT_NAMES[static_cast<size_t>(type)];
+    object.parent = parent;
+    object.light = static_cast<int32_t>(active.lights.size()) - 1;
+    if (type == scene::LightType::DIRECTIONAL) {
+        object.transform.rotation = glm::quat(glm::radians(glm::vec3{-50.0F, -30.0F, 0.0F}));
+    } else if (parent < 0) {
+        // 카메라 앞쪽에 놓고 보고 있는 쪽을 비추게 한다.
+        object.transform.position = active.camera.position + active.camera.forward();
+        object.transform.rotation = glm::quatLookAt(active.camera.forward(), glm::vec3{0.0F, 1.0F, 0.0F});
+    }
+    active.objects.push_back(std::move(object));
+    selectOnly(static_cast<int>(active.objects.size()) - 1);
+}
+
+void Editor::newScene(scene::SceneManager& scenes) {
+    // Unity 처럼 새 장면에는 방향광 하나를 둔다.
+    scene::Scene& created = scenes.create("GameScene");
+    createLightObject(created, scene::LightType::DIRECTIONAL, -1);
+    scenes.setActive(scenes.count() - 1);
+    clearSelection();
+}
+
+void Editor::duplicateSelection(scene::Scene& active) {
+    // 여러 개를 고른 채 복제하면 각각 복제하고 사본들을 새 선택으로 삼는다.
+    std::vector<int> copies;
+    for (int selected : selection) {
+        if (selected >= 0 && selected < static_cast<int>(active.objects.size())) {
+            copies.push_back(static_cast<int>(active.duplicateObject(static_cast<uint32_t>(selected))));
+        }
+    }
+    selection = std::move(copies);
+}
+
+void Editor::deleteSelection(scene::Scene& active) {
+    // 하나씩 지우면 첫 삭제가 인덱스를 밀어 나머지가 엉뚱한 것을 가리킨다. 한 번에 넘긴다.
+    std::vector<uint32_t> doomed;
+    for (int selected : selection) {
+        if (selected >= 0) {
+            doomed.push_back(static_cast<uint32_t>(selected));
+        }
+    }
+    active.removeObjects(doomed);
+    clearSelection();
+}
+
+void Editor::unparentSelection(scene::Scene& active) {
+    for (int selected : selection) {
+        if (selected >= 0 && selected < static_cast<int>(active.objects.size())) {
+            reparent(active, selected, -1);
+        }
+    }
+}
+
+void Editor::reparent(scene::Scene& active, int child, int parent) {
+    if (child < 0 || child >= static_cast<int>(active.objects.size()) || child == parent ||
+        parent >= static_cast<int>(active.objects.size())) {
+        return;
+    }
+    // 자기 자손 밑으로 들어가면 순환이다.
+    if (parent >= 0 && active.isDescendant(static_cast<uint32_t>(parent), static_cast<uint32_t>(child))) {
+        return;
+    }
+    // 부모가 바뀌어도 화면에서의 위치는 그대로 두려고 지역 변환을 다시 계산한다.
+    glm::mat4 world = active.worldMatrix(static_cast<uint32_t>(child));
+    glm::mat4 parentWorld = parent >= 0 ? active.worldMatrix(static_cast<uint32_t>(parent)) : glm::mat4{1.0F};
+    scene::Object& object = active.objects[static_cast<size_t>(child)];
+    object.parent = parent;
+    object.transform = scene::Transform::fromMatrix(glm::inverse(parentWorld) * world);
+}
+
+void Editor::handleShortcuts(scene::SceneManager& scenes, const gfx::GeometryStore& geometry) {
+    (void)geometry;
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.WantTextInput) {
+        return;
+    }
+    scene::Scene& active = scenes.active();
+    if (io.KeyCtrl) {
+        if (ImGui::IsKeyPressed(ImGuiKey_N, false)) {
+            newScene(scenes);
+        } else if (ImGui::IsKeyPressed(ImGuiKey_O, false)) {
+            popupRequest = PopupRequest::OPEN_SCENE;
+        } else if (ImGui::IsKeyPressed(ImGuiKey_S, false)) {
+            popupRequest = PopupRequest::SAVE_SCENE;
+        } else if (ImGui::IsKeyPressed(ImGuiKey_D, false) && hasSelection()) {
+            duplicateSelection(active);
+        }
+    } else if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && hasSelection()) {
+        deleteSelection(active);
+    }
 }
 
 void Editor::setModelLoader(std::filesystem::path root, std::function<void(const std::filesystem::path&)> loader) {
@@ -328,6 +634,28 @@ void Editor::drawHierarchyNode(scene::Scene& active, const std::vector<std::vect
         ImGui::EndDragDropTarget();
     }
 
+    // 우클릭 메뉴. 고른 것에 없는 노드를 누르면 그것만 고른다. 배열을 바꾸는 동작은 순회가 끝난 뒤 한다.
+    if (ImGui::BeginPopupContextItem("##nodeMenu")) {
+        if (!isSelected(index)) {
+            selectOnly(index);
+        }
+        if (ImGui::MenuItem("복제", "Ctrl+D")) {
+            deferred = [this, &active] { duplicateSelection(active); };
+        }
+        if (ImGui::MenuItem("삭제", "Delete")) {
+            deferred = [this, &active] { deleteSelection(active); };
+        }
+        if (ImGui::MenuItem("부모 해제", nullptr, false, object.parent >= 0)) {
+            deferred = [this, &active] { unparentSelection(active); };
+        }
+        ImGui::Separator();
+        if (ImGui::BeginMenu("자식 추가")) {
+            buildCreateItems(active, *geometryStore, index);
+            ImGui::EndMenu();
+        }
+        ImGui::EndPopup();
+    }
+
     if (open) {
         for (int child : own) {
             drawHierarchyNode(active, children, child);
@@ -353,165 +681,11 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
         }
         ImGui::EndCombo();
     }
-    if (ImGui::Button("장면 저장")) {
-        std::string suggested = scenes.active().name + ".json";
-        std::copy_n(suggested.c_str(), std::min(suggested.size() + 1, sceneNameInput.size()), sceneNameInput.begin());
-        sceneNameInput.back() = '\0';
-        ImGui::OpenPopup("장면 저장");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("장면 열기")) {
-        sceneFiles.clear();
-        std::error_code error;
-        for (const auto& entry : std::filesystem::directory_iterator(sceneRoot, error)) {
-            if (entry.is_regular_file() && entry.path().extension() == ".json") {
-                sceneFiles.push_back(entry.path());
-            }
-        }
-        std::ranges::sort(sceneFiles);
-        ImGui::OpenPopup("장면 열기");
-    }
-
-    if (ImGui::BeginPopup("장면 저장")) {
-        ImGui::TextDisabled("%s", sceneRoot.string().c_str());
-        ImGui::SetNextItemWidth(280.0F);
-        ImGui::InputText("파일 이름", sceneNameInput.data(), sceneNameInput.size());
-        ImGui::SameLine();
-        if (ImGui::Button("저장##확인") && sceneNameInput[0] != '\0') {
-            pendingSceneSave = sceneRoot / sceneNameInput.data();
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
-    if (ImGui::BeginPopup("장면 열기")) {
-        if (sceneFiles.empty()) {
-            ImGui::TextDisabled("%s 에 저장된 장면이 없습니다", sceneRoot.string().c_str());
-        }
-        for (const std::filesystem::path& file : sceneFiles) {
-            if (ImGui::Selectable(file.filename().string().c_str())) {
-                pendingSceneOpen = file;
-            }
-        }
-        ImGui::EndPopup();
-    }
     ImGui::Separator();
 
     scene::Scene& active = scenes.active();
-    bool anySelected = hasSelection();
 
-    if (ImGui::Button("추가")) {
-        ImGui::OpenPopup("메쉬 선택");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("조명")) {
-        ImGui::OpenPopup("조명 선택");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("모델")) {
-        // 팝업을 열 때마다 다시 훑는다. 실행 중에 파일이 늘어날 수 있다.
-        modelFiles.clear();
-        std::error_code error;
-        for (const auto& entry : std::filesystem::directory_iterator(modelRoot, error)) {
-            std::filesystem::path extension = entry.path().extension();
-            if (entry.is_regular_file() && (extension == ".glb" || extension == ".gltf")) {
-                modelFiles.push_back(entry.path());
-            }
-        }
-        std::ranges::sort(modelFiles);
-        ImGui::OpenPopup("모델 선택");
-    }
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!anySelected);
-    if (ImGui::Button("복제")) {
-        // 여러 개를 고른 채 복제하면 각각 복제하고 사본들을 새 선택으로 삼는다.
-        std::vector<int> copies;
-        for (int selected : selection) {
-            if (selected >= 0 && selected < static_cast<int>(active.objects.size())) {
-                copies.push_back(static_cast<int>(active.duplicateObject(static_cast<uint32_t>(selected))));
-            }
-        }
-        selection = std::move(copies);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("삭제") ||
-        (anySelected && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Delete))) {
-        // 하나씩 지우면 첫 삭제가 인덱스를 밀어 나머지가 엉뚱한 것을 가리킨다. 한 번에 넘긴다.
-        std::vector<uint32_t> doomed;
-        for (int selected : selection) {
-            if (selected >= 0) {
-                doomed.push_back(static_cast<uint32_t>(selected));
-            }
-        }
-        active.removeObjects(doomed);
-        clearSelection();
-    }
-    ImGui::EndDisabled();
-
-    if (ImGui::BeginPopup("메쉬 선택")) {
-        for (uint32_t meshIndex = 0; meshIndex < geometry.meshCount(); ++meshIndex) {
-            const asset::Material& material = geometry.material(geometry.mesh(meshIndex).materialIndex);
-            std::string label = std::to_string(meshIndex) + ": " + geometry.meshName(meshIndex) + " / " + material.name;
-            if (ImGui::Selectable(label.c_str())) {
-                // 새 오브젝트는 카메라 앞쪽, 바운딩 반지름을 고려한 거리에 놓는다.
-                float radius = std::max(geometry.mesh(meshIndex).boundingSphere.w, 0.1F);
-                scene::Object object;
-                object.name = geometry.meshName(meshIndex);
-                object.transform.position = active.camera.position + active.camera.forward() * (radius * 3.0F);
-                active.objects.push_back(std::move(object));
-                selectOnly(static_cast<int>(active.objects.size()) - 1);
-                active.attachMeshRenderer(static_cast<uint32_t>(primarySelection()), meshIndex);
-            }
-        }
-        ImGui::EndPopup();
-    }
-
-    if (ImGui::BeginPopup("조명 선택")) {
-        constexpr std::array<const char*, 4> LIGHT_NAMES{"방향광", "점광", "스폿광", "영역광"};
-        for (uint32_t type = 0; type < LIGHT_NAMES.size(); ++type) {
-            if (!ImGui::Selectable(LIGHT_NAMES[type])) {
-                continue;
-            }
-            scene::Light light;
-            light.type = static_cast<scene::LightType>(type);
-            active.lights.push_back(light);
-
-            scene::Object object;
-            object.name = LIGHT_NAMES[type];
-            object.light = static_cast<int32_t>(active.lights.size()) - 1;
-            if (light.type == scene::LightType::DIRECTIONAL) {
-                object.transform.rotation = glm::quat(glm::radians(glm::vec3{-50.0F, -30.0F, 0.0F}));
-            } else {
-                // 카메라 앞쪽에 놓고 보고 있는 쪽을 비추게 한다.
-                object.transform.position = active.camera.position + active.camera.forward();
-                object.transform.rotation = glm::quatLookAt(active.camera.forward(), glm::vec3{0.0F, 1.0F, 0.0F});
-            }
-            active.objects.push_back(std::move(object));
-            selectOnly(static_cast<int>(active.objects.size()) - 1);
-        }
-        ImGui::EndPopup();
-    }
-
-    if (ImGui::BeginPopup("모델 선택")) {
-        if (modelFiles.empty()) {
-            ImGui::TextDisabled("%s 에 glTF 파일이 없습니다", modelRoot.string().c_str());
-        }
-        for (const std::filesystem::path& file : modelFiles) {
-            if (ImGui::Selectable(file.filename().string().c_str())) {
-                pendingModel = file;
-            }
-        }
-        ImGui::Separator();
-        ImGui::SetNextItemWidth(320.0F);
-        ImGui::InputText("경로", modelPathInput.data(), modelPathInput.size());
-        ImGui::SameLine();
-        if (ImGui::Button("열기") && modelPathInput[0] != '\0') {
-            pendingModel = std::filesystem::path{modelPathInput.data()};
-        }
-        ImGui::EndPopup();
-    }
-    ImGui::Separator();
-
-    // 여기부터는 오브젝트의 부모-자식 구조만 보여준다.
+    // 여기부터는 오브젝트의 부모-자식 구조만 보여준다. 만들기·복제·삭제는 우클릭 메뉴와 메뉴바에 있다.
     // 부모별 자식 목록을 한 번 만든다. 노드마다 전체를 훑으면 오브젝트 만 개에서 프레임당 수백 ms 다.
     std::vector<std::vector<int>> children(active.objects.size());
     for (int i = 0; i < static_cast<int>(active.objects.size()); ++i) {
@@ -526,9 +700,11 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
         }
     }
 
-    // 남는 공간에 놓으면 뿌리로 끌어올린다.
-    ImGui::Dummy(ImGui::GetContentRegionAvail());
-    if (ImGui::BeginDragDropTarget()) {
+    // 노드 밖에 놓으면 뿌리로 끌어올린다. 창 전체를 대상으로 잡는다. 전에는 남는 자리에 Dummy 를 두었는데
+    // 트리가 창을 채우면 크기가 0 이라 받지 못했다. ImGui 는 면적이 작은 대상을 우선하므로 노드 위에
+    // 놓으면 그 노드가 받는다.
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (ImGui::BeginDragDropTargetCustom(window->InnerRect, window->ID)) {
         const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(HIERARCHY_PAYLOAD);
         if (payload != nullptr) {
             pendingChild = *static_cast<const int*>(payload->Data);
@@ -537,17 +713,18 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
         ImGui::EndDragDropTarget();
     }
 
-    // 부모가 바뀌어도 화면에서의 위치는 그대로 두려고 지역 변환을 다시 계산한다.
-    if (pendingChild >= 0 && pendingChild < static_cast<int>(active.objects.size()) &&
-        !active.isDescendant(static_cast<uint32_t>(pendingParent < 0 ? pendingChild : pendingParent),
-                             static_cast<uint32_t>(pendingChild))) {
-        glm::mat4 world = active.worldMatrix(static_cast<uint32_t>(pendingChild));
-        glm::mat4 parentWorld =
-            pendingParent >= 0 ? active.worldMatrix(static_cast<uint32_t>(pendingParent)) : glm::mat4{1.0F};
-        scene::Object& child = active.objects[static_cast<size_t>(pendingChild)];
-        child.parent = pendingParent;
-        child.transform = scene::Transform::fromMatrix(glm::inverse(parentWorld) * world);
+    // 빈 공간 우클릭. 노드 위에서는 노드의 메뉴가 뜬다.
+    if (ImGui::BeginPopupContextWindow("##hierarchyMenu",
+                                       ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
+        buildCreateItems(active, geometry, -1);
+        ImGui::Separator();
+        if (ImGui::MenuItem("모델 불러오기...")) {
+            popupRequest = PopupRequest::LOAD_MODEL;
+        }
+        ImGui::EndPopup();
     }
+
+    reparent(active, pendingChild, pendingParent);
     pendingChild = -1;
 
     ImGui::End();
@@ -807,8 +984,14 @@ void Editor::buildSceneView(scene::Scene& active) {
         }
     }
 
-    // 조작 도구 선택은 장면 뷰 위에 겹쳐 둔다. 맨 앞에서 무엇을 볼지 고른다.
+    // 조작 도구 선택은 장면 뷰 위에 겹쳐 둔다. 맨 앞에서 무엇을 볼지 고른다. 위젯을 채널 1 에 그리고
+    // 그 뒤(채널 0)에 배경을 깐다. 장면 위에 바로 놓으면 밝은 하늘에서 글자가 묻힌다.
     ImGui::SetCursorScreenPos(toolbarPosition);
+    ImDrawList* toolbarDrawList = ImGui::GetWindowDrawList();
+    toolbarDrawList->ChannelsSplit(2);
+    toolbarDrawList->ChannelsSetCurrent(1);
+    // 기본 프레임 색은 배경과 거의 같아 라디오·체크박스 테두리가 묻힌다. 툴바 안에서만 밝게 둔다.
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4{0.34F, 0.34F, 0.36F, 1.0F});
     ImGui::BeginGroup();
     ImGui::SetNextItemWidth(160.0F);
     if (ImGui::BeginCombo("##target", target.name)) {
@@ -885,12 +1068,29 @@ void Editor::buildSceneView(scene::Scene& active) {
                                 : "Q/E 또는 PageUp/PageDown 으로 오르내리고, Shift 로 4배 빨라진다");
     }
     ImGui::EndGroup();
+    ImGui::PopStyleColor();
+    {
+        const ImVec2 PAD{6.0F, 4.0F};
+        ImVec2 minimum = ImGui::GetItemRectMin();
+        ImVec2 maximum = ImGui::GetItemRectMax();
+        toolbarDrawList->ChannelsSetCurrent(0);
+        toolbarDrawList->AddRectFilled(ImVec2{minimum.x - PAD.x, minimum.y - PAD.y},
+                                       ImVec2{maximum.x + PAD.x, maximum.y + PAD.y},
+                                       IM_COL32(18, 18, 18, 210),
+                                       4.0F);
+        toolbarDrawList->ChannelsMerge();
+    }
 
     ImGui::End();
 }
 
 void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
-    if (!ImGui::Begin(WINDOW_SETTINGS)) {
+    if (!showRenderSettings) {
+        return;
+    }
+    // 도킹되지 않는 떠 있는 창. 열어 둔 채 장면을 돌려 보며 값을 만질 수 있다.
+    ImGui::SetNextWindowSize(ImVec2{440.0F, 680.0F}, ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin(WINDOW_SETTINGS, &showRenderSettings, ImGuiWindowFlags_NoDocking)) {
         ImGui::End();
         return;
     }
@@ -1156,7 +1356,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
             }
         } else {
             int lodLevel = static_cast<int>(renderer.lodLevel);
-            int maxLod = static_cast<int>(geometryStore != nullptr ? geometryStore->maxLodCount() : 1) - 1;
+            int maxLod = std::max(static_cast<int>(geometryStore != nullptr ? geometryStore->maxLodCount() : 1) - 1, 0);
             if (ImGui::SliderInt("LOD 단계", &lodLevel, 0, std::max(maxLod, 0))) {
                 renderer.lodLevel = static_cast<uint32_t>(lodLevel);
             }
@@ -1427,7 +1627,9 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
 
     geometryStore = &geometry;
 
-    buildDockspace();
+    // 단축키는 패널을 그리기 전에 처리한다. 패널이 들고 있는 참조가 아직 없을 때라 배열을 바꿔도 안전하다.
+    handleShortcuts(scenes, geometry);
+    buildDockspace(scenes, geometry);
     buildHierarchy(scenes, geometry);
     buildInspector(scenes.active(), geometry);
     buildSceneView(scenes.active());
@@ -1435,6 +1637,12 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
     buildConsole();
     buildLoadOverlay();
     focusSelected(scenes.active(), geometry);
+
+    // 메뉴와 우클릭에서 고른 편집 동작. 패널이 참조를 다 놓은 뒤에 한 번에 적용한다.
+    if (deferred) {
+        std::function<void()> action = std::exchange(deferred, nullptr);
+        action();
+    }
 
     // 적재와 장면 전환은 지오메트리 버퍼를 다시 만들기 때문에 패널을 다 그린 뒤에 처리한다.
     if (!pendingModel.empty()) {
@@ -1506,9 +1714,11 @@ void Editor::updateHistory(scene::Scene& active, size_t sceneIndex) {
     bool editing = ImGui::IsAnyItemActive() || gizmoUsing;
     // 글자를 입력하는 중에는 단축키를 받지 않는다. 이름을 고치다 장면이 되돌아가면 곤란하다.
     bool shortcutsAllowed = io.KeyCtrl && !io.WantTextInput;
-    bool wantUndo = shortcutsAllowed && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false);
-    bool wantRedo = shortcutsAllowed &&
-                    (ImGui::IsKeyPressed(ImGuiKey_Y, false) || (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)));
+    bool wantUndo =
+        std::exchange(menuUndo, false) || (shortcutsAllowed && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false));
+    bool wantRedo = std::exchange(menuRedo, false) ||
+                    (shortcutsAllowed && (ImGui::IsKeyPressed(ImGuiKey_Y, false) ||
+                                          (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false))));
 
     if (wantUndo && !history.undoStack.empty()) {
         history.redoStack.push_back(active.capture());
