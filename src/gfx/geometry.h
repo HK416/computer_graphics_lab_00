@@ -120,11 +120,23 @@ public:
     GeometryStore(const GeometryStore&) = delete;
     GeometryStore& operator=(const GeometryStore&) = delete;
 
-    // 모델을 누적하고 이 모델의 메쉬가 시작되는 전역 인덱스를 돌려준다.
+    // 모델 하나가 표에서 차지하는 연속 구간. removeModel 이 되돌리는 데 쓴다.
+    struct ModelRange {
+        uint32_t meshBase = 0;
+        uint32_t meshCount = 0;
+        uint32_t materialBase = 0;
+        uint32_t materialCount = 0;
+    };
+
+    // 모델을 누적하고 이 모델의 메쉬가 시작되는 전역 인덱스 등을 돌려준다. 해제된 자리가 있으면 거기부터 채운다.
     // textureSlots 는 model.textures 와 같은 순서의 bindless 슬롯 번호다.
-    uint32_t addModel(const asset::Model& model, const std::vector<uint32_t>& textureSlots);
-    // 마지막 build 뒤에 더해진 모델을 GPU 에 올린다. 버퍼를 새로 잡으므로 호출 전에 장치가 놀고
-    // 있어야 하고, 부르는 쪽이 주소를 다시 읽어야 한다(가속 구조 등).
+    ModelRange addModel(const asset::Model& model, const std::vector<uint32_t>& textureSlots);
+    // 모델이 쓰던 구간을 모두 돌려준다. 메쉬 번호는 남은 장면과 되돌리기 기록이 들고 있으므로 옮기지
+    // 않고, 항목만 비워 무덤으로 남긴다(meshLive 가 거짓). 큰 배열의 구간은 다음 모델이 재활용하고,
+    // 꼬리였다면 다음 build 에서 버퍼가 실제로 줄어든다. 호출 전에 장치가 놀고 있어야 한다.
+    void removeModel(const ModelRange& range);
+    // 마지막 build 뒤에 더해지거나 해제된 것을 GPU 에 반영한다. 버퍼를 새로 잡으므로 호출 전에 장치가
+    // 놀고 있어야 하고, 부르는 쪽이 주소를 다시 읽어야 한다(가속 구조 등).
     void build();
 
     // 이 모델이 GPU 에서 차지할 바이트. 올리기 전에 예산과 견주는 데 쓴다.
@@ -166,20 +178,41 @@ public:
     Buffer meshletVertexBuffer;
 
 private:
-    // 큰 배열 하나. total 은 GPU 에 올라간 것까지 합친 개수이고 pending 은 아직 올리지 않은 꼬리다.
-    // build 가 꼬리를 올리고 비운다.
-    template <typename T> struct GrowingArray {
-        std::vector<T> pending;
-        size_t total = 0;
-        size_t uploaded = 0;
-        // 다음에 넣을 원소의 전역 번호.
-        size_t next() const { return total; }
-        void append(const T* data, size_t count) {
-            pending.insert(pending.end(), data, data + count);
-            total += count;
-        }
+    struct Range {
+        size_t offset = 0;
+        size_t count = 0;
     };
-    // 버퍼를 array.total 크기로 키우고 꼬리를 올린다. 옛 버퍼는 flush 뒤에 지우도록 retired 에 넣는다.
+    // 빈 구간 목록으로 연속 구간을 나눠 준다. 해제된 자리를 first-fit 으로 재활용하고 없으면 꼬리에 붙인다.
+    // 꼬리가 해제되면 total 이 줄어 버퍼도 실제로 작아질 수 있다. 큰 배열과 CPU 표가 함께 쓴다.
+    struct RangeAllocator {
+        std::vector<Range> freeRanges;
+        size_t total = 0;
+        size_t allocate(size_t count);
+        void release(size_t offset, size_t count);
+    };
+    // 큰 배열 하나. GPU 에 올라간 것은 CPU 에 남기지 않고, 아직 올리지 않은 조각만 pending 에 둔다.
+    // build 가 조각을 제자리에 올리고 비운다.
+    template <typename T> struct GrowingArray {
+        struct Chunk {
+            size_t offset;
+            std::vector<T> data;
+        };
+        RangeAllocator ranges;
+        std::vector<Chunk> pending;
+        // GPU 버퍼에 유효한 원소 수. 버퍼를 다시 잡을 때 이만큼을 옮긴다.
+        size_t uploaded = 0;
+        size_t total() const { return ranges.total; }
+        size_t allocate(size_t count) { return ranges.allocate(count); }
+        void write(size_t offset, const T* data, size_t count) {
+            if (count > 0) {
+                pending.push_back(Chunk{offset, std::vector<T>(data, data + count)});
+            }
+        }
+        void release(size_t offset, size_t count);
+        size_t pendingCount() const;
+    };
+    // 버퍼를 array.total 크기에 맞추고(키우거나 절반 이하로 줄이고) 조각을 올린다. 옛 버퍼는 flush 뒤에
+    // 지우도록 retired 에 넣는다.
     template <typename T>
     void growAndUpload(Uploader& uploader,
                        Buffer& buffer,
@@ -187,6 +220,9 @@ private:
                        VkBufferUsageFlags usage,
                        const char* name,
                        std::vector<Buffer>& retired);
+    // CPU 표에서 연속 구간을 잡는다. 표는 필요한 만큼 늘리고 해제된 꼬리만큼 줄인다.
+    template <typename T> uint32_t allocateTable(std::vector<T>& table, RangeAllocator& ranges, size_t count);
+    template <typename T> void releaseTable(std::vector<T>& table, RangeAllocator& ranges, size_t offset, size_t count);
 
     Context& context;
     GrowingArray<asset::Vertex> vertices;
@@ -197,15 +233,21 @@ private:
     std::vector<GpuMesh> meshes;
     std::vector<GpuMeshlet> meshlets;
     std::vector<GpuMeshLod> lods;
-    uint32_t maxLods = 1;
     std::vector<GpuMaterial> materials;
-    // 마지막 build 때의 표 크기. 표만 자란 경우(메쉬 없는 모델)도 다시 올리게 한다.
-    size_t uploadedMeshCount = 0;
-    size_t uploadedMaterialCount = 0;
+    RangeAllocator meshRanges;
+    RangeAllocator meshletRanges;
+    RangeAllocator lodRanges;
+    RangeAllocator materialRanges;
+    uint32_t maxLods = 1;
+    // 표가 바뀌어(더하거나 해제) 다시 올려야 한다.
+    bool tablesDirty = false;
     std::vector<asset::Material> sourceMaterials;
     std::vector<std::string> meshNames;
     std::vector<uint32_t> meshVertexCounts;
     std::vector<uint32_t> meshSkinOffsets;
+    // 해제할 때 돌려줘야 하는 메쉬별 구간. GpuMesh 는 meshlet 삼각형·정점 목록의 구간을 담지 않는다.
+    std::vector<Range> meshTriangleRanges;
+    std::vector<Range> meshMeshletVertexRanges;
 };
 
 } // namespace gfx

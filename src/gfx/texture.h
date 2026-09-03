@@ -25,6 +25,8 @@ public:
 
     // 등록에 성공하면 bindless 슬롯 번호를, 픽셀이 비어 있으면 INVALID_TEXTURE 를 돌려준다.
     uint32_t add(Uploader& uploader, const asset::Texture& texture);
+    // 이미지를 지우고 슬롯을 돌려준다. 모델을 해제할 때 쓴다. 호출 전에 장치가 놀고 있어야 한다.
+    void remove(uint32_t slot);
     // 이 텍스처가 GPU 에서 차지할 바이트. 밉을 만들어야 하면 1/3 을 더한다.
     static VkDeviceSize estimateBytes(const asset::Texture& texture);
 
@@ -33,7 +35,8 @@ private:
 
     Context& context;
     BindlessTextures& bindless;
-    std::vector<Image> images;
+    // 슬롯 번호 -> 이미지. 해제된 슬롯은 나중 add 가 다시 받는다.
+    std::unordered_map<uint32_t, Image> images;
     std::unordered_map<uint64_t, VkSampler> samplers;
 };
 

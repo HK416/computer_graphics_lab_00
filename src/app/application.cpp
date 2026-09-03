@@ -191,6 +191,7 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
         sceneRoot,
         [this](const std::filesystem::path& path) { saveScene(path); },
         [this](const std::filesystem::path& path) { openScene(path); });
+    editorUi->setModelCollector([this] { collectUnusedModels(true); });
     // 렌더러가 있어야 지오메트리 재구축을 알릴 수 있으므로 여기서 연다.
     for (const std::filesystem::path& path : options.modelPaths) {
         loadModel(path);
@@ -344,6 +345,9 @@ bool Application::fitsGpuBudget(const asset::Model& model) const {
 uint32_t Application::findModel(const std::filesystem::path& path) const {
     std::error_code error;
     for (uint32_t i = 0; i < loadedModels.size(); ++i) {
+        if (loadedModels[i].unloaded) {
+            continue;
+        }
         // 내장 모델은 파일이 없어 equivalent 가 실패하므로 이름을 먼저 견준다.
         if (loadedModels[i].path == path || std::filesystem::equivalent(loadedModels[i].path, path, error)) {
             return i;
@@ -363,14 +367,94 @@ uint32_t Application::registerModel(const std::filesystem::path& path, asset::Mo
     LoadedModel entry;
     entry.path = path;
     entry.builtin = builtin;
-    entry.meshBase = geometry->addModel(model, textureSlots);
-    entry.meshCount = static_cast<uint32_t>(model.meshes.size());
+    entry.range = geometry->addModel(model, textureSlots);
+    entry.meshBase = entry.range.meshBase;
+    entry.meshCount = entry.range.meshCount;
+    entry.textureSlots = std::move(textureSlots);
     entry.skeleton = std::move(model.skeleton);
     entry.instances = std::move(model.instances);
     uploader.flush();
 
+    // 해제된 자리가 있으면 거기 넣는다. 애니메이터가 모델 번호를 들고 있어 항목을 지우지 않는다.
+    for (uint32_t i = 0; i < loadedModels.size(); ++i) {
+        if (loadedModels[i].unloaded) {
+            loadedModels[i] = std::move(entry);
+            return i;
+        }
+    }
     loadedModels.push_back(std::move(entry));
     return static_cast<uint32_t>(loadedModels.size()) - 1;
+}
+
+void Application::collectUnusedModels(bool force) {
+    std::vector<uint8_t> used(loadedModels.size(), 0);
+    auto markMesh = [&](uint32_t mesh) {
+        for (uint32_t i = 0; i < loadedModels.size(); ++i) {
+            const LoadedModel& model = loadedModels[i];
+            if (!model.unloaded && mesh >= model.meshBase && mesh < model.meshBase + model.meshCount) {
+                used[i] = 1;
+                return;
+            }
+        }
+    };
+    auto markModel = [&](int32_t model) {
+        if (model >= 0 && static_cast<size_t>(model) < used.size()) {
+            used[static_cast<size_t>(model)] = 1;
+        }
+    };
+    for (size_t s = 0; s < scenes.count(); ++s) {
+        const scene::Scene& scene = scenes.at(s);
+        for (const scene::MeshRenderer& renderer : scene.meshRenderers) {
+            if (renderer.mesh != scene::INVALID_MESH) {
+                markMesh(renderer.mesh);
+            }
+        }
+        for (const scene::Animator& animator : scene.animators) {
+            markModel(animator.model);
+        }
+    }
+
+    std::vector<uint32_t> doomed;
+    for (uint32_t i = 0; i < loadedModels.size(); ++i) {
+        const LoadedModel& model = loadedModels[i];
+        if (used[i] != 0 || model.unloaded || model.builtin) {
+            continue;
+        }
+        // 되돌리기 기록이 아직 이 모델을 가리키면 되살릴 수 있으므로 남긴다. 기록에서 밀려나면 그때 해제된다.
+        if (!force && editorUi->referencesModel(model.meshBase, model.meshCount, static_cast<int32_t>(i))) {
+            continue;
+        }
+        doomed.push_back(i);
+    }
+    if (doomed.empty()) {
+        return;
+    }
+
+    // 버퍼를 다시 잡고 이미지를 지우므로 진행 중인 프레임이 끝난 뒤에 한다.
+    renderer->waitIdle();
+    constexpr double MB = 1024.0 * 1024.0;
+    double before = static_cast<double>(geometry->residentBytes()) / MB;
+    for (uint32_t index : doomed) {
+        LoadedModel& model = loadedModels[index];
+        for (uint32_t slot : model.textureSlots) {
+            if (slot != asset::INVALID_TEXTURE) {
+                textures->remove(slot);
+            }
+        }
+        geometry->removeModel(model.range);
+        spdlog::info("모델 해제: {} (메쉬 {}개, 텍스처 {}장)",
+                     model.path.filename().string(),
+                     model.meshCount,
+                     model.textureSlots.size());
+        model.unloaded = true;
+        model.textureSlots.clear();
+        model.skeleton = {};
+        model.instances.clear();
+    }
+    geometry->build();
+    renderer->onGeometryChanged();
+    spdlog::info(
+        "지오메트리 GPU 메모리 {:.1f} MB -> {:.1f} MB", before, static_cast<double>(geometry->residentBytes()) / MB);
 }
 
 uint32_t Application::ensureModel(const std::filesystem::path& path) {
@@ -586,7 +670,8 @@ void Application::saveScene(const std::filesystem::path& path) {
     for (uint32_t object = 0; object < active.objects.size(); ++object) {
         uint32_t mesh = active.meshOf(object);
         for (uint32_t i = 0; i < loadedModels.size(); ++i) {
-            if (mesh >= loadedModels[i].meshBase && mesh < loadedModels[i].meshBase + loadedModels[i].meshCount) {
+            if (!loadedModels[i].unloaded && mesh >= loadedModels[i].meshBase &&
+                mesh < loadedModels[i].meshBase + loadedModels[i].meshCount) {
                 useModel(i);
                 break;
             }
@@ -746,6 +831,12 @@ void Application::run() {
         }
         // 편집기가 장면을 바꾼 뒤, 렌더러가 읽기 전에 캐시를 다시 만든다.
         scenes.active().refresh();
+        // 오브젝트가 지워지거나 장면이 바뀐 프레임에만 미사용 모델을 살핀다. 매 프레임 훑을 일은 아니다.
+        if (scenes.current() != collectedScene || scenes.active().topologyRevision() != collectedTopology) {
+            collectedScene = scenes.current();
+            collectedTopology = scenes.active().topologyRevision();
+            collectUnusedModels(false);
+        }
         renderer->drawFrame(scenes.active());
         ++frameCount;
 

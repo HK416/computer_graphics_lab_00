@@ -80,9 +80,18 @@ private:
         uint32_t meshCount = 0;
         asset::Skeleton skeleton;
         std::vector<asset::Instance> instances;
+        // 지오메트리 저장소와 텍스처 캐시에서 이 모델이 차지한 자리. 해제할 때 돌려준다.
+        gfx::GeometryStore::ModelRange range;
+        std::vector<uint32_t> textureSlots;
         // 코드로 만든 내장 모델(구). 파일이 없고 해제 대상도 아니다.
         bool builtin = false;
+        // 해제된 항목. 애니메이터가 번호로 가리키므로 지우지 않고 자리만 비워 두었다가 다음 모델이 쓴다.
+        bool unloaded = false;
     };
+
+    // 어느 장면도(그리고 force 가 아니면 편집기 되돌리기 기록도) 가리키지 않는 모델을 GPU 에서 내린다.
+    // 장면의 오브젝트 수나 부모 관계가 바뀔 때, 장면을 옮길 때, 메뉴에서 부른다.
+    void collectUnusedModels(bool force);
 
     // 기본 장면 «GameScene» 하나를 만든다. 에셋은 편집기나 --model 로 올린다.
     void loadScenes();
@@ -172,6 +181,9 @@ private:
     std::vector<LoadedModel> loadedModels;
     // 내장 구의 전역 메쉬 번호.
     uint32_t sphereMesh = scene::INVALID_MESH;
+    // 마지막으로 미사용 모델을 살핀 때의 장면 번호와 그 장면의 구조 리비전.
+    size_t collectedScene = SIZE_MAX;
+    uint64_t collectedTopology = 0;
     float orbitDegreesPerFrame = 0.0F;
     Options options;
 };

@@ -287,6 +287,16 @@ void Editor::buildMenuBar(scene::SceneManager& scenes, const gfx::GeometryStore&
         if (ImGui::MenuItem("모델 불러오기...")) {
             popupRequest = PopupRequest::LOAD_MODEL;
         }
+        if (ImGui::MenuItem("미사용 모델 해제", nullptr, false, static_cast<bool>(modelCollector))) {
+            // 기록이 모델을 붙들고 있으면 해제되지 않으므로 먼저 비운다. 지운 오브젝트는 되돌릴 수 없게 된다.
+            deferred = [this] {
+                clearHistories();
+                modelCollector();
+            };
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("어느 장면도 쓰지 않는 모델을 GPU 에서 내린다. 되돌리기 기록도 함께 비운다");
+        }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("편집")) {
@@ -1746,6 +1756,50 @@ void Editor::updateHistory(scene::Scene& active, size_t sceneIndex) {
         // 새로 편집했으므로 앞서 되돌린 것들은 이어 갈 수 없다.
         history.redoStack.clear();
         history.baseline = active.capture();
+    }
+}
+
+bool Editor::referencesModel(uint32_t meshBase, uint32_t meshCount, int32_t modelIndex) const {
+    auto snapshotReferences = [&](const scene::SceneSnapshot& snapshot) {
+        for (const scene::MeshRenderer& renderer : snapshot.meshRenderers) {
+            if (renderer.mesh >= meshBase && renderer.mesh < meshBase + meshCount) {
+                return true;
+            }
+        }
+        for (const scene::Animator& animator : snapshot.animators) {
+            if (animator.model == modelIndex) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const History& history : histories) {
+        if (!history.started) {
+            continue;
+        }
+        if (snapshotReferences(history.baseline)) {
+            return true;
+        }
+        for (const scene::SceneSnapshot& snapshot : history.undoStack) {
+            if (snapshotReferences(snapshot)) {
+                return true;
+            }
+        }
+        for (const scene::SceneSnapshot& snapshot : history.redoStack) {
+            if (snapshotReferences(snapshot)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void Editor::clearHistories() {
+    // 기준(baseline)은 지금 장면과 같으므로 남긴다. 다음 updateHistory 가 새로 잡는다.
+    for (History& history : histories) {
+        history.undoStack.clear();
+        history.redoStack.clear();
+        history.started = false;
     }
 }
 

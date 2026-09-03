@@ -357,10 +357,17 @@ uint32_t BindlessTextures::addCube(VkImageView view, VkSampler sampler) {
 }
 
 uint32_t BindlessTextures::add(VkImageView view, VkSampler sampler, VkImageLayout layout) {
-    if (imageCount >= imageCapacity) {
-        core::fatal("bindless 이미지 슬롯이 부족합니다 (한계 {})", imageCapacity);
+    uint32_t imageIndex = 0;
+    if (!freeImages.empty()) {
+        // 해제된 번호를 먼저 다시 쓴다. 모델을 올렸다 지웠다 해도 번호가 끝없이 자라지 않는다.
+        imageIndex = freeImages.back();
+        freeImages.pop_back();
+    } else {
+        if (imageCount >= imageCapacity) {
+            core::fatal("bindless 이미지 슬롯이 부족합니다 (한계 {})", imageCapacity);
+        }
+        imageIndex = imageCount++;
     }
-    uint32_t imageIndex = imageCount++;
 
     VkDescriptorImageInfo imageInfo{};
     imageInfo.imageView = view;
@@ -376,6 +383,12 @@ uint32_t BindlessTextures::add(VkImageView view, VkSampler sampler, VkImageLayou
     vkUpdateDescriptorSets(context.device, 1, &write, 0, nullptr);
 
     return imageIndex | (addSampler(sampler) << TEXTURE_SAMPLER_SHIFT);
+}
+
+void BindlessTextures::freeImage(uint32_t slot) {
+    // 디스크립터는 그대로 둔다. 배열이 PARTIALLY_BOUND 라 쓰이지 않는 항목은 유효하지 않아도 되고,
+    // 해제된 메쉬는 아무도 그리지 않으므로 그 재질을 읽는 셰이더도 없다. 다음 add 가 덮어쓴다.
+    freeImages.push_back(slot & TEXTURE_IMAGE_MASK);
 }
 
 } // namespace gfx

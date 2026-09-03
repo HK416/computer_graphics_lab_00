@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 #include <vulkan/vulkan.h>
 
@@ -20,8 +21,10 @@ public:
     BindlessTextures(const BindlessTextures&) = delete;
     BindlessTextures& operator=(const BindlessTextures&) = delete;
 
-    // 이미지와 샘플러를 등록하고 셰이더가 쓰는 묶음 슬롯을 돌려준다.
+    // 이미지와 샘플러를 등록하고 셰이더가 쓰는 묶음 슬롯을 돌려준다. 해제된 번호가 있으면 그것부터 쓴다.
     uint32_t add(VkImageView view, VkSampler sampler, VkImageLayout layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // 이미지 번호를 돌려준다. 샘플러 번호는 설정별로 하나뿐이라 그대로 둔다.
+    void freeImage(uint32_t slot);
     // 이미 발급된 슬롯의 이미지를 바꾼다. 크기 변경으로 렌더 타겟을 다시 만들 때 쓴다.
     void update(uint32_t slot,
                 VkImageView view,
@@ -73,6 +76,8 @@ private:
     uint32_t cubeCount = 0;
     uint32_t samplerCount = 0;
     VkSampler registeredSamplers[64]{};
+    // freeImage 가 돌려준 이미지 번호. add 가 먼저 꺼내 쓴다.
+    std::vector<uint32_t> freeImages;
 };
 
 } // namespace gfx

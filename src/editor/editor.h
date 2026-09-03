@@ -58,6 +58,11 @@ public:
     void setSceneIo(std::filesystem::path root,
                     std::function<void(const std::filesystem::path&)> saver,
                     std::function<void(const std::filesystem::path&)> opener);
+    // 메뉴 «미사용 모델 해제»가 부르는 함수. 되돌리기 기록을 비운 뒤 부른다.
+    void setModelCollector(std::function<void()> collector) { modelCollector = std::move(collector); }
+    // 되돌리기 기록 어딘가가 이 모델의 메쉬나 애니메이터를 가리키는지. 그렇다면 아직 해제하면 안 된다.
+    bool referencesModel(uint32_t meshBase, uint32_t meshCount, int32_t modelIndex) const;
+    void clearHistories();
     void setLoadStatus(LoadStatus status) { loadStatus = std::move(status); }
     void build(scene::SceneManager& scenes, const gfx::GeometryStore& geometry, float deltaSeconds);
     void record(VkCommandBuffer commandBuffer);
@@ -148,6 +153,7 @@ private:
     std::array<char, 512> hdrPathInput{};
     std::function<void(const std::filesystem::path&)> sceneSaver;
     std::function<void(const std::filesystem::path&)> sceneOpener;
+    std::function<void()> modelCollector;
     std::filesystem::path sceneRoot;
     std::vector<std::filesystem::path> sceneFiles;
     std::filesystem::path pendingSceneSave;

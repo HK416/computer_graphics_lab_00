@@ -85,9 +85,19 @@ TextureCache::~TextureCache() {
     for (auto& entry : samplers) {
         vkDestroySampler(context.device, entry.second, nullptr);
     }
-    for (Image& image : images) {
-        destroyImage(context, image);
+    for (auto& entry : images) {
+        destroyImage(context, entry.second);
     }
+}
+
+void TextureCache::remove(uint32_t slot) {
+    auto found = images.find(slot);
+    if (found == images.end()) {
+        return;
+    }
+    destroyImage(context, found->second);
+    images.erase(found);
+    bindless.freeImage(slot);
 }
 
 VkSampler TextureCache::samplerFor(const asset::SamplerDesc& desc) {
@@ -154,7 +164,7 @@ uint32_t TextureCache::add(Uploader& uploader, const asset::Texture& texture) {
     }
 
     uint32_t slot = bindless.add(image.view, samplerFor(texture.sampler));
-    images.push_back(image);
+    images.emplace(slot, image);
     return slot;
 }
 
