@@ -61,6 +61,8 @@ struct Options {
     uint64_t gpuBudgetMegabytes = 0;
     // 위치·UV 가 같은 정점을 합칠 노멀 스무딩 각도. 0 이면 속성이 완전히 같을 때만 합친다.
     float weldAngleDegrees = 30.0F;
+    // 시작하자마자 재생(물리 시뮬레이션)한다. 스크린샷으로 물리를 확인할 때 쓴다.
+    bool play = false;
 };
 
 class Application {
@@ -184,6 +186,8 @@ private:
     // 마지막으로 미사용 모델을 살핀 때의 장면 번호와 그 장면의 구조 리비전.
     size_t collectedScene = SIZE_MAX;
     uint64_t collectedTopology = 0;
+    // 강체 물리의 고정 간격 누적기. 프레임이 길어도 정해진 스텝 수까지만 따라잡는다.
+    float physicsAccumulator = 0.0F;
     float orbitDegreesPerFrame = 0.0F;
     Options options;
 };

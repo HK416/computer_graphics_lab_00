@@ -6,6 +6,7 @@
 #include <glm/gtx/matrix_decompose.hpp>
 
 #include "core/error.h"
+#include "core/job_system.h"
 
 namespace scene {
 
@@ -82,12 +83,13 @@ Transform Transform::fromMatrix(const glm::mat4& matrix) {
     return transform;
 }
 
-void Scene::update(float deltaSeconds) {
+void Scene::update(float deltaSeconds, core::JobSystem* jobs) {
     animatorPosedFlags.assign(animators.size(), 0);
-    for (uint32_t index = 0; index < animators.size(); ++index) {
+    // 애니메이터마다 자기 배열만 만지므로 서로 독립이다. 캐릭터가 여럿이면 워커에 나눈다.
+    auto updateAnimator = [this, deltaSeconds](uint32_t index) {
         Animator& animator = animators[index];
         if (animator.skeleton.skins.empty()) {
-            continue;
+            return;
         }
         if (animator.playing && animator.clip < animator.skeleton.animations.size()) {
             float duration = animator.skeleton.animations[animator.clip].duration;
@@ -102,7 +104,7 @@ void Scene::update(float deltaSeconds) {
         // 재생 중이 아니고 클립도 시각도 그대로면 같은 포즈가 다시 나온다. 노드 배열 복사까지
         // 통째로 건너뛴다.
         if (animator.clip == animator.posedClip && animator.clipTime == animator.posedTime) {
-            continue;
+            return;
         }
         animator.posedClip = animator.clip;
         animator.posedTime = animator.clipTime;
@@ -112,6 +114,18 @@ void Scene::update(float deltaSeconds) {
         animator.jointMatrices.resize(animator.skeleton.skins.size());
         for (uint32_t skin = 0; skin < animator.skeleton.skins.size(); ++skin) {
             asset::skinMatrices(animator.skeleton, animator.nodeWorlds, skin, animator.jointMatrices[skin]);
+        }
+    };
+    auto count = static_cast<uint32_t>(animators.size());
+    if (jobs != nullptr && count > 1) {
+        jobs->parallelFor(count, 1, [&updateAnimator](uint32_t begin, uint32_t end) {
+            for (uint32_t index = begin; index < end; ++index) {
+                updateAnimator(index);
+            }
+        });
+    } else {
+        for (uint32_t index = 0; index < count; ++index) {
+            updateAnimator(index);
         }
     }
 }
@@ -226,6 +240,8 @@ SceneSnapshot Scene::capture() const {
     snapshot.meshRenderers = meshRenderers;
     snapshot.animators = animators;
     snapshot.lights = lights;
+    snapshot.rigidBodies = rigidBodies;
+    snapshot.fluids = fluids;
     snapshot.ambientColor = ambientColor;
     snapshot.ambientIntensity = ambientIntensity;
     snapshot.environment = environment;
@@ -241,6 +257,8 @@ void Scene::restore(const SceneSnapshot& snapshot) {
     meshRenderers = snapshot.meshRenderers;
     animators = snapshot.animators;
     lights = snapshot.lights;
+    rigidBodies = snapshot.rigidBodies;
+    fluids = snapshot.fluids;
     ambientColor = snapshot.ambientColor;
     ambientIntensity = snapshot.ambientIntensity;
     environment = snapshot.environment;
@@ -249,9 +267,9 @@ void Scene::restore(const SceneSnapshot& snapshot) {
 
 bool Scene::differsFrom(const SceneSnapshot& snapshot) const {
     if (name != snapshot.name || objects != snapshot.objects || meshRenderers != snapshot.meshRenderers ||
-        lights != snapshot.lights || ambientColor != snapshot.ambientColor ||
-        ambientIntensity != snapshot.ambientIntensity || !(environment == snapshot.environment) ||
-        !(post == snapshot.post)) {
+        lights != snapshot.lights || rigidBodies != snapshot.rigidBodies || fluids != snapshot.fluids ||
+        ambientColor != snapshot.ambientColor || ambientIntensity != snapshot.ambientIntensity ||
+        !(environment == snapshot.environment) || !(post == snapshot.post)) {
         return true;
     }
     if (animators.size() != snapshot.animators.size()) {
@@ -295,6 +313,42 @@ int32_t Scene::skinOf(uint32_t index) const {
         return -1;
     }
     return meshRenderers[static_cast<size_t>(slot)].skin;
+}
+
+namespace {
+template <typename T>
+int32_t attachComponent(
+    std::vector<Object>& objects, std::vector<T>& items, uint32_t index, int32_t Object::* handle, const T& value) {
+    int32_t& slot = objects[index].*handle;
+    if (slot >= 0 && static_cast<size_t>(slot) < items.size()) {
+        return slot;
+    }
+    slot = static_cast<int32_t>(items.size());
+    items.push_back(value);
+    return slot;
+}
+} // namespace
+
+int32_t Scene::attachLight(uint32_t index, const Light& light) {
+    return attachComponent(objects, lights, index, &Object::light, light);
+}
+
+int32_t Scene::attachRigidBody(uint32_t index, const RigidBody& body) {
+    return attachComponent(objects, rigidBodies, index, &Object::rigidBody, body);
+}
+
+int32_t Scene::attachFluid(uint32_t index, const Fluid& fluid) {
+    return attachComponent(objects, fluids, index, &Object::fluid, fluid);
+}
+
+void Scene::detachComponent(uint32_t index, int32_t Object::* handle) {
+    objects[index].*handle = -1;
+    // 어느 배열의 첨자인지는 handle 이 정한다. 종류마다 배열이 달라 전부 다시 압축한다. 부품 수가 적어 싸다.
+    compactComponents(meshRenderers, objects, &Object::meshRenderer);
+    compactComponents(animators, objects, &Object::animator);
+    compactComponents(lights, objects, &Object::light);
+    compactComponents(rigidBodies, objects, &Object::rigidBody);
+    compactComponents(fluids, objects, &Object::fluid);
 }
 
 void Scene::removeObject(uint32_t index) {
@@ -344,6 +398,8 @@ void Scene::removeObjects(const std::vector<uint32_t>& indices) {
     compactComponents(meshRenderers, objects, &Object::meshRenderer);
     compactComponents(animators, objects, &Object::animator);
     compactComponents(lights, objects, &Object::light);
+    compactComponents(rigidBodies, objects, &Object::rigidBody);
+    compactComponents(fluids, objects, &Object::fluid);
 }
 
 uint32_t Scene::duplicateObject(uint32_t index) {
@@ -380,6 +436,8 @@ uint32_t Scene::duplicateObject(uint32_t index) {
     duplicateComponents(meshRenderers, objects, remap, &Object::meshRenderer);
     duplicateComponents(animators, objects, remap, &Object::animator);
     duplicateComponents(lights, objects, remap, &Object::light);
+    duplicateComponents(rigidBodies, objects, remap, &Object::rigidBody);
+    duplicateComponents(fluids, objects, remap, &Object::fluid);
     return static_cast<uint32_t>(remap[index]);
 }
 

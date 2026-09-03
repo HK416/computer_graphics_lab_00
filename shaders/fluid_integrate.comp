@@ -1,0 +1,129 @@
+#version 460
+
+#include "fluid_common.glsl"
+
+// 압력·점성·중력으로 가속을 구해 반암시적 오일러로 적분하고 용기와 강체에 부딪힌다. In 을 읽고 Out 에 쓴다.
+layout(local_size_x = FLUID_GROUP_SIZE) in;
+
+// 속도의 법선 성분을 안쪽으로 향하지 않게 꺾는다. restitution 만큼 튄다.
+void bounce(inout vec3 velocity, vec3 normal, float restitution) {
+    float along = dot(velocity, normal);
+    if (along < 0.0) {
+        velocity -= (1.0 + restitution) * along * normal;
+    }
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.particleCount) {
+        return;
+    }
+    FluidParams params = push.params.item;
+    float h = params.smoothingRadius;
+    float mass = params.gravity.w;
+    float radius = params.containerMin.w;
+    float restitution = params.containerMax.w;
+    float dt = push.dt;
+
+    vec4 self = push.positionsIn.items[i];
+    vec3 position = self.xyz;
+    float density = max(self.w, 1e-6);
+    vec4 selfVelocity = push.velocitiesIn.items[i];
+    vec3 velocity = selfVelocity.xyz;
+    float pressure = selfVelocity.w;
+    ivec3 cell = fluidCell(position, h);
+
+    vec3 force = vec3(0.0);
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                uint bucket = fluidHash(cell + ivec3(dx, dy, dz), params.lattice.w);
+                uint count = min(push.cellCounts.items[bucket], FLUID_CELL_CAPACITY);
+                for (uint k = 0u; k < count; ++k) {
+                    uint j = push.cellParticles.items[bucket * FLUID_CELL_CAPACITY + k];
+                    if (j == i) {
+                        continue;
+                    }
+                    vec4 other = push.positionsIn.items[j];
+                    vec3 delta = position - other.xyz;
+                    float distance = length(delta);
+                    if (distance >= h || distance <= 1e-6) {
+                        continue;
+                    }
+                    float otherDensity = max(other.w, 1e-6);
+                    vec4 otherVelocity = push.velocitiesIn.items[j];
+                    // 압력은 대칭으로 평균 내야 작용·반작용이 맞는다.
+                    force += -mass * (pressure + otherVelocity.w) / (2.0 * otherDensity) * spikyGradient(delta, distance, h);
+                    force += params.viscosity * mass * (otherVelocity.xyz - velocity) / otherDensity *
+                             viscosityLaplacian(distance, h);
+                }
+            }
+        }
+    }
+
+    vec3 acceleration = force / density + params.gravity.xyz;
+    velocity += acceleration * dt;
+    // 한 스텝에 커널 반지름의 일부 이상 움직이지 못하게 잘라 폭주를 막는다.
+    float maxSpeed = 0.4 * h / dt;
+    float speed = length(velocity);
+    if (speed > maxSpeed) {
+        velocity *= maxSpeed / speed;
+    }
+    position += velocity * dt;
+
+    // 용기 벽.
+    vec3 low = params.containerMin.xyz + radius;
+    vec3 high = params.containerMax.xyz - radius;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (position[axis] < low[axis]) {
+            position[axis] = low[axis];
+            if (velocity[axis] < 0.0) {
+                velocity[axis] = -velocity[axis] * restitution;
+            }
+        } else if (position[axis] > high[axis]) {
+            position[axis] = high[axis];
+            if (velocity[axis] > 0.0) {
+                velocity[axis] = -velocity[axis] * restitution;
+            }
+        }
+    }
+
+    // 강체 콜라이더. 일방향이라 입자는 밀려나지만 강체는 밀리지 않는다.
+    for (uint c = 0u; c < params.colliderCount; ++c) {
+        FluidCollider collider = params.colliders[c];
+        if (collider.type == FLUID_COLLIDER_SPHERE) {
+            vec3 delta = position - collider.data0.xyz;
+            float distance = length(delta);
+            float reach = collider.data0.w + radius;
+            if (distance < reach) {
+                vec3 normal = distance > 1e-6 ? delta / distance : vec3(0.0, 1.0, 0.0);
+                position = collider.data0.xyz + normal * reach;
+                bounce(velocity, normal, restitution);
+            }
+        } else if (collider.type == FLUID_COLLIDER_BOX) {
+            vec3 local = (collider.inverseWorld * vec4(position, 1.0)).xyz;
+            // half 는 GLSL 예약어라 이름을 달리 둔다.
+            vec3 halfSize = collider.data0.xyz + radius;
+            if (all(lessThan(abs(local), halfSize))) {
+                // 가장 얕은 면으로 밀어낸다.
+                vec3 gap = halfSize - abs(local);
+                int axis = gap.x < gap.y ? (gap.x < gap.z ? 0 : 2) : (gap.y < gap.z ? 1 : 2);
+                vec3 localNormal = vec3(0.0);
+                localNormal[axis] = local[axis] >= 0.0 ? 1.0 : -1.0;
+                local[axis] = localNormal[axis] * halfSize[axis];
+                position = (collider.world * vec4(local, 1.0)).xyz;
+                bounce(velocity, normalize(mat3(collider.world) * localNormal), restitution);
+            }
+        } else {
+            vec3 normal = collider.data0.xyz;
+            float distance = dot(normal, position) - collider.data0.w;
+            if (distance < radius) {
+                position += normal * (radius - distance);
+                bounce(velocity, normal, restitution);
+            }
+        }
+    }
+
+    push.positionsOut.items[i] = vec4(position, density);
+    push.velocitiesOut.items[i] = vec4(velocity, pressure);
+}

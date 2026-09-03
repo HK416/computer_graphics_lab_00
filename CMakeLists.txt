@@ -101,6 +101,11 @@ set(shader_sources
     shaders/cull_meshlets.comp
     shaders/skin.comp
     shaders/skin_bounds.comp
+    shaders/fluid_emit.comp
+    shaders/fluid_grid.comp
+    shaders/fluid_density.comp
+    shaders/fluid_integrate.comp
+    shaders/fluid_instances.comp
     shaders/hzb_reduce.comp
     shaders/pathtrace.rgen
     shaders/pathtrace.rmiss
@@ -182,6 +187,7 @@ add_executable(cg_lab
     src/gfx/context.cpp
     src/gfx/environment.cpp
     src/gfx/bindless.cpp
+    src/gfx/fluid.cpp
     src/gfx/geometry.cpp
     src/gfx/lod_network.cpp
     src/gfx/profiler.cpp
@@ -200,6 +206,7 @@ add_executable(cg_lab
     src/gfx/upscaler_taau.cpp
     src/gfx/uploader.cpp
     src/gfx/vma_impl.cpp
+    src/physics/rigid_body.cpp
     src/scene/camera.cpp
     src/scene/scene.cpp
     src/scene/scene_io.cpp)
@@ -345,10 +352,11 @@ enable_testing()
 add_executable(cg_lab_tests tests/lod_network_test.cpp src/gfx/lod_network.cpp)
 add_executable(cg_lab_animation_tests tests/animation_test.cpp src/asset/animation.cpp)
 add_executable(cg_lab_camera_tests tests/camera_test.cpp src/scene/camera.cpp)
-add_executable(cg_lab_scene_tests tests/scene_test.cpp src/scene/scene.cpp src/asset/animation.cpp src/core/error.cpp)
+add_executable(cg_lab_scene_tests tests/scene_test.cpp src/scene/scene.cpp src/asset/animation.cpp src/core/error.cpp
+    src/core/job_system.cpp)
 add_executable(cg_lab_scene_io_tests tests/scene_io_test.cpp src/scene/scene_io.cpp src/scene/scene.cpp
     src/scene/camera.cpp
-    src/asset/animation.cpp src/core/error.cpp)
+    src/asset/animation.cpp src/core/error.cpp src/core/job_system.cpp)
 add_executable(cg_lab_profiler_tests tests/profiler_test.cpp src/gfx/profiler_math.cpp)
 add_executable(cg_lab_shadow_tests tests/shadow_test.cpp src/gfx/shadow_math.cpp)
 add_executable(cg_lab_upscaler_tests tests/upscaler_test.cpp src/gfx/upscaler_math.cpp)
@@ -387,7 +395,7 @@ else()
 endif()
 
 target_include_directories(cg_lab_scene_tests PRIVATE src)
-target_link_libraries(cg_lab_scene_tests PRIVATE SDL3::SDL3 spdlog::spdlog glm::glm)
+target_link_libraries(cg_lab_scene_tests PRIVATE SDL3::SDL3 spdlog::spdlog glm::glm Threads::Threads)
 target_compile_definitions(cg_lab_scene_tests PRIVATE GLM_ENABLE_EXPERIMENTAL)
 if(MSVC)
     target_compile_options(cg_lab_scene_tests PRIVATE /W4 /utf-8)
@@ -396,7 +404,8 @@ else()
 endif()
 
 target_include_directories(cg_lab_scene_io_tests PRIVATE src)
-target_link_libraries(cg_lab_scene_io_tests PRIVATE SDL3::SDL3 spdlog::spdlog glm::glm nlohmann_json::nlohmann_json)
+target_link_libraries(cg_lab_scene_io_tests PRIVATE SDL3::SDL3 spdlog::spdlog glm::glm nlohmann_json::nlohmann_json
+    Threads::Threads)
 target_compile_definitions(cg_lab_scene_io_tests PRIVATE GLM_ENABLE_EXPERIMENTAL)
 if(MSVC)
     target_compile_options(cg_lab_scene_io_tests PRIVATE /W4 /utf-8)
@@ -427,12 +436,24 @@ else()
     target_compile_options(cg_lab_upscaler_tests PRIVATE -Wall -Wextra)
 endif()
 
+# 강체 솔버. 장면 그래프 위에서 돌므로 scene 과 작업 큐를 함께 링크한다.
+add_executable(cg_lab_physics_tests tests/physics_test.cpp src/physics/rigid_body.cpp src/scene/scene.cpp
+    src/asset/animation.cpp src/core/error.cpp src/core/job_system.cpp)
+target_include_directories(cg_lab_physics_tests PRIVATE src)
+target_link_libraries(cg_lab_physics_tests PRIVATE SDL3::SDL3 spdlog::spdlog glm::glm Threads::Threads)
+target_compile_definitions(cg_lab_physics_tests PRIVATE GLM_ENABLE_EXPERIMENTAL)
+if(MSVC)
+    target_compile_options(cg_lab_physics_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(cg_lab_physics_tests PRIVATE -Wall -Wextra)
+endif()
+
 # 테스트는 assert 로 확인한다. RelWithDebInfo 의 NDEBUG 를 그대로 두면 검사가 통째로 사라지고
 # 쓰지 않는 변수 경고만 남는다.
 foreach(test_target
         cg_lab_tests cg_lab_animation_tests cg_lab_camera_tests cg_lab_scene_tests
         cg_lab_scene_io_tests cg_lab_profiler_tests cg_lab_shadow_tests cg_lab_concurrency_tests
-        cg_lab_upscaler_tests cg_lab_vertex_pack_tests)
+        cg_lab_upscaler_tests cg_lab_vertex_pack_tests cg_lab_physics_tests)
     if(MSVC)
         target_compile_options(${test_target} PRIVATE /UNDEBUG)
     else()
@@ -455,6 +476,7 @@ add_test(NAME shadow COMMAND cg_lab_shadow_tests)
 add_test(NAME upscaler COMMAND cg_lab_upscaler_tests)
 add_test(NAME concurrency COMMAND cg_lab_concurrency_tests)
 add_test(NAME vertex_pack COMMAND cg_lab_vertex_pack_tests)
+add_test(NAME physics COMMAND cg_lab_physics_tests)
 
 # cmake --build --preset debug --target run 으로 빌드한 뒤 바로 실행한다.
 add_custom_target(run

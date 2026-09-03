@@ -447,11 +447,44 @@ void RayTracer::updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
     vkCmdPipelineBarrier2(commandBuffer, &dependency);
 }
 
+void RayTracer::reserveInstances(uint32_t frameSlot, uint32_t count) {
+    if (instanceBuffers.size() <= frameSlot) {
+        instanceBuffers.resize(frameSlot + 1);
+        instanceCapacities.resize(frameSlot + 1, 0);
+    }
+    // 비어 있어도 구축 입력 주소는 유효해야 하므로 최소 한 칸은 잡아 둔다.
+    uint32_t needed = std::max<uint32_t>(count, 1);
+    if (needed <= instanceCapacities[frameSlot]) {
+        return;
+    }
+    destroyBuffer(context, instanceBuffers[frameSlot]);
+    instanceCapacities[frameSlot] = needed * 2;
+    // 유체 컴퓨트가 앞쪽을 직접 쓰므로 스토리지 용도도 붙인다.
+    instanceBuffers[frameSlot] = createBuffer(
+        context,
+        static_cast<VkDeviceSize>(instanceCapacities[frameSlot]) * sizeof(VkAccelerationStructureInstanceKHR),
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        MemoryLocation::HOST_WRITE,
+        "가속 구조 인스턴스");
+}
+
+VkDeviceAddress RayTracer::instanceBufferAddress(uint32_t frameSlot) const {
+    return frameSlot < instanceBuffers.size() ? instanceBuffers[frameSlot].address : 0;
+}
+
+VkDeviceAddress RayTracer::bottomLevelAddress(uint32_t mesh) const {
+    if (mesh >= bottomLevels.size() || bottomLevels[mesh].handle == VK_NULL_HANDLE) {
+        return 0;
+    }
+    return bottomLevels[mesh].address;
+}
+
 void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
                                const scene::Scene& sceneToTrace,
                                const std::vector<uint32_t>& instanceSlots,
                                const std::vector<uint32_t>& skinnedBlasSlots,
-                               uint32_t frameSlot) {
+                               uint32_t frameSlot,
+                               uint32_t prependedInstances) {
     std::vector<VkAccelerationStructureInstanceKHR> instances;
     instances.reserve(sceneToTrace.objects.size());
 
@@ -488,26 +521,14 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
     }
     // 인스턴스가 비어도 그냥 돌아가지 않는다. 건너뛰면 지운 모델이 담긴 지난 구조가 그대로 남아
     // 경로 추적과 광선 질의 그림자에 계속 보인다.
-    if (instanceBuffers.size() <= frameSlot) {
-        instanceBuffers.resize(frameSlot + 1);
-        instanceCapacities.resize(frameSlot + 1, 0);
-    }
+    // 앞쪽 prependedInstances 칸은 GPU 가 이미 채웠다. 그때는 reserveInstances 가 먼저 불렸으므로 여기서
+    // 버퍼가 바뀌지 않는다.
+    reserveInstances(frameSlot, prependedInstances + static_cast<uint32_t>(instances.size()));
     Buffer& instanceBuffer = instanceBuffers[frameSlot];
-    // 비어 있어도 구축 입력 주소는 유효해야 하므로 최소 한 칸은 잡아 둔다.
-    const auto neededInstances = std::max<uint32_t>(static_cast<uint32_t>(instances.size()), 1);
-    if (neededInstances > instanceCapacities[frameSlot]) {
-        destroyBuffer(context, instanceBuffer);
-        instanceCapacities[frameSlot] = neededInstances * 2;
-        instanceBuffer = createBuffer(context,
-                                      static_cast<VkDeviceSize>(instanceCapacities[frameSlot]) *
-                                          sizeof(VkAccelerationStructureInstanceKHR),
-                                      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                                      MemoryLocation::HOST_WRITE,
-                                      "가속 구조 인스턴스");
-    }
     if (!instances.empty()) {
-        std::memcpy(
-            instanceBuffer.mapped, instances.data(), instances.size() * sizeof(VkAccelerationStructureInstanceKHR));
+        std::memcpy(static_cast<VkAccelerationStructureInstanceKHR*>(instanceBuffer.mapped) + prependedInstances,
+                    instances.data(),
+                    instances.size() * sizeof(VkAccelerationStructureInstanceKHR));
     }
 
     VkAccelerationStructureGeometryKHR geometryInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
@@ -524,7 +545,7 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
     buildInfo.geometryCount = 1;
     buildInfo.pGeometries = &geometryInfo;
 
-    auto instanceCount = static_cast<uint32_t>(instances.size());
+    auto instanceCount = prependedInstances + static_cast<uint32_t>(instances.size());
     VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     getBuildSizes(context.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &instanceCount, &sizes);
 

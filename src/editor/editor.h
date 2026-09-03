@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -87,8 +88,11 @@ private:
     void unparentSelection(scene::Scene& active);
     // 부모를 바꾸되 화면에서의 위치는 그대로 둔다. 순환이면 아무것도 하지 않는다.
     void reparent(scene::Scene& active, int child, int parent);
-    // Ctrl+N/O/S/D, Delete. 글자를 입력하는 중에는 받지 않는다.
+    // Ctrl+N/O/S/D/P, Delete. 글자를 입력하는 중에는 받지 않는다.
     void handleShortcuts(scene::SceneManager& scenes, const gfx::GeometryStore& geometry);
+    // 재생/정지. 재생을 시작할 때 장면을 떠 두고, 멈추면 그 상태로 되돌린다(Unity 와 같다).
+    void startSimulation(scene::SceneManager& scenes);
+    void stopSimulation(scene::SceneManager& scenes);
     void buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStore& geometry);
     // F 키로 선택한 오브젝트를 궤도 중심으로 옮긴다.
     void focusSelected(scene::Scene& active, const gfx::GeometryStore& geometry);
@@ -167,6 +171,9 @@ private:
     bool menuRedo = false;
     // 렌더 설정은 도킹되지 않는 떠 있는 창이다. 메뉴 «설정»으로 여닫는다.
     bool showRenderSettings = false;
+    // 재생을 시작할 때 떠 둔 장면과 그 장면 번호. 정지하면 여기로 되돌린다.
+    std::optional<scene::SceneSnapshot> playSnapshot;
+    size_t playSceneIndex = 0;
     // 장면 뷰에 보여줄 렌더 타깃. 음수면 표시 이미지(기본)다. 층이나 밉이 있는 대상은 slice 로 고른다.
     int selectedTarget = -1;
     int selectedSlice = 0;

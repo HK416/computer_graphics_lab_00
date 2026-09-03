@@ -1,0 +1,24 @@
+#version 460
+
+#include "fluid_common.glsl"
+
+// 방출 상자 안에 입자를 격자로 놓는다. 재생을 시작하거나 설정이 바뀔 때 한 번 돈다.
+layout(local_size_x = FLUID_GROUP_SIZE) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.particleCount) {
+        return;
+    }
+    FluidParams params = push.params.item;
+    uvec3 counts = max(params.lattice.xyz, uvec3(1u));
+    uvec3 index = uvec3(i % counts.x, (i / counts.x) % counts.y, i / (counts.x * counts.y));
+    float spacing = params.emitterHalfExtents.w;
+    // 상자 가운데에 맞춘다. 축마다 (개수-1)×간격 만큼 퍼지고, 세 축의 곱보다 많은 입자는 z 로 이어 쌓인다.
+    vec3 extent = vec3(counts - 1u) * spacing * 0.5;
+    vec3 local = vec3(index) * spacing - extent;
+    vec3 world = (params.emitterWorld * vec4(local, 1.0)).xyz;
+    push.positionsOut.items[i] = vec4(world, params.restDensity);
+    push.velocitiesOut.items[i] = vec4(0.0);
+    push.previousRendered.items[i] = vec4(world, 0.0);
+}

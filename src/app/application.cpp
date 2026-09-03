@@ -17,6 +17,7 @@
 #include "asset/vertex_pack.h"
 #include "core/error.h"
 #include "gfx/uploader.h"
+#include "physics/rigid_body.h"
 #include "scene/scene_io.h"
 
 namespace app {
@@ -155,7 +156,8 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     geometry = std::make_unique<gfx::GeometryStore>(*context);
     registerBuiltinModels();
     loadScenes();
-    renderer = std::make_unique<gfx::Renderer>(*context, *geometry, *bindless, window);
+    renderer = std::make_unique<gfx::Renderer>(*context, *geometry, *bindless, window, jobs);
+    renderer->fluidSphereMesh = sphereMesh;
     editorUi = std::make_unique<editor::Editor>(*context, *renderer, window);
     editorUi->workerCount = jobs.workerCount();
     renderer->debugMode = options.debugMode;
@@ -201,6 +203,9 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     }
     if (!options.scenePath.empty()) {
         openScene(options.scenePath);
+    }
+    if (options.play) {
+        scenes.active().simulating = true;
     }
 }
 
@@ -816,7 +821,19 @@ void Application::run() {
         {
             gfx::ProfilerScope scope(renderer->profiler(), "장면 갱신");
             // 애니메이션은 그리기 전에 진행시켜야 이번 프레임의 조인트 행렬이 올라간다.
-            scenes.active().update(deltaSeconds);
+            scenes.active().update(deltaSeconds, &jobs);
+        }
+        if (scenes.active().simulating) {
+            gfx::ProfilerScope scope(renderer->profiler(), "강체 물리");
+            // 고정 간격으로 나눠 돈다. 프레임이 길어도 여덟 스텝까지만 따라잡아 나선형으로 느려지지 않는다.
+            constexpr float PHYSICS_STEP = 1.0F / 120.0F;
+            physicsAccumulator = std::min(physicsAccumulator + deltaSeconds, PHYSICS_STEP * 8.0F);
+            while (physicsAccumulator >= PHYSICS_STEP) {
+                physics::stepRigidBodies(scenes.active(), PHYSICS_STEP, &jobs);
+                physicsAccumulator -= PHYSICS_STEP;
+            }
+        } else {
+            physicsAccumulator = 0.0F;
         }
         // 밀린 크기 변경은 UI 가 렌더 타겟을 참조하기 전에 끝내야 한다.
         renderer->prepareFrame();

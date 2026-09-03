@@ -92,11 +92,20 @@ public:
     // skinnedBlasSlots 는 오브젝트 인덱스 -> updateSkinnedBottomLevel 에 넘긴 배열의 번호이며,
     // 스킨이 아닌 오브젝트는 NO_SKINNED_BLAS 다.
     // frameSlot 은 진행 중인 프레임 번호. 인스턴스 버퍼를 프레임마다 나눠 쓰는 데 쓴다.
+    // prependedInstances 는 GPU(유체 컴퓨트)가 인스턴스 버퍼 앞쪽에 이미 써 둔 개수. 오브젝트 인스턴스는
+    // 그 뒤에 이어 붙고 구축 개수에 합쳐진다.
     void updateTopLevel(VkCommandBuffer commandBuffer,
                         const scene::Scene& sceneToTrace,
                         const std::vector<uint32_t>& instanceSlots,
                         const std::vector<uint32_t>& skinnedBlasSlots,
-                        uint32_t frameSlot);
+                        uint32_t frameSlot,
+                        uint32_t prependedInstances = 0);
+    // 인스턴스 버퍼를 미리 잡는다. GPU 가 앞쪽을 쓰는 패스는 updateTopLevel 이 버퍼를 다시 잡기 전에
+    // 주소를 기록하므로 먼저 불러야 한다.
+    void reserveInstances(uint32_t frameSlot, uint32_t count);
+    VkDeviceAddress instanceBufferAddress(uint32_t frameSlot) const;
+    // 메쉬의 하위 가속 구조 주소. 없으면(무덤, 미구축) 0.
+    VkDeviceAddress bottomLevelAddress(uint32_t mesh) const;
     void trace(VkCommandBuffer commandBuffer,
                VkExtent2D extent,
                VkDeviceAddress cameraAddress,

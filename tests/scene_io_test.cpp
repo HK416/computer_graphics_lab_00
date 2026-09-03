@@ -74,6 +74,19 @@ scene::Scene makeScene() {
     light.name = "스폿광";
     light.light = 0;
     scene.objects.push_back(std::move(light));
+
+    // 강체와 유체 부품. 헬멧에 상자 강체를, 뿌리에 유체를 단다.
+    scene::RigidBody body;
+    body.shape = scene::ColliderShape::BOX;
+    body.mass = 2.5F;
+    body.kinematic = true;
+    body.halfExtents = glm::vec3{0.5F, 1.0F, 1.5F};
+    scene.attachRigidBody(2, body);
+    scene::Fluid fluid;
+    fluid.particleCount = 4096;
+    fluid.stiffness = 75.0F;
+    fluid.containerMax = glm::vec3{3.0F, 4.0F, 5.0F};
+    scene.attachFluid(0, fluid);
     return scene;
 }
 
@@ -118,6 +131,23 @@ int main() {
     assert(std::abs(loaded.scene.animators[0].speed - 1.5F) < 1e-5F);
 
     assert(std::abs(loaded.scene.ambientIntensity - 0.75F) < 1e-5F);
+
+    // 강체와 유체.
+    assert(loaded.scene.rigidBodies.size() == 1 && loaded.scene.fluids.size() == 1);
+    assert(loaded.scene.objects[2].rigidBody == 0 && loaded.scene.objects[0].fluid == 0);
+    assert(loaded.scene.objects[1].rigidBody == -1 && loaded.scene.objects[1].fluid == -1);
+    const scene::RigidBody& body = loaded.scene.rigidBodies[0];
+    assert(body.shape == scene::ColliderShape::BOX && body.kinematic);
+    assert(std::abs(body.mass - 2.5F) < 1e-5F && std::abs(body.halfExtents.z - 1.5F) < 1e-5F);
+    assert(body.velocity == glm::vec3{0.0F} && "속도는 저장하지 않는다");
+    assert(loaded.scene.fluids[0].particleCount == 4096);
+    assert(std::abs(loaded.scene.fluids[0].stiffness - 75.0F) < 1e-5F);
+    assert(std::abs(loaded.scene.fluids[0].containerMax.z - 5.0F) < 1e-5F);
+
+    // 부품이 없던 옛 판(1) 파일도 그대로 읽힌다.
+    scene::SceneFile old = scene::readScene(R"({"version":1,"name":"옛 장면","objects":[{"name":"a"}]})");
+    assert(old.scene.name == "옛 장면" && old.scene.objects.size() == 1);
+    assert(old.scene.rigidBodies.empty() && old.scene.objects[0].rigidBody == -1);
 
     // 환경 설정도 장면과 함께 저장되어야 한다. 안 그러면 장면을 다시 열 때 조명이 달라진다.
     const scene::Environment& environment = loaded.scene.environment;

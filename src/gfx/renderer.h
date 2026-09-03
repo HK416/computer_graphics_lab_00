@@ -15,6 +15,7 @@
 #include <vulkan/vulkan.h>
 
 #include "gfx/environment.h"
+#include "gfx/fluid.h"
 #include "gfx/lod_network.h"
 #include "gfx/profiler.h"
 #include "gfx/raytracing.h"
@@ -23,6 +24,10 @@
 #include "gfx/upscaler.h"
 
 struct SDL_Window;
+
+namespace core {
+class JobSystem;
+}
 
 namespace scene {
 struct Scene;
@@ -121,6 +126,12 @@ struct FrameBatches {
     // 컴퓨트 컬링이 쓸 버킷별 간접 그리기 명령 구간. count 는 상한이고 실제 개수는 GPU 가 센다.
     DrawBatches meshletDraws;
     uint32_t instanceCount = 0;
+    // 유체마다 인스턴스 드로우 하나(instanceCount = 입자 수). 오브젝트 명령 뒤에 이어진다. 버킷 구간은 0 부터
+    // 연속이라 거기 끼워 넣을 수 없고, 입자마다 meshlet 그룹을 두면 디스패치 한도에 걸리므로 고전
+    // 인스턴스 드로우로만 그린다.
+    DrawBatch fluidDraws;
+    // 유체 입자 인스턴스가 시작하는 슬롯. 오브젝트 인스턴스 바로 뒤다.
+    uint32_t fluidInstanceBase = 0;
 };
 
 // 화면 크기에 맞춰 다시 만들어지는 오프스크린 대상들. 셰이더에서 읽으려고 bindless 슬롯도 함께 잡는다.
@@ -210,7 +221,12 @@ struct RenderTargets {
 
 class Renderer {
 public:
-    Renderer(Context& context, GeometryStore& geometry, BindlessTextures& bindless, SDL_Window* window);
+    // jobs 는 프레임마다 인스턴스 채우기와 그림자 시점별 컬링을 워커에 나누는 데 쓴다.
+    Renderer(Context& context,
+             GeometryStore& geometry,
+             BindlessTextures& bindless,
+             SDL_Window* window,
+             core::JobSystem& jobs);
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
@@ -337,6 +353,8 @@ public:
     uint32_t pathTraceSamples() const { return pathSampleCount; }
     // 설정을 바꾸면 쌓인 표본이 섞이므로 편집기가 이걸 눌러 처음부터 다시 쌓게 한다.
     void resetPathAccumulation() { pathSampleCount = 0; }
+    // 유체 입자를 그릴 내장 구 메쉬. 애플리케이션이 등록한 번호를 넣는다. 없으면 유체를 그리지 않는다.
+    uint32_t fluidSphereMesh = 0xFFFFFFFFU;
     // mesh shader 미지원 장치에서는 켤 수 없다.
     bool useMeshShader = false;
     bool meshShaderAvailable() const { return meshShaderPipelines[0] != VK_NULL_HANDLE; }
@@ -437,6 +455,13 @@ private:
     void reserveMeshletVisibility(uint32_t meshletCount);
     // 스킨 인스턴스의 변형 정점과 meshlet 경계 구를 만든다. 그림자 패스보다 먼저 온다.
     void recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame);
+    // 유체를 진행하고 입자 인스턴스를 쓴다. 스킨 패스 뒤, 그림자 패스 앞. wantsTlas 면 상위 가속 구조
+    // 인스턴스도 앞쪽에 써 두고 updateAccelerationStructures 가 그 뒤에 오브젝트를 잇는다.
+    void recordFluidPass(VkCommandBuffer commandBuffer,
+                         const Frame& frame,
+                         const FrameBatches& batches,
+                         const scene::Scene& scene,
+                         bool wantsTlas);
     // 광선 경로가 이번 프레임에 쓸 가속 구조를 최신으로 맞춘다.
     void updateAccelerationStructures(VkCommandBuffer commandBuffer, const scene::Scene& scene);
     void recordHzbPass(VkCommandBuffer commandBuffer);
@@ -455,6 +480,7 @@ private:
     Context& context;
     GeometryStore& geometry;
     BindlessTextures& bindless;
+    core::JobSystem& jobs;
     std::unique_ptr<Swapchain> swapchain;
     RenderTargets targets;
     VkSampler postSampler = VK_NULL_HANDLE;
@@ -563,6 +589,12 @@ private:
     std::vector<SkinnedInstance> skinnedInstances;
     // 오브젝트 인덱스 -> skinnedInstances 번호. 스킨이 아니면 RayTracer::NO_SKINNED_BLAS.
     std::vector<uint32_t> objectSkinnedBlas;
+    // GPU SPH. 장면의 유체 부품마다 상태를 들고, 입자 인스턴스를 프레임 인스턴스 버퍼 꼬리에 쓴다.
+    std::unique_ptr<FluidSimulator> fluid;
+    // 유체마다 용기의 경계 구. 그림자 시점 컬링이 쓴다.
+    std::vector<glm::vec4> fluidBounds;
+    // 이번 프레임 유체 패스가 상위 가속 구조 인스턴스 버퍼 앞쪽에 써 둔 입자 수.
+    uint32_t fluidTlasPrepended = 0;
     VkPipelineLayout hzbPipelineLayout = VK_NULL_HANDLE;
     VkPipeline hzbPipeline = VK_NULL_HANDLE;
     // meshlet 가시성 비트. 프레임을 넘어 살아남으므로 프레임별 버퍼가 아니다. 낡은 비트는 1차

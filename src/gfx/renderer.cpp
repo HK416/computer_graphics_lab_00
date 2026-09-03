@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -22,6 +23,7 @@
 
 #include "asset/model.h"
 #include "core/error.h"
+#include "core/job_system.h"
 #include "gfx/bindless.h"
 #include "gfx/context.h"
 #include "gfx/geometry.h"
@@ -332,8 +334,9 @@ void setFullViewport(VkCommandBuffer commandBuffer, VkExtent2D extent) {
 
 } // namespace
 
-Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& bindless, SDL_Window* window)
-    : context(context), geometry(geometry), bindless(bindless), frameProfiler(context, FRAMES_IN_FLIGHT) {
+Renderer::Renderer(
+    Context& context, GeometryStore& geometry, BindlessTextures& bindless, SDL_Window* window, core::JobSystem& jobs)
+    : context(context), geometry(geometry), bindless(bindless), jobs(jobs), frameProfiler(context, FRAMES_IN_FLIGHT) {
     swapchain = std::make_unique<Swapchain>(context, window, vsync);
     currentDisplayExtent = swapchain->extent;
     currentRenderExtent = swapchain->extent;
@@ -384,6 +387,7 @@ Renderer::Renderer(Context& context, GeometryStore& geometry, BindlessTextures& 
     createShadowPipeline();
     createSsaoPipelines();
     environment = std::make_unique<EnvironmentMap>(context, bindless);
+    fluid = std::make_unique<FluidSimulator>(context, bindless);
 
     VkSemaphoreTypeCreateInfo timelineInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
     timelineInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -1112,7 +1116,7 @@ void Renderer::buildShadowDraws(Frame& frame, const FrameBatches& batches, const
         shadowLayerDirty[layer] = changed ? 1 : 0;
     }
 
-    uint32_t casterCount = 0;
+    uint32_t casterCount = batches.fluidDraws.count;
     for (size_t mode = 0; mode < TRANSLUCENT_MODE; ++mode) {
         casterCount += batches.draws[mode][0].count + batches.draws[mode][1].count;
     }
@@ -1128,15 +1132,20 @@ void Renderer::buildShadowDraws(Frame& frame, const FrameBatches& batches, const
     float sweep = 2.0F * sceneRadius;
 
     // 매핑된 버퍼가 아니라 CPU 사본에서 읽는다. buildDrawCommands 가 같은 프레임에 채워 둔다.
+    // 시점마다 casterCount 칸짜리 구간을 미리 나눠 두어 워커가 서로 다른 자리에 쓴다. 잠금도 원자 증가도
+    // 필요 없고, 남는 칸은 아무 구간도 가리키지 않아 그리지 않는다.
     const VkDrawIndexedIndirectCommand* source = drawCommands.data();
     shadowDrawData.resize(shadowDrawsTotal);
     auto* destination = shadowDrawData.data();
-    uint32_t cursor = 0;
+    auto* mapped = static_cast<VkDrawIndexedIndirectCommand*>(frame.shadowDrawBuffer.mapped);
+    std::atomic<uint32_t> issued{0};
 
-    for (size_t view = 0; view < shadowViews.size(); ++view) {
+    auto cullView = [&](uint32_t view) {
         const ShadowView& shadowView = shadowViews[view];
         std::array<glm::vec4, MAX_FRUSTUM_PLANES> planes{};
         uint32_t planeCount = extractFrustumPlanes(shadowView.viewProjection, planes, true);
+        uint32_t base = view * casterCount;
+        uint32_t cursor = base;
 
         for (size_t mode = 0; mode < TRANSLUCENT_MODE; ++mode) {
             DrawBatch& batch = shadowBatches[view * TRANSLUCENT_MODE + mode];
@@ -1163,12 +1172,28 @@ void Renderer::buildShadowDraws(Frame& frame, const FrameBatches& batches, const
                 }
                 destination[cursor++] = source[slot];
             }
+            // 유체 입자는 불투명 단면 구간에 인스턴스 드로우로 붙는다. 용기 구가 시점에 걸리면 통째로 넣는다.
+            if (mode == 0) {
+                for (uint32_t f = 0; f < batches.fluidDraws.count; ++f) {
+                    const glm::vec4& sphere = fluidBounds[f];
+                    if (shadowViewCulling && !sphereInFrustum(planes, planeCount, glm::vec3(sphere), sphere.w)) {
+                        continue;
+                    }
+                    destination[cursor++] = source[batches.fluidDraws.first + f];
+                }
+            }
             batch.count = cursor - batch.first;
         }
-    }
-    shadowDrawsIssued = cursor;
-    std::copy_n(
-        shadowDrawData.data(), cursor, static_cast<VkDrawIndexedIndirectCommand*>(frame.shadowDrawBuffer.mapped));
+        // 이 시점 몫만 매핑된 버퍼로 옮긴다. 쓰기 결합 메모리라 순서대로 한 번에 쓴다.
+        std::copy_n(destination + base, cursor - base, mapped + base);
+        issued.fetch_add(cursor - base, std::memory_order_relaxed);
+    };
+    jobs.parallelFor(static_cast<uint32_t>(shadowViews.size()), 1, [&cullView](uint32_t begin, uint32_t end) {
+        for (uint32_t view = begin; view < end; ++view) {
+            cullView(view);
+        }
+    });
+    shadowDrawsIssued = issued.load(std::memory_order_relaxed);
 }
 
 void Renderer::reserveMeshletDraws(Frame& frame, uint32_t drawCount) {
@@ -2518,10 +2543,15 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
 }
 
 FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene) {
-    reserveInstances(frame, static_cast<uint32_t>(scene.objects.size()));
+    // 유체 입자는 오브젝트 인스턴스 뒤에 이어 붙으므로 그만큼 더 잡는다. 내장 구가 없으면 그리지 않는다.
+    bool fluidActive = fluid->prepare(scene, &scene != lastScene);
+    uint32_t particleTotal = geometry.meshLive(fluidSphereMesh) ? fluid->totalParticles() : 0;
+    reserveInstances(frame, static_cast<uint32_t>(scene.objects.size()) + particleTotal);
 
-    // 장면이 통째로 바뀌면(장면 전환) 프레임 캐시가 다른 장면 것이다.
-    sceneChangedThisFrame = &scene != lastScene || scene.revision() != lastSceneRevision;
+    // 장면이 통째로 바뀌면(장면 전환) 프레임 캐시가 다른 장면 것이다. 유체가 움직이는 프레임도 장면이
+    // 바뀐 것으로 친다. 가속 구조 재구축, 그림자 캐시 무효화, 경로 추적 누적 초기화가 한꺼번에 맞는다.
+    sceneChangedThisFrame =
+        &scene != lastScene || scene.revision() != lastSceneRevision || (fluidActive && particleTotal > 0);
     // 오브젝트 번호는 추가/삭제로 밀리므로 구성이 바뀐 프레임에는 지난 값을 버린다. 그 한 프레임만
     // 변위가 0 이고 다음 프레임부터 다시 맞는다. 장면 자체가 바뀐 경우도 같다.
     bool temporalReset = &scene != lastScene || scene.topologyRevision() != lastTopologyRevision ||
@@ -2655,10 +2685,14 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
 
     instanceData.resize(scene.objects.size());
     auto* instances = instanceData.data();
+    // 유체마다 드로우 하나가 오브젝트 명령 뒤에 온다.
+    uint32_t fluidDrawCount = particleTotal > 0 ? fluid->fluidCount() : 0;
+    batches.fluidDraws = DrawBatch{static_cast<uint32_t>(scene.objects.size()), fluidDrawCount};
+    batches.fluidInstanceBase = static_cast<uint32_t>(scene.objects.size());
     // 그리기 명령은 CPU 사본에 먼저 쓴다. 그림자 시점마다 이 명령을 골라 복사하는데, 매핑된 쓰기 결합
     // 메모리를 읽으면 캐시가 없어 오브젝트 만 개에서 프레임당 100 ms 를 넘긴다.
-    drawCommands.resize(scene.objects.size());
-    drawMeshletData.resize(scene.objects.size());
+    drawCommands.resize(scene.objects.size() + fluidDrawCount);
+    drawMeshletData.resize(scene.objects.size() + fluidDrawCount);
     auto* draws = drawCommands.data();
     std::vector<GpuMeshletGroup> groupData(totalGroups);
     auto* groups = groupData.data();
@@ -2672,17 +2706,33 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         }
     }
 
+    // 슬롯 배정은 버킷 커서를 순서대로 밀어야 해서 직렬이다. 채우기는 오브젝트마다 독립이라 워커에 나눈다.
+    // 각 오브젝트가 쓸 그룹·가시성 비트 시작도 여기서 미리 정한다.
+    std::vector<uint32_t> objectGroupBase(scene.objects.size(), 0);
+    std::vector<uint32_t> objectVisibilityBase(scene.objects.size(), 0);
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
         if (!drawable(index)) {
             continue;
         }
         auto [mode, sided] = bucketOf(index);
-        uint32_t slot = drawCursors[mode][sided]++;
+        objectInstanceSlots[index] = drawCursors[mode][sided]++;
+        objectGroupBase[index] = groupCursors[mode][sided];
+        if (needMeshletGroups) {
+            groupCursors[mode][sided] += groupsFor(index);
+        }
+        objectVisibilityBase[index] = visibilityCursor;
+        visibilityCursor += geometry.mesh(scene.meshOf(index)).meshletCount;
+    }
 
+    auto fillObject = [&](uint32_t index) {
+        uint32_t slot = objectInstanceSlots[index];
+        if (slot == INVALID_INSTANCE_SLOT) {
+            return;
+        }
+        auto [mode, sided] = bucketOf(index);
         const GpuMesh& mesh = geometry.mesh(scene.meshOf(index));
         const GpuMeshLod& lod = lodFor(index);
         const glm::mat4& model = scene.world(index);
-        objectInstanceSlots[index] = slot;
 
         instances[slot].model = model;
         instances[slot].previousModel = temporalReset ? model : previousWorld[index];
@@ -2691,32 +2741,12 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         instances[slot].meshIndex = scene.meshOf(index);
         instances[slot].bucket = static_cast<uint32_t>(mode * 2 + sided);
         instances[slot].bucketBase = batches.meshletDraws[mode][sided].first;
-        uint32_t jointOffset = jointOffsetFor(index);
-        instances[slot].jointOffset = jointOffset;
-
-        // 스킨 인스턴스는 변형 정점을 따로 뽑아 두고 래스터와 광선 경로가 모두 그 구간을 읽는다.
-        // 같은 메쉬를 여러 오브젝트가 서로 다른 포즈로 쓸 수 있어 오브젝트마다 하나씩 잡는다.
-        // 절대 위치는 버퍼 용량이 정해진 뒤 채운다.
+        instances[slot].jointOffset = jointOffsetFor(index);
+        // 스킨 인스턴스의 변형 정점 위치는 버퍼 용량이 정해진 뒤 채운다.
         instances[slot].skinnedVertexOffset = NO_SKINNED_VERTICES;
         instances[slot].previousSkinnedVertexOffset = NO_SKINNED_VERTICES;
         instances[slot].skinnedMeshletOffset = 0;
-        instances[slot].visibilityBase = visibilityCursor;
-        visibilityCursor += mesh.meshletCount;
-        if (jointOffset != NO_JOINTS) {
-            uint32_t vertexCount = geometry.meshVertexCount(scene.meshOf(index));
-            objectSkinnedBlas[index] = static_cast<uint32_t>(skinDispatches.size());
-            skinDispatches.push_back(SkinDispatch{static_cast<uint32_t>(mesh.vertexOffset),
-                                                  skinnedVertexCursor,
-                                                  jointOffset,
-                                                  vertexCount,
-                                                  geometry.meshSkinOffset(scene.meshOf(index)),
-                                                  mesh.meshletOffset,
-                                                  mesh.meshletCount,
-                                                  skinnedMeshletCursor});
-            skinnedSlots.emplace_back(slot, objectSkinnedBlas[index]);
-            skinnedVertexCursor += vertexCount;
-            skinnedMeshletCursor += mesh.meshletCount;
-        }
+        instances[slot].visibilityBase = objectVisibilityBase[index];
 
         draws[slot].indexCount = lod.indexCount;
         draws[slot].instanceCount = 1;
@@ -2727,14 +2757,69 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         // 명령 하나가 LOD 단계 하나를 통째로 그리므로 meshlet 은 그 단계의 첫 것으로 대표한다.
         drawMeshletData[slot] = lod.meshletOffset;
 
-        auto [meshletBase, meshletTotal] = meshletRangeFor(index);
-        for (uint32_t group = 0; needMeshletGroups && group < groupsFor(index); ++group) {
-            uint32_t groupSlot = groupCursors[mode][sided]++;
-            uint32_t first = group * MESHLET_GROUP_SIZE;
-            groups[groupSlot].instanceIndex = slot;
-            groups[groupSlot].firstMeshlet = meshletBase + first;
-            groups[groupSlot].meshletCount = std::min(MESHLET_GROUP_SIZE, meshletTotal - first);
-            groups[groupSlot].padding = 0;
+        if (needMeshletGroups) {
+            auto [meshletBase, meshletTotal] = meshletRangeFor(index);
+            uint32_t groupCount = groupsFor(index);
+            for (uint32_t group = 0; group < groupCount; ++group) {
+                uint32_t groupSlot = objectGroupBase[index] + group;
+                uint32_t first = group * MESHLET_GROUP_SIZE;
+                groups[groupSlot].instanceIndex = slot;
+                groups[groupSlot].firstMeshlet = meshletBase + first;
+                groups[groupSlot].meshletCount = std::min(MESHLET_GROUP_SIZE, meshletTotal - first);
+                groups[groupSlot].padding = 0;
+            }
+        }
+    };
+    if (!scene.objects.empty()) {
+        jobs.parallelFor(static_cast<uint32_t>(scene.objects.size()), 256, [&fillObject](uint32_t begin, uint32_t end) {
+            for (uint32_t index = begin; index < end; ++index) {
+                fillObject(index);
+            }
+        });
+    }
+
+    // 스킨 인스턴스는 변형 정점을 따로 뽑아 두고 래스터와 광선 경로가 모두 그 구간을 읽는다. 같은 메쉬를
+    // 여러 오브젝트가 서로 다른 포즈로 쓸 수 있어 오브젝트마다 하나씩 잡는다. 디스패치 순서가 곧 하위 가속
+    // 구조 번호라 직렬로 모은다.
+    for (uint32_t index = 0; index < scene.objects.size(); ++index) {
+        uint32_t slot = objectInstanceSlots[index];
+        if (slot == INVALID_INSTANCE_SLOT || instances[slot].jointOffset == NO_JOINTS) {
+            continue;
+        }
+        const GpuMesh& mesh = geometry.mesh(scene.meshOf(index));
+        uint32_t vertexCount = geometry.meshVertexCount(scene.meshOf(index));
+        objectSkinnedBlas[index] = static_cast<uint32_t>(skinDispatches.size());
+        skinDispatches.push_back(SkinDispatch{static_cast<uint32_t>(mesh.vertexOffset),
+                                              skinnedVertexCursor,
+                                              instances[slot].jointOffset,
+                                              vertexCount,
+                                              geometry.meshSkinOffset(scene.meshOf(index)),
+                                              mesh.meshletOffset,
+                                              mesh.meshletCount,
+                                              skinnedMeshletCursor});
+        skinnedSlots.emplace_back(slot, objectSkinnedBlas[index]);
+        skinnedVertexCursor += vertexCount;
+        skinnedMeshletCursor += mesh.meshletCount;
+    }
+
+    // 유체 드로우. 입자 인스턴스는 유체 패스가 GPU 에서 채우고, 여기서는 구의 0단계 LOD 를 입자 수만큼 그리는
+    // 명령만 둔다. 경계는 용기 구로 두어 그림자 컬링이 보수적으로 남긴다.
+    fluidBounds.assign(fluidDrawCount, glm::vec4{0.0F});
+    if (fluidDrawCount > 0) {
+        const GpuMesh& sphere = geometry.mesh(fluidSphereMesh);
+        const GpuMeshLod& lod = geometry.lod(sphere.lodOffset);
+        uint32_t particleBase = batches.fluidInstanceBase;
+        for (uint32_t f = 0; f < fluidDrawCount; ++f) {
+            uint32_t slot = batches.fluidDraws.first + f;
+            uint32_t count = fluid->particleCount(f);
+            draws[slot].indexCount = lod.indexCount;
+            draws[slot].instanceCount = count;
+            draws[slot].firstIndex = lod.indexOffset;
+            draws[slot].vertexOffset = sphere.vertexOffset;
+            draws[slot].firstInstance = particleBase;
+            drawMeshletData[slot] = lod.meshletOffset;
+            fluidBounds[f] = fluid->bounds(f);
+            particleBase += count;
         }
     }
 
@@ -2989,6 +3074,47 @@ void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer,
             }
         }
     }
+
+    // 유체 입자. 어느 래스터 경로든 고전 정점 셰이더의 인스턴스 드로우 하나로 그린다. 두 패스 컬링에서는
+    // 1차에만 그린다(오클루전 컬링 대상이 아니다).
+    // ponytail: 입자 단위 오클루전 컬링은 없다. 필요하면 입자마다 meshlet 그룹을 두되 디스패치 한도를 본다.
+    if (!translucentPass && cullPhase != CULL_PHASE_SECOND && batches.fluidDraws.count > 0) {
+        VkPipeline pipeline = wireframe      ? wireframePipeline
+                              : rayQueryPass ? meshRayQueryPipelines[0]
+                                             : meshPipelines[0];
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vkCmdSetCullMode(commandBuffer, VK_CULL_MODE_BACK_BIT);
+        vkCmdPushConstants(commandBuffer,
+                           meshPipelineLayout,
+                           scenePushStages,
+                           offsetof(ScenePushConstants, meshletGroupBase),
+                           sizeof(uint32_t),
+                           &batches.fluidDraws.first);
+        // 컴퓨트 컬링 경로는 명령별 meshlet 을 GPU 가 쓴 버퍼로 가리킨다. 유체 명령은 CPU 것에 있다.
+        VkDeviceAddress cpuDrawMeshlets = frame.drawMeshletBuffer.address;
+        if (cullPath) {
+            vkCmdPushConstants(commandBuffer,
+                               meshPipelineLayout,
+                               scenePushStages,
+                               offsetof(ScenePushConstants, drawMeshlets),
+                               sizeof(VkDeviceAddress),
+                               &cpuDrawMeshlets);
+        }
+        vkCmdDrawIndexedIndirect(commandBuffer,
+                                 frame.drawBuffer.handle,
+                                 batches.fluidDraws.first * DRAW_STRIDE,
+                                 batches.fluidDraws.count,
+                                 static_cast<uint32_t>(DRAW_STRIDE));
+        if (cullPath) {
+            VkDeviceAddress gpuDrawMeshlets = frame.meshletDrawMeshletBuffer.address;
+            vkCmdPushConstants(commandBuffer,
+                               meshPipelineLayout,
+                               scenePushStages,
+                               offsetof(ScenePushConstants, drawMeshlets),
+                               sizeof(VkDeviceAddress),
+                               &gpuDrawMeshlets);
+        }
+    }
 }
 
 void Renderer::updateLodNetwork(const scene::Scene& scene, Frame& frame, float projectionScale) {
@@ -3234,7 +3360,48 @@ void Renderer::updateAccelerationStructures(VkCommandBuffer commandBuffer, const
                               scene,
                               objectInstanceSlots,
                               objectSkinnedBlas,
-                              static_cast<uint32_t>(frameIndex % FRAMES_IN_FLIGHT));
+                              static_cast<uint32_t>(frameIndex % FRAMES_IN_FLIGHT),
+                              fluidTlasPrepended);
+}
+
+void Renderer::recordFluidPass(VkCommandBuffer commandBuffer,
+                               const Frame& frame,
+                               const FrameBatches& batches,
+                               const scene::Scene& scene,
+                               bool wantsTlas) {
+    auto slot = static_cast<uint32_t>(frameIndex % FRAMES_IN_FLIGHT);
+    uint32_t particles = fluid->totalParticles();
+    VkDeviceAddress tlasAddress = 0;
+    VkDeviceAddress sphereBlas = 0;
+    if (wantsTlas) {
+        sphereBlas = rayTracer->bottomLevelAddress(fluidSphereMesh);
+        if (sphereBlas != 0) {
+            // updateTopLevel 이 기록 중에 버퍼를 다시 잡으면 여기서 넘긴 주소가 낡는다. 미리 잡아 둔다.
+            rayTracer->reserveInstances(slot, particles + batches.instanceCount);
+            tlasAddress = rayTracer->instanceBufferAddress(slot);
+            fluidTlasPrepended = particles;
+        }
+    }
+    uint32_t base = 0;
+    for (uint32_t f = 0; f < batches.fluidDraws.count; ++f) {
+        uint32_t count = fluid->particleCount(f);
+        if (count == 0) {
+            continue;
+        }
+        fluid->record(commandBuffer,
+                      slot,
+                      f,
+                      scene,
+                      frameDeltaSeconds,
+                      frame.instanceBuffer.address,
+                      batches.fluidInstanceBase + base,
+                      tlasAddress,
+                      base,
+                      sphereBlas,
+                      fluidSphereMesh,
+                      temporalResetThisFrame);
+        base += count;
+    }
 }
 
 void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, const scene::Scene& scene) {
@@ -3517,6 +3684,17 @@ void Renderer::recordCommands(Frame& frame,
 
     // 변형 정점은 그림자·장면·광선 경로가 모두 읽으므로 맨 먼저 만든다.
     recordSkinPass(commandBuffer, frame);
+
+    // 유체 입자 인스턴스도 같은 이유로 그림자보다 앞이다. 광선 기능이 켜져 있고 구의 하위 구조가 있으면
+    // 상위 가속 구조 인스턴스도 함께 써 둔다. ensureBottomLevel 은 drawFrame 이 이미 불렀다.
+    fluidTlasPrepended = 0;
+    if (batches.fluidDraws.count > 0) {
+        bool wantsTlas = rayTracer != nullptr && rayTracer->bottomLevelReady() &&
+                         (pathTracing || ((useRayQueryShadows || reflectionsActive()) && rayQueryShadowsAvailable()));
+        uint32_t fluidZone = frameProfiler.begin("유체", commandBuffer);
+        recordFluidPass(commandBuffer, frame, batches, scene, wantsTlas);
+        frameProfiler.end(fluidZone, commandBuffer);
+    }
 
     // 그림자 아틀라스는 장면 패스보다 먼저 채워야 한다. 경로 추적은 아틀라스를 읽지 않으므로 건너뛴다.
     if (!pathTracing && !shadowViews.empty()) {

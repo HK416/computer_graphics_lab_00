@@ -1,0 +1,21 @@
+#version 460
+
+#include "fluid_common.glsl"
+
+// 입자를 해시 격자의 고정 용량 버킷에 넣는다. 원자 카운터 하나로 자리를 받으므로 잠금이 없다.
+// ponytail: 버킷이 넘치면 그 입자는 이웃 검색에서 빠진다(자기 밀도만 남는다). 정확히 하려면 계수 정렬로 바꾼다.
+layout(local_size_x = FLUID_GROUP_SIZE) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.particleCount) {
+        return;
+    }
+    FluidParams params = push.params.item;
+    vec3 position = push.positionsIn.items[i].xyz;
+    uint cell = fluidHash(fluidCell(position, params.smoothingRadius), params.lattice.w);
+    uint slot = atomicAdd(push.cellCounts.items[cell], 1u);
+    if (slot < FLUID_CELL_CAPACITY) {
+        push.cellParticles.items[cell * FLUID_CELL_CAPACITY + slot] = i;
+    }
+}

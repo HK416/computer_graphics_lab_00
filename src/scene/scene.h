@@ -12,6 +12,10 @@
 #include "asset/model.h"
 #include "scene/camera.h"
 
+namespace core {
+class JobSystem;
+} // namespace core
+
 namespace scene {
 
 inline constexpr uint32_t INVALID_MESH = 0xFFFFFFFFU;
@@ -83,6 +87,51 @@ struct MeshRenderer {
     bool operator==(const MeshRenderer&) const = default;
 };
 
+enum class ColliderShape : uint32_t {
+    SPHERE = 0,
+    BOX = 1,
+    // 오브젝트의 +Y 를 법선으로 하는 무한 평면. 바닥으로 쓴다.
+    PLANE = 2,
+};
+
+// 강체 부품. 재생 중에 physics 가 세계 공간에서 적분해 오브젝트 변환에 되돌려 쓴다. 운동학 물체는
+// 힘을 받지 않고 다른 물체만 밀어낸다. 평면은 늘 운동학으로 다룬다.
+struct RigidBody {
+    ColliderShape shape = ColliderShape::SPHERE;
+    float mass = 1.0F;
+    bool useGravity = true;
+    bool kinematic = false;
+    float restitution = 0.3F;
+    float friction = 0.5F;
+    // 구 반지름과 상자 반쪽 크기(오브젝트 지역 공간, 크기 변환 전).
+    float radius = 0.5F;
+    glm::vec3 halfExtents{0.5F};
+    // 시뮬레이션 상태. 재생을 멈추면 스냅샷 복귀로 함께 되돌아간다.
+    glm::vec3 velocity{0.0F};
+    glm::vec3 angularVelocity{0.0F};
+
+    bool operator==(const RigidBody&) const = default;
+};
+
+// 유체 부품. 입자 상태는 GPU 에만 있고 여기에는 방출·시뮬레이션 설정만 둔다. 방출 상자는 오브젝트
+// 지역 공간이고 용기는 월드 공간이다. 값이 바뀌면 렌더러가 입자를 다시 뿌린다.
+struct Fluid {
+    glm::vec3 emitterHalfExtents{0.5F};
+    uint32_t particleCount = 8192;
+    float particleRadius = 0.025F;
+    // SPH 커널 반지름. 입자 간격(2r)의 두 배쯤이 무난하다.
+    float smoothingRadius = 0.1F;
+    float restDensity = 1000.0F;
+    // 압력 = 강성 × (밀도 − 기준 밀도). 크면 덜 눌리지만 시간 간격을 줄여야 한다.
+    float stiffness = 50.0F;
+    float viscosity = 0.5F;
+    glm::vec3 containerMin{-1.0F, 0.0F, -1.0F};
+    glm::vec3 containerMax{1.0F, 2.0F, 1.0F};
+    glm::vec3 gravity{0.0F, -9.81F, 0.0F};
+
+    bool operator==(const Fluid&) const = default;
+};
+
 struct Object {
     std::string name;
     // 부모 기준 지역 변환. 세계 변환은 Scene::worldMatrix 가 부모를 거슬러 올라가 만든다.
@@ -94,6 +143,8 @@ struct Object {
     int32_t meshRenderer = -1;
     int32_t animator = -1;
     int32_t light = -1;
+    int32_t rigidBody = -1;
+    int32_t fluid = -1;
 
     bool operator==(const Object&) const = default;
 };
@@ -142,6 +193,8 @@ struct SceneSnapshot {
     std::vector<MeshRenderer> meshRenderers;
     std::vector<Animator> animators;
     std::vector<Light> lights;
+    std::vector<RigidBody> rigidBodies;
+    std::vector<Fluid> fluids;
     glm::vec3 ambientColor{0.25F};
     float ambientIntensity = 1.0F;
     Environment environment;
@@ -154,7 +207,11 @@ struct Scene {
     std::vector<MeshRenderer> meshRenderers;
     std::vector<Animator> animators;
     std::vector<Light> lights;
+    std::vector<RigidBody> rigidBodies;
+    std::vector<Fluid> fluids;
     Camera camera;
+    // 재생 중인지. 참일 때만 물리가 돌고, 편집기는 되돌리기 기록을 멈춘다. 저장하지 않는다.
+    bool simulating = false;
     // 조명이 닿지 않는 곳을 채우는 균일 환경광.
     glm::vec3 ambientColor{0.25F};
     float ambientIntensity = 1.0F;
@@ -162,8 +219,8 @@ struct Scene {
     PostProcess post;
 
     // 애니메이션 시간을 진행시키고 조인트 행렬을 다시 만든다. 재생 중이 아니고 클립도 그대로면
-    // 포즈 계산 자체를 건너뛴다.
-    void update(float deltaSeconds);
+    // 포즈 계산 자체를 건너뛴다. jobs 가 있으면 애니메이터마다 독립이라 워커에 나눈다.
+    void update(float deltaSeconds, core::JobSystem* jobs = nullptr);
 
     // 프레임에 한 번, 장면을 읽기 직전에 부른다. 지난 사본과 비교해 변한 것을 찾고 세계 변환과
     // 가시성 캐시를 다시 만든다.
@@ -203,6 +260,12 @@ struct Scene {
     uint32_t meshOf(uint32_t index) const;
     // 그 메쉬가 쓰는 스킨 번호. 없으면 -1.
     int32_t skinOf(uint32_t index) const;
+    // 부품을 붙이고 첨자를 돌려준다. 이미 붙어 있으면 그 첨자를 그대로 돌려준다.
+    int32_t attachLight(uint32_t index, const Light& light = {});
+    int32_t attachRigidBody(uint32_t index, const RigidBody& body = {});
+    int32_t attachFluid(uint32_t index, const Fluid& fluid = {});
+    // 부품을 뗀다. 아무도 가리키지 않게 된 부품은 배열에서 빠지고 첨자가 다시 맞춰진다.
+    void detachComponent(uint32_t index, int32_t Object::* handle);
 
     // candidate 가 ancestor 자신이거나 그 자손인지. 순환하는 부모 관계를 막는 데 쓴다.
     bool isDescendant(uint32_t candidate, uint32_t ancestor) const;

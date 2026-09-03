@@ -1,0 +1,54 @@
+#version 460
+
+#include "fluid_common.glsl"
+
+// 입자마다 그리기 인스턴스를 쓴다. 래스터의 인스턴스 드로우와 경로 추적의 상위 가속 구조가 같은 배열을
+// 읽으므로 CPU 가 채우는 오브젝트 인스턴스와 같은 규칙으로 채운다.
+layout(local_size_x = FLUID_GROUP_SIZE) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.particleCount) {
+        return;
+    }
+    FluidParams params = push.params.item;
+    float radius = params.containerMin.w;
+    vec3 position = push.positionsIn.items[i].xyz;
+    vec3 previous = (push.flags & FLUID_FLAG_RESET_HISTORY) != 0u ? position : push.previousRendered.items[i].xyz;
+
+    uint slot = push.instanceBase + i;
+    Instance instance;
+    instance.model = mat4(vec4(radius, 0.0, 0.0, 0.0),
+                          vec4(0.0, radius, 0.0, 0.0),
+                          vec4(0.0, 0.0, radius, 0.0),
+                          vec4(position, 1.0));
+    instance.previousModel = mat4(vec4(radius, 0.0, 0.0, 0.0),
+                                  vec4(0.0, radius, 0.0, 0.0),
+                                  vec4(0.0, 0.0, radius, 0.0),
+                                  vec4(previous, 1.0));
+    // 균등 배율이라 노멀 행렬은 단위 회전이면 된다.
+    instance.normalMatrix = mat4(1.0);
+    instance.meshIndex = push.sphereMesh;
+    instance.bucket = 0u;
+    instance.bucketBase = 0u;
+    instance.jointOffset = NO_JOINTS;
+    instance.skinnedVertexOffset = NO_SKINNED_VERTICES;
+    instance.previousSkinnedVertexOffset = NO_SKINNED_VERTICES;
+    instance.skinnedMeshletOffset = 0u;
+    instance.visibilityBase = 0u;
+    push.instances.items[slot] = instance;
+    push.previousRendered.items[i] = vec4(position, 0.0);
+
+    if ((push.flags & FLUID_FLAG_WRITE_TLAS) != 0u) {
+        TlasInstance tlas;
+        tlas.row0 = vec4(radius, 0.0, 0.0, position.x);
+        tlas.row1 = vec4(0.0, radius, 0.0, position.y);
+        tlas.row2 = vec4(0.0, 0.0, radius, position.z);
+        // 적중 셰이더가 인스턴스 배열을 찾는 번호. 마스크 0xFF.
+        tlas.customIndexMask = (slot & 0xFFFFFFu) | (0xFFu << 24u);
+        tlas.sbtOffsetFlags = 0u;
+        tlas.blasLow = push.blasLow;
+        tlas.blasHigh = push.blasHigh;
+        push.tlasInstances.items[push.tlasBase + i] = tlas;
+    }
+}

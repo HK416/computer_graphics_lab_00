@@ -1,0 +1,37 @@
+#version 460
+
+#include "fluid_common.glsl"
+
+// 이웃 27 셀을 훑어 밀도와 압력을 구한다. 자기 원소의 w 에만 쓰므로 이웃이 xyz 를 읽는 것과 겹치지 않는다.
+layout(local_size_x = FLUID_GROUP_SIZE) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.particleCount) {
+        return;
+    }
+    FluidParams params = push.params.item;
+    float h = params.smoothingRadius;
+    float mass = params.gravity.w;
+    vec3 position = push.positionsIn.items[i].xyz;
+    ivec3 cell = fluidCell(position, h);
+
+    float density = 0.0;
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                uint bucket = fluidHash(cell + ivec3(dx, dy, dz), params.lattice.w);
+                uint count = min(push.cellCounts.items[bucket], FLUID_CELL_CAPACITY);
+                for (uint k = 0u; k < count; ++k) {
+                    uint j = push.cellParticles.items[bucket * FLUID_CELL_CAPACITY + k];
+                    vec3 delta = position - push.positionsIn.items[j].xyz;
+                    density += mass * poly6(dot(delta, delta), h);
+                }
+            }
+        }
+    }
+    density = max(density, 1e-6);
+    float pressure = max(params.stiffness * (density - params.restDensity), 0.0);
+    push.positionsIn.items[i].w = density;
+    push.velocitiesIn.items[i].w = pressure;
+}

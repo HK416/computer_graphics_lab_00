@@ -54,6 +54,17 @@ LightType toLightType(const std::string& name) {
     return LightType::DIRECTIONAL;
 }
 
+constexpr std::array<const char*, 3> SHAPE_NAMES{"sphere", "box", "plane"};
+
+ColliderShape toShape(const std::string& name) {
+    for (uint32_t i = 0; i < SHAPE_NAMES.size(); ++i) {
+        if (name == SHAPE_NAMES[i]) {
+            return static_cast<ColliderShape>(i);
+        }
+    }
+    return ColliderShape::SPHERE;
+}
+
 // 뿌리 안에 있으면 상대 경로로, 밖이면 절대 경로로 적는다. 파일에는 항상 슬래시 형식을 쓴다.
 //
 // path::native() 는 Windows 에서 std::wstring 이라 좁은 문자열과 섞어 쓸 수 없다. generic_string()
@@ -154,6 +165,35 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
     }
     document["animators"] = animators;
 
+    // 강체는 설정만 적고 속도는 적지 않는다. 재생을 멈추면 어차피 되돌아가는 상태다.
+    json rigidBodies = json::array();
+    for (const RigidBody& body : scene.rigidBodies) {
+        rigidBodies.push_back({{"shape", SHAPE_NAMES[static_cast<size_t>(body.shape)]},
+                               {"mass", body.mass},
+                               {"useGravity", body.useGravity},
+                               {"kinematic", body.kinematic},
+                               {"restitution", body.restitution},
+                               {"friction", body.friction},
+                               {"radius", body.radius},
+                               {"halfExtents", toJson(body.halfExtents)}});
+    }
+    document["rigidBodies"] = rigidBodies;
+
+    json fluids = json::array();
+    for (const Fluid& fluid : scene.fluids) {
+        fluids.push_back({{"emitterHalfExtents", toJson(fluid.emitterHalfExtents)},
+                          {"particleCount", fluid.particleCount},
+                          {"particleRadius", fluid.particleRadius},
+                          {"smoothingRadius", fluid.smoothingRadius},
+                          {"restDensity", fluid.restDensity},
+                          {"stiffness", fluid.stiffness},
+                          {"viscosity", fluid.viscosity},
+                          {"containerMin", toJson(fluid.containerMin)},
+                          {"containerMax", toJson(fluid.containerMax)},
+                          {"gravity", toJson(fluid.gravity)}});
+    }
+    document["fluids"] = fluids;
+
     json objects = json::array();
     for (uint32_t objectIndex = 0; objectIndex < scene.objects.size(); ++objectIndex) {
         const Object& object = scene.objects[objectIndex];
@@ -177,6 +217,12 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
         if (object.light >= 0) {
             entry["light"] = object.light;
         }
+        if (object.rigidBody >= 0) {
+            entry["rigidBody"] = object.rigidBody;
+        }
+        if (object.fluid >= 0) {
+            entry["fluid"] = object.fluid;
+        }
         objects.push_back(std::move(entry));
     }
     document["objects"] = objects;
@@ -189,9 +235,10 @@ SceneFile readScene(const std::string& text) {
     if (document.is_discarded() || !document.is_object()) {
         core::fatal("장면 파일을 해석할 수 없습니다");
     }
+    // 옛 판은 빠진 키를 기본값으로 읽는다. 모르는(더 새로운) 판만 거절한다.
     auto version = document.value("version", 0U);
-    if (version != SCENE_FILE_VERSION) {
-        core::fatal("지원하지 않는 장면 파일 판입니다: {} (필요: {})", version, SCENE_FILE_VERSION);
+    if (version == 0 || version > SCENE_FILE_VERSION) {
+        core::fatal("지원하지 않는 장면 파일 판입니다: {} (필요: {} 이하)", version, SCENE_FILE_VERSION);
     }
 
     SceneFile file;
@@ -269,6 +316,34 @@ SceneFile readScene(const std::string& text) {
         file.scene.animators.push_back(std::move(animator));
     }
 
+    for (const json& entry : document.value("rigidBodies", json::array())) {
+        RigidBody body;
+        body.shape = toShape(entry.value("shape", std::string{"sphere"}));
+        body.mass = entry.value("mass", body.mass);
+        body.useGravity = entry.value("useGravity", body.useGravity);
+        body.kinematic = entry.value("kinematic", body.kinematic);
+        body.restitution = entry.value("restitution", body.restitution);
+        body.friction = entry.value("friction", body.friction);
+        body.radius = entry.value("radius", body.radius);
+        body.halfExtents = toVec3(entry.value("halfExtents", json{}), body.halfExtents);
+        file.scene.rigidBodies.push_back(body);
+    }
+
+    for (const json& entry : document.value("fluids", json::array())) {
+        Fluid fluid;
+        fluid.emitterHalfExtents = toVec3(entry.value("emitterHalfExtents", json{}), fluid.emitterHalfExtents);
+        fluid.particleCount = entry.value("particleCount", fluid.particleCount);
+        fluid.particleRadius = entry.value("particleRadius", fluid.particleRadius);
+        fluid.smoothingRadius = entry.value("smoothingRadius", fluid.smoothingRadius);
+        fluid.restDensity = entry.value("restDensity", fluid.restDensity);
+        fluid.stiffness = entry.value("stiffness", fluid.stiffness);
+        fluid.viscosity = entry.value("viscosity", fluid.viscosity);
+        fluid.containerMin = toVec3(entry.value("containerMin", json{}), fluid.containerMin);
+        fluid.containerMax = toVec3(entry.value("containerMax", json{}), fluid.containerMax);
+        fluid.gravity = toVec3(entry.value("gravity", json{}), fluid.gravity);
+        file.scene.fluids.push_back(fluid);
+    }
+
     for (const json& entry : document.value("objects", json::array())) {
         Object object;
         object.name = entry.value("name", std::string{"오브젝트"});
@@ -279,6 +354,8 @@ SceneFile readScene(const std::string& text) {
         object.visible = entry.value("visible", true);
         object.animator = entry.value("animator", -1);
         object.light = entry.value("light", -1);
+        object.rigidBody = entry.value("rigidBody", -1);
+        object.fluid = entry.value("fluid", -1);
         auto skin = entry.value("skin", -1);
         file.scene.objects.push_back(std::move(object));
         file.objectModels.push_back(entry.value("model", -1));

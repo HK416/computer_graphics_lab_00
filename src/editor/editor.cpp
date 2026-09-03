@@ -333,6 +333,29 @@ void Editor::buildMenuBar(scene::SceneManager& scenes, const gfx::GeometryStore&
         }
         ImGui::EndMenu();
     }
+
+    // 재생/정지는 Unity 처럼 메뉴바 가운데에 둔다.
+    const char* playLabel = active.simulating ? "정지" : "재생";
+    float labelWidth = ImGui::CalcTextSize(playLabel).x + ImGui::GetStyle().FramePadding.x * 2.0F;
+    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowWidth() * 0.5F - labelWidth * 0.5F));
+    if (active.simulating) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.55F, 0.25F, 0.2F, 1.0F});
+    }
+    if (ImGui::SmallButton(playLabel)) {
+        deferred = [this, &scenes] {
+            if (scenes.active().simulating) {
+                stopSimulation(scenes);
+            } else {
+                startSimulation(scenes);
+            }
+        };
+    }
+    if (active.simulating) {
+        ImGui::PopStyleColor();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Ctrl+P. 재생 중에는 강체·유체가 움직이고, 정지하면 재생 전 상태로 돌아간다");
+    }
     ImGui::EndMenuBar();
 }
 
@@ -584,6 +607,12 @@ void Editor::handleShortcuts(scene::SceneManager& scenes, const gfx::GeometrySto
             popupRequest = PopupRequest::SAVE_SCENE;
         } else if (ImGui::IsKeyPressed(ImGuiKey_D, false) && hasSelection()) {
             duplicateSelection(active);
+        } else if (ImGui::IsKeyPressed(ImGuiKey_P, false)) {
+            if (active.simulating) {
+                stopSimulation(scenes);
+            } else {
+                startSimulation(scenes);
+            }
         }
     } else if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && hasSelection()) {
         deleteSelection(active);
@@ -754,8 +783,29 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
     }
 
     scene::Object& object = active.objects[static_cast<size_t>(selectedObject)];
-    ImGui::TextUnformatted(object.name.c_str());
+    auto objectIndex = static_cast<uint32_t>(selectedObject);
+    {
+        std::array<char, 256> nameInput{};
+        std::copy_n(object.name.c_str(), std::min(object.name.size() + 1, nameInput.size() - 1), nameInput.begin());
+        ImGui::SetNextItemWidth(-1.0F);
+        if (ImGui::InputText("##name", nameInput.data(), nameInput.size())) {
+            object.name = nameInput.data();
+        }
+    }
     ImGui::Separator();
+
+    // 부품 헤더. 오른쪽 끝에 «제거» 단추를 겹쳐 둔다. 떼는 일은 배열을 압축하므로 패널을 다 그린 뒤 한다.
+    auto componentHeader = [this, &active, objectIndex](const char* label, int32_t scene::Object::* handle) {
+        ImGui::PushID(label);
+        bool open = ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowOverlap);
+        float buttonWidth = ImGui::CalcTextSize("제거").x + ImGui::GetStyle().FramePadding.x * 2.0F;
+        ImGui::SameLine(ImGui::GetContentRegionMax().x - buttonWidth);
+        if (ImGui::SmallButton("제거")) {
+            deferred = [&active, objectIndex, handle] { active.detachComponent(objectIndex, handle); };
+        }
+        ImGui::PopID();
+        return open;
+    };
 
     if (ImGui::CollapsingHeader("변환", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::DragFloat3("위치", glm::value_ptr(object.transform.position), 0.01F);
@@ -771,7 +821,7 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
 
     // 조명 속성. 위치와 방향은 변환에서 오므로 여기서는 나머지만 다룬다.
     if (object.light >= 0 && object.light < static_cast<int>(active.lights.size()) &&
-        ImGui::CollapsingHeader("조명", ImGuiTreeNodeFlags_DefaultOpen)) {
+        componentHeader("조명", &scene::Object::light)) {
         scene::Light& light = active.lights[static_cast<size_t>(object.light)];
         constexpr std::array<const char*, 4> LIGHT_NAMES{"방향광", "점광", "스폿광", "영역광"};
         auto typeIndex = static_cast<int>(light.type);
@@ -824,21 +874,131 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         }
     }
 
-    uint32_t selectedMesh = active.meshOf(static_cast<uint32_t>(selectedObject));
-    if (selectedMesh < geometry.meshCount() && ImGui::CollapsingHeader("메쉬와 재질", ImGuiTreeNodeFlags_DefaultOpen)) {
-        const gfx::GpuMesh& mesh = geometry.mesh(selectedMesh);
-        ImGui::Text("삼각형 %u", mesh.indexCount / 3);
-        ImGui::Text("바운딩 반지름 %.3f", mesh.boundingSphere.w);
+    // 메쉬 렌더러. 메쉬는 바꿀 수 있고 재질은 메쉬에 딸려 온다.
+    if (object.meshRenderer >= 0 && componentHeader("메쉬 렌더러", &scene::Object::meshRenderer)) {
+        uint32_t selectedMesh = active.meshOf(objectIndex);
+        bool live = geometry.meshLive(selectedMesh);
+        std::string current = live ? std::to_string(selectedMesh) + ": " + geometry.meshName(selectedMesh) : "(없음)";
+        if (ImGui::BeginCombo("메쉬", current.c_str())) {
+            for (uint32_t meshIndex = 0; meshIndex < geometry.meshCount(); ++meshIndex) {
+                if (!geometry.meshLive(meshIndex)) {
+                    continue;
+                }
+                std::string label = std::to_string(meshIndex) + ": " + geometry.meshName(meshIndex);
+                if (ImGui::Selectable(label.c_str(), meshIndex == selectedMesh)) {
+                    active.attachMeshRenderer(objectIndex, meshIndex, active.skinOf(objectIndex));
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (live) {
+            const gfx::GpuMesh& mesh = geometry.mesh(selectedMesh);
+            ImGui::Text("삼각형 %u", mesh.indexCount / 3);
+            ImGui::Text("바운딩 반지름 %.3f", mesh.boundingSphere.w);
 
-        const asset::Material& material = geometry.material(mesh.materialIndex);
-        ImGui::Text("재질: %s", material.name.c_str());
-        ImGui::Text("알파 경로: %s%s", alphaModeName(material.alphaMode), material.doubleSided ? " (양면)" : "");
-        ImGui::Text("금속성 %.2f / 거칠기 %.2f", material.metallicFactor, material.roughnessFactor);
-        ImGui::ColorButton("기저 색",
-                           ImVec4{material.baseColorFactor.r,
-                                  material.baseColorFactor.g,
-                                  material.baseColorFactor.b,
-                                  material.baseColorFactor.a});
+            const asset::Material& material = geometry.material(mesh.materialIndex);
+            ImGui::Text("재질: %s", material.name.c_str());
+            ImGui::Text("알파 경로: %s%s", alphaModeName(material.alphaMode), material.doubleSided ? " (양면)" : "");
+            ImGui::Text("금속성 %.2f / 거칠기 %.2f", material.metallicFactor, material.roughnessFactor);
+            ImGui::ColorButton("기저 색",
+                               ImVec4{material.baseColorFactor.r,
+                                      material.baseColorFactor.g,
+                                      material.baseColorFactor.b,
+                                      material.baseColorFactor.a});
+        } else {
+            ImGui::TextDisabled("메쉬가 해제되었거나 아직 올라오지 않았다");
+        }
+    }
+
+    if (object.rigidBody >= 0 && object.rigidBody < static_cast<int>(active.rigidBodies.size()) &&
+        componentHeader("강체", &scene::Object::rigidBody)) {
+        scene::RigidBody& body = active.rigidBodies[static_cast<size_t>(object.rigidBody)];
+        constexpr std::array<const char*, 3> SHAPE_NAMES{"구", "상자", "평면"};
+        auto shapeIndex = static_cast<int>(body.shape);
+        if (ImGui::Combo("모양", &shapeIndex, SHAPE_NAMES.data(), static_cast<int>(SHAPE_NAMES.size()))) {
+            body.shape = static_cast<scene::ColliderShape>(shapeIndex);
+        }
+        if (body.shape == scene::ColliderShape::SPHERE) {
+            ImGui::DragFloat("반지름", &body.radius, 0.01F, 0.01F, 100.0F);
+        } else if (body.shape == scene::ColliderShape::BOX) {
+            ImGui::DragFloat3("반쪽 크기", glm::value_ptr(body.halfExtents), 0.01F, 0.01F, 100.0F);
+        } else {
+            ImGui::TextDisabled("오브젝트의 +Y 가 법선인 무한 평면. 늘 운동학이다");
+        }
+        ImGui::BeginDisabled(body.shape == scene::ColliderShape::PLANE);
+        ImGui::Checkbox("운동학", &body.kinematic);
+        ImGui::SameLine();
+        ImGui::Checkbox("중력", &body.useGravity);
+        ImGui::DragFloat("질량", &body.mass, 0.1F, 0.01F, 10000.0F);
+        ImGui::EndDisabled();
+        ImGui::SliderFloat("반발", &body.restitution, 0.0F, 1.0F, "%.2f");
+        ImGui::SliderFloat("마찰", &body.friction, 0.0F, 1.0F, "%.2f");
+        if (active.simulating) {
+            ImGui::Text("속도 (%.2f, %.2f, %.2f)", body.velocity.x, body.velocity.y, body.velocity.z);
+        }
+    }
+
+    if (object.fluid >= 0 && object.fluid < static_cast<int>(active.fluids.size()) &&
+        componentHeader("유체", &scene::Object::fluid)) {
+        scene::Fluid& fluid = active.fluids[static_cast<size_t>(object.fluid)];
+        int particles = static_cast<int>(fluid.particleCount);
+        if (ImGui::SliderInt("입자 수", &particles, 64, 32768)) {
+            fluid.particleCount = static_cast<uint32_t>(particles);
+        }
+        ImGui::DragFloat3("방출 반쪽 크기", glm::value_ptr(fluid.emitterHalfExtents), 0.01F, 0.01F, 50.0F);
+        ImGui::DragFloat("입자 반지름", &fluid.particleRadius, 0.001F, 0.005F, 1.0F, "%.3f");
+        ImGui::DragFloat("커널 반지름", &fluid.smoothingRadius, 0.005F, 0.01F, 2.0F, "%.3f");
+        ImGui::DragFloat("기준 밀도", &fluid.restDensity, 1.0F, 1.0F, 10000.0F);
+        ImGui::DragFloat("강성", &fluid.stiffness, 1.0F, 1.0F, 5000.0F);
+        ImGui::DragFloat("점성", &fluid.viscosity, 0.01F, 0.0F, 50.0F);
+        ImGui::DragFloat3("용기 최소", glm::value_ptr(fluid.containerMin), 0.05F, -100.0F, 100.0F);
+        ImGui::DragFloat3("용기 최대", glm::value_ptr(fluid.containerMax), 0.05F, -100.0F, 100.0F);
+        ImGui::DragFloat3("중력", glm::value_ptr(fluid.gravity), 0.1F, -100.0F, 100.0F);
+        ImGui::TextDisabled("입자는 GPU 에서 계산해 내장 구로 그린다. 경로 추적에도 보인다");
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button("컴포넌트 추가", ImVec2{-1.0F, 0.0F})) {
+        ImGui::OpenPopup("컴포넌트 추가");
+    }
+    if (ImGui::BeginPopup("컴포넌트 추가")) {
+        ImGui::BeginDisabled(object.meshRenderer >= 0);
+        if (ImGui::BeginMenu("메쉬 렌더러")) {
+            for (uint32_t meshIndex = 0; meshIndex < geometry.meshCount(); ++meshIndex) {
+                if (!geometry.meshLive(meshIndex)) {
+                    continue;
+                }
+                std::string label = std::to_string(meshIndex) + ": " + geometry.meshName(meshIndex);
+                if (ImGui::MenuItem(label.c_str())) {
+                    active.attachMeshRenderer(objectIndex, meshIndex);
+                }
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(object.light >= 0);
+        if (ImGui::MenuItem("조명")) {
+            active.attachLight(objectIndex);
+        }
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(object.rigidBody >= 0);
+        if (ImGui::MenuItem("강체")) {
+            scene::RigidBody body;
+            // 메쉬가 있으면 경계 구를 콜라이더 크기로 삼는다.
+            uint32_t mesh = active.meshOf(objectIndex);
+            if (geometry.meshLive(mesh)) {
+                body.radius = std::max(geometry.mesh(mesh).boundingSphere.w, 0.01F);
+                body.halfExtents = glm::vec3{body.radius * 0.7F};
+            }
+            active.attachRigidBody(objectIndex, body);
+        }
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(object.fluid >= 0);
+        if (ImGui::MenuItem("유체")) {
+            active.attachFluid(objectIndex);
+        }
+        ImGui::EndDisabled();
+        ImGui::EndPopup();
     }
     ImGui::End();
 }
@@ -1719,6 +1879,11 @@ void Editor::updateHistory(scene::Scene& active, size_t sceneIndex) {
         history.started = true;
         return;
     }
+    // 재생 중에는 물리가 프레임마다 변환을 바꾼다. 기록하면 스텝마다 항목이 쌓이고, 정지하면 어차피
+    // 재생 전으로 돌아간다.
+    if (active.simulating) {
+        return;
+    }
 
     ImGuiIO& io = ImGui::GetIO();
     bool editing = ImGui::IsAnyItemActive() || gizmoUsing;
@@ -1792,6 +1957,30 @@ bool Editor::referencesModel(uint32_t meshBase, uint32_t meshCount, int32_t mode
         }
     }
     return false;
+}
+
+void Editor::startSimulation(scene::SceneManager& scenes) {
+    scene::Scene& active = scenes.active();
+    if (active.simulating) {
+        return;
+    }
+    playSnapshot = active.capture();
+    playSceneIndex = scenes.current();
+    active.simulating = true;
+}
+
+void Editor::stopSimulation(scene::SceneManager& scenes) {
+    scene::Scene& active = scenes.active();
+    active.simulating = false;
+    // 시작할 때 떠 둔 장면으로 되돌린다. 다른 장면으로 옮긴 채 멈췄으면 그 장면은 건드리지 않는다.
+    if (playSnapshot && playSceneIndex == scenes.current()) {
+        active.restore(*playSnapshot);
+        // 되돌린 상태가 곧 기록의 기준이다. 안 그러면 되돌리기 항목이 하나 더 생긴다.
+        if (playSceneIndex < histories.size() && histories[playSceneIndex].started) {
+            histories[playSceneIndex].baseline = active.capture();
+        }
+    }
+    playSnapshot.reset();
 }
 
 void Editor::clearHistories() {
