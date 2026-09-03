@@ -45,7 +45,7 @@ ctest --test-dir build/debug --output-on-failure
 ```
 
 테스트 이름: `lod_network` `animation` `camera` `scene` `scene_io` `profiler` `shadow` `upscaler`
-`concurrency` `vertex_pack`.
+`concurrency` `vertex_pack` `physics`.
 
 선택 기능:
 
@@ -58,11 +58,17 @@ cmake --preset debug -DCG_LAB_DLSS_SDK=<NVIDIA/DLSS 경로>   # 주지 않으면
 
 창을 띄우지 않고 렌더 결과를 검증하는 것이 이 저장소의 기본 방식이다. 실행 인자 전체는 README 참조.
 
+기본 장면은 빈 `GameScene` 이라 `--model` 로 무엇이든 올려야 화면에 뭔가 보인다.
+
 ```sh
-./build/release/cg_lab --screenshot out.png --screenshot-frame 120 --upscaler 3 --render-scale 0.5
-./build/release/cg_lab --screenshot out.png --debug 8   # 8 = 모션 벡터. 디버그 뷰 목록은 README
-./build/release/cg_lab --profile                        # 종료할 때 구간 계측을 로그로 남긴다
+./build/release/cg_lab --model public/assets/DamagedHelmet.glb --screenshot out.png --screenshot-frame 120 --upscaler 3 --render-scale 0.5
+./build/release/cg_lab --model public/assets/DamagedHelmet.glb --screenshot out.png --debug 8   # 8 = 모션 벡터
+./build/release/cg_lab --open public/scenes/<저장한장면>.json --play --screenshot out.png --screenshot-frame 120
+./build/release/cg_lab --model public/assets/DamagedHelmet.glb --profile   # 종료할 때 구간 계측을 로그로 남긴다
 ```
+
+캡처에는 편집기 UI 가 함께 들어가고 콘솔에 시각이 찍히므로 두 실행의 PNG 는 바이트로 같지 않다. 렌더
+영역을 눈으로 견주거나 잘라서 비교한다.
 
 시간축 업스케일(TAAU/FSR/DLSS)은 히스토리를 쌓아야 하므로 `--screenshot-frame` 을 뒤쪽(100 이상)으로
 준다. 기본 8 로는 수렴 전 화면을 본다.
@@ -126,24 +132,31 @@ cmd /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliar
 | `src/app` | 수명 주기, SDL 창, 이벤트 루프, 모델/장면 적재 |
 | `src/asset` | glTF 적재, meshlet/LOD DAG 구축, 애니메이션 샘플링. CPU 측 표현 |
 | `src/scene` | 장면 그래프, 카메라, 커스텀 JSON 직렬화 |
-| `src/gfx` | Vulkan 컨텍스트, 리소스, 렌더 경로 전부 |
+| `src/gfx` | Vulkan 컨텍스트, 리소스, 렌더 경로 전부. GPU SPH(`fluid.cpp`)도 여기 |
+| `src/physics` | 강체 솔버. `scene` 과 `core` 에만 의존하고 재생 중 `Application::run` 이 고정 간격으로 부른다 |
 | `src/editor` | ImGui 도킹 편집기 |
 | `src/core` | `fatal`, 잠금 없는 작업 큐 |
 | `shaders` | GLSL. `.glsl` 은 include 전용 공통 헤더 |
 
 ### 프레임 흐름
 
-`Application::run` 한 바퀴: 이벤트 → `camera.update` → `scene.update`(애니메이션 진행) →
-`renderer.prepareFrame`(밀린 크기 변경) → `editor.build` → **`scene.refresh`** → `renderer.drawFrame`.
+`Application::run` 한 바퀴: 이벤트 → `camera.update` → `scene.update`(애니메이션 진행) → [재생 중이면
+`physics::stepRigidBodies` 고정 간격] → `renderer.prepareFrame`(밀린 크기 변경) → `editor.build` →
+**`scene.refresh`** → [구조가 바뀐 프레임이면 `collectUnusedModels`] → `renderer.drawFrame`.
 
 `refresh()` 는 편집기가 장면을 만진 **뒤**, 렌더러가 읽기 **전**에 불려야 한다. 훅이 아니라 지난 사본과
 필드를 직접 비교해 더티를 찾고 세계 변환/가시성 캐시를 다시 만든다(이유는 README).
 
-`Renderer::drawFrame` → `buildLights` → `buildDrawCommands` → `recordCommands`. 기록 순서:
+`Renderer::drawFrame` → `buildDrawCommands`(유체 `prepare` 포함) → `buildLights` → `recordCommands`. 기록 순서:
 
-환경 맵 굽기(설정이 바뀔 때만) → 스킨 컴퓨트(변형 정점·meshlet 경계) → 그림자 패스 → [경로 추적]
-**또는** [컬(1차) → 불투명(1차) → HZB → 컬(2차) → 불투명(2차) → 하늘 → 광선 반사 → OIT → 합성 → SSAO]
-→ Bloom·자동 노출 → 시간축 업스케일 → 톤 매핑 → 공간 업스케일 → UI.
+환경 맵 굽기(설정이 바뀔 때만) → 스킨 컴퓨트(변형 정점·meshlet 경계) → 유체 컴퓨트(입자 진행, 인스턴스와
+TLAS 인스턴스 쓰기) → 그림자 패스 → [경로 추적] **또는** [컬(1차) → 불투명(1차, 끝에 유체 인스턴스 드로우)
+→ HZB → 컬(2차) → 불투명(2차) → 하늘 → 광선 반사 → OIT → 합성 → SSAO] → Bloom·자동 노출 → 시간축
+업스케일 → 톤 매핑 → 공간 업스케일 → UI.
+
+유체 입자 인스턴스는 오브젝트 인스턴스 **뒤**(`objects.size()` 부터)에 GPU 가 쓴다. CPU 는 앞쪽만
+memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼는 반대로 입자가 **앞**이고 오브젝트가 뒤에
+붙는다(`updateTopLevel` 의 `prependedInstances`).
 
 업스케일 두 방식이 톤 매핑을 사이에 두고 갈리는 이유와 시간축 경로가 요구하는 지터/모션 벡터/하늘
 배관은 README 의 «업스케일» 절에 있다.
@@ -166,6 +179,8 @@ cmd /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliar
 | `asset::Vertex` (`src/asset/model.h`) | `Vertex` (`shaders/scene_types.glsl`) |
 | `GpuMesh` `GpuMeshLod` `GpuMeshlet` `GpuMaterial` `GpuInstance` (`src/gfx/geometry.h`) | 동명 구조체 (`scene_types.glsl`) |
 | `GpuLight` (`src/gfx/renderer.h`) | `Light` (`scene_types.glsl`) |
+| `GpuFluidCollider` `GpuFluidParams` `FluidPushConstants` (`src/gfx/fluid.h`) | `FluidCollider` `FluidParams` `FluidPushConstants` (`shaders/fluid_common.glsl`) |
+| `scene::ColliderShape` (`src/scene/scene.h`) | `FLUID_COLLIDER_*` (`fluid_common.glsl`) |
 | `Options::debugMode`, `Renderer::debugMode` | `DEBUG_MODE_*` (`scene_types.glsl`) |
 
 전부 `scalar` 레이아웃이다.
