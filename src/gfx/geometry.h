@@ -148,7 +148,8 @@ public:
     Buffer materialBuffer;
     Buffer meshletBuffer;
     Buffer lodBuffer;
-    // meshlet 안의 지역 정점 인덱스. 8비트 저장을 요구하지 않으려고 uint32 로 펼쳐 둔다.
+    // meshlet 안의 지역 정점 인덱스(8비트). uint32 하나에 넷씩 묶여 있고 셰이더가 비트 이동으로 꺼낸다.
+    // 8비트 스토리지 기능 없이도 되고 uint32 로 펼치던 때보다 4 배 작다.
     Buffer meshletTriangleBuffer;
     // meshlet 마다 쓰는 정점의 전역 번호. mesh shader 가 지역 인덱스를 이 목록으로 풀어 정점을 읽는다.
     Buffer meshletVertexBuffer;
@@ -180,7 +181,7 @@ private:
     GrowingArray<asset::Vertex> vertices;
     GrowingArray<asset::SkinWeight> skinWeights;
     GrowingArray<uint32_t> indices;
-    GrowingArray<uint32_t> meshletTriangles;
+    GrowingArray<uint8_t> meshletTriangles;
     GrowingArray<uint32_t> meshletVertices;
     std::vector<GpuMesh> meshes;
     std::vector<GpuMeshlet> meshlets;

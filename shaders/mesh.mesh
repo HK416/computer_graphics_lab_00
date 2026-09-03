@@ -48,8 +48,8 @@ void main() {
 
     for (uint i = gl_LocalInvocationIndex; i < meshlet.triangleCount; i += MESHLET_GROUP_SIZE) {
         uint base = meshlet.triangleOffset + i * 3;
-        gl_PrimitiveTriangleIndicesEXT[i] = uvec3(pushConstants.meshletTriangles.items[base],
-                                                  pushConstants.meshletTriangles.items[base + 1],
-                                                  pushConstants.meshletTriangles.items[base + 2]);
+        gl_PrimitiveTriangleIndicesEXT[i] = uvec3(meshletTriangleIndex(pushConstants.meshletTriangles, base),
+                                                  meshletTriangleIndex(pushConstants.meshletTriangles, base + 1),
+                                                  meshletTriangleIndex(pushConstants.meshletTriangles, base + 2));
     }
 }

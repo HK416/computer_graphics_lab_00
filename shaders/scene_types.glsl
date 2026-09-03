@@ -281,9 +281,13 @@ layout(buffer_reference, scalar) readonly buffer CameraBuffer {
 layout(buffer_reference, scalar) readonly buffer MeshletBuffer {
     Meshlet items[];
 };
+// meshlet 안의 8비트 지역 정점 인덱스가 uint 하나에 넷씩 묶여 있다. i 번째 바이트를 꺼낸다.
 layout(buffer_reference, scalar) readonly buffer MeshletTriangleBuffer {
     uint items[];
 };
+uint meshletTriangleIndex(MeshletTriangleBuffer triangles, uint i) {
+    return (triangles.items[i >> 2u] >> ((i & 3u) * 8u)) & 0xFFu;
+}
 // meshlet 마다 쓰는 정점의 전역 번호. meshlet 의 vertexOffset 부터 vertexCount 개다.
 layout(buffer_reference, scalar) readonly buffer MeshletVertexBuffer {
     uint items[];

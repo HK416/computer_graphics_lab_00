@@ -112,10 +112,9 @@ uint32_t GeometryStore::addModel(const asset::Model& model, const std::vector<ui
             lod.meshletCount = sourceLod.meshletCount;
             lods.push_back(lod);
         }
-        // 8비트 지역 인덱스를 uint32 로, 목록의 값은 전역 정점 번호로 바꿔 둔다. 셰이더가 메쉬 오프셋을
+        // 지역 인덱스는 바이트 그대로 잇고, 목록의 값은 전역 정점 번호로 바꿔 둔다. 셰이더가 메쉬 오프셋을
         // 더하지 않아도 된다.
-        std::vector<uint32_t> widened(source.meshletTriangles.begin(), source.meshletTriangles.end());
-        meshletTriangles.append(widened.data(), widened.size());
+        meshletTriangles.append(source.meshletTriangles.data(), source.meshletTriangles.size());
         std::vector<uint32_t> globalVertices(source.meshletVertices.size());
         for (size_t i = 0; i < globalVertices.size(); ++i) {
             globalVertices[i] = vertexBase + source.meshletVertices[i];
@@ -135,8 +134,10 @@ void GeometryStore::growAndUpload(Uploader& uploader,
                                   VkBufferUsageFlags usage,
                                   const char* name,
                                   std::vector<Buffer>& retired) {
-    // 주소는 늘 유효해야 하므로 비어 있어도 한 칸은 둔다.
+    // 주소는 늘 유효해야 하므로 비어 있어도 한 칸은 둔다. 바이트 배열을 uint 로 읽는 셰이더가 끝을
+    // 넘지 않도록 4 바이트 배수로 잡는다.
     VkDeviceSize newSize = static_cast<VkDeviceSize>(std::max<size_t>(array.total, 1)) * sizeof(T);
+    newSize = (newSize + 3) / 4 * 4;
     VkDeviceSize uploadedBytes = static_cast<VkDeviceSize>(array.uploaded) * sizeof(T);
     if (buffer.handle == VK_NULL_HANDLE || buffer.size < newSize) {
         // ponytail: 꼭 필요한 크기로만 잡아 여유를 두지 않는다. 모델을 더할 때마다 전체를 한 번 옮기고
