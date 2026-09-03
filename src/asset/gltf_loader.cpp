@@ -10,6 +10,7 @@
 #include <glm/geometric.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
+#include <meshoptimizer.h>
 #include <spdlog/spdlog.h>
 #include <stb_image.h>
 
@@ -248,7 +249,59 @@ struct PrimitiveRange {
     uint32_t count = 0;
 };
 
-void appendPrimitive(Model& model, const cgltf_data& data, const cgltf_primitive& primitive) {
+// 정점 합치기 전후의 수. 모델 단위로 합쳐 로그에 남긴다.
+struct WeldStats {
+    size_t before = 0;
+    size_t after = 0;
+};
+
+// 파일이 준 속성(위치·노멀·탄젠트·UV, 스킨이면 가중치까지)의 바이트가 완전히 같은 정점을 하나로 합친다.
+// 스캔 데이터는 삼각형마다 정점을 따로 두는 일이 많은데, 그대로 두면 meshlet 이 삼각형 124 개가 아니라
+// 정점 64 개 한도에 먼저 걸려 삼각형 21 개짜리로 잘게 쪼개지고 단순화는 모든 변을 경계로 보고 잠근다.
+// 노멀·탄젠트를 만들기 전에 해야 한다. 만든 뒤에 하면 사본마다 인접 삼각형이 하나뿐이라 값이 달라져
+// 합쳐지지 않고, 합친 뒤에 만들어야 인덱스 메쉬와 같은 평균값이 나온다. 속성이 조금이라도 다르면
+// 합치지 않으므로 화면은 그대로다. 아무 삼각형도 쓰지 않는 정점도 여기서 빠진다.
+void weldVertices(std::vector<LoadVertex>& vertices,
+                  std::vector<SkinWeight>& skinWeights,
+                  std::vector<uint32_t>& indices,
+                  WeldStats& stats) {
+    size_t before = vertices.size();
+    stats.before += before;
+    if (before == 0 || indices.empty()) {
+        stats.after += before;
+        return;
+    }
+    struct Key {
+        LoadVertex vertex;
+        SkinWeight weight;
+    };
+    static_assert(sizeof(LoadVertex) == 48 && sizeof(Key) == sizeof(LoadVertex) + sizeof(SkinWeight),
+                  "채움 바이트가 있으면 비교가 틀어진다");
+    std::vector<Key> keys(before);
+    for (size_t i = 0; i < before; ++i) {
+        keys[i] = Key{vertices[i], skinWeights.empty() ? SkinWeight{} : skinWeights[i]};
+    }
+    std::vector<uint32_t> remap(before);
+    size_t unique =
+        meshopt_generateVertexRemap(remap.data(), indices.data(), indices.size(), keys.data(), before, sizeof(Key));
+    stats.after += unique;
+    if (unique == before) {
+        return;
+    }
+
+    std::vector<LoadVertex> welded(unique);
+    meshopt_remapVertexBuffer(welded.data(), vertices.data(), before, sizeof(LoadVertex), remap.data());
+    vertices = std::move(welded);
+    if (!skinWeights.empty()) {
+        std::vector<SkinWeight> weldedWeights(unique);
+        meshopt_remapVertexBuffer(weldedWeights.data(), skinWeights.data(), before, sizeof(SkinWeight), remap.data());
+        skinWeights = std::move(weldedWeights);
+    }
+    // 원소마다 destination[i] = remap[indices[i]] 이라 같은 버퍼를 제자리에서 바꿔도 된다.
+    meshopt_remapIndexBuffer(indices.data(), indices.data(), indices.size(), remap.data());
+}
+
+void appendPrimitive(Model& model, const cgltf_data& data, const cgltf_primitive& primitive, WeldStats& weld) {
     const cgltf_accessor* positions = findAttribute(primitive, cgltf_attribute_type_position, 0);
     if (positions == nullptr || primitive.type != cgltf_primitive_type_triangles) {
         return;
@@ -297,6 +350,7 @@ void appendPrimitive(Model& model, const cgltf_data& data, const cgltf_primitive
         }
     }
 
+    weldVertices(loaded, mesh.skinWeights, mesh.indices, weld);
     if (normals == nullptr) {
         generateNormals(loaded, mesh.indices);
     }
@@ -517,10 +571,11 @@ std::optional<Model> loadGltf(const std::filesystem::path& path, LoadProgress* p
         progress->begin(LoadProgress::Stage::CONVERT, primitiveCount);
     }
     std::vector<PrimitiveRange> meshRanges(data->meshes_count);
+    WeldStats weld;
     for (cgltf_size i = 0; i < data->meshes_count; ++i) {
         meshRanges[i].first = static_cast<uint32_t>(model.meshes.size());
         for (cgltf_size j = 0; j < data->meshes[i].primitives_count; ++j) {
-            appendPrimitive(model, *data, data->meshes[i].primitives[j]);
+            appendPrimitive(model, *data, data->meshes[i].primitives[j], weld);
             if (progress != nullptr) {
                 progress->advance();
             }
@@ -547,14 +602,16 @@ std::optional<Model> loadGltf(const std::filesystem::path& path, LoadProgress* p
     for (const Mesh& mesh : model.meshes) {
         triangleCount += mesh.indices.size() / 3;
     }
-    spdlog::info("glTF 적재: {} (메쉬 {}, 재질 {}, 텍스처 {}, 인스턴스 {}, 삼각형 {}, 스킨 {}, 애니메이션 {}; "
-                 "파싱 {:.1f} ms, 정점 변환 {:.1f} ms)",
+    spdlog::info("glTF 적재: {} (메쉬 {}, 재질 {}, 텍스처 {}, 인스턴스 {}, 삼각형 {}, 정점 {} → 합친 뒤 {}, 스킨 {}, "
+                 "애니메이션 {}; 파싱 {:.1f} ms, 정점 변환 {:.1f} ms)",
                  model.name,
                  model.meshes.size(),
                  model.materials.size(),
                  model.textures.size(),
                  model.instances.size(),
                  triangleCount,
+                 weld.before,
+                 weld.after,
                  model.skeleton.skins.size(),
                  model.skeleton.animations.size(),
                  parseMs,
