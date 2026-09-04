@@ -2751,6 +2751,7 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
 
 FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene) {
     // 유체 입자는 오브젝트 인스턴스 뒤에 이어 붙으므로 그만큼 더 잡는다. 내장 구가 없으면 그리지 않는다.
+    fluid->setParticleLimit(fluidParticleLimit);
     bool fluidActive = fluid->prepare(scene, &scene != lastScene);
     uint32_t particleTotal = geometry.meshLive(fluidSphereMesh) ? fluid->totalParticles() : 0;
     reserveInstances(frame, static_cast<uint32_t>(scene.objects.size()) + particleTotal);

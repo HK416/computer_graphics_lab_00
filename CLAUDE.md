@@ -45,7 +45,7 @@ ctest --test-dir build/debug --output-on-failure
 ```
 
 테스트 이름: `lod_network` `animation` `camera` `scene` `scene_io` `profiler` `shadow` `upscaler`
-`concurrency` `vertex_pack` `physics` `primitives` `debug_lines`.
+`concurrency` `vertex_pack` `physics` `primitives` `debug_lines` `hardware_profile`.
 
 선택 기능:
 
@@ -69,6 +69,10 @@ cmake --preset debug -DCG_LAB_DLSS_SDK=<NVIDIA/DLSS 경로>   # 주지 않으면
 
 캡처에는 편집기 UI 가 함께 들어가고 콘솔에 시각이 찍히므로 두 실행의 PNG 는 바이트로 같지 않다. 렌더
 영역을 눈으로 견주거나 잘라서 비교한다.
+
+기본값은 `--auto-tune safe` 라 **기기마다 렌더 설정이 달라진다**(높은 등급에서는 광선 반사가 켜지고,
+낮은 등급에서는 렌더 배율이 내려간다). 다른 기계의 캡처와 견주거나 변경 전후를 정확히 비교할 때는
+`--auto-tune off --no-colliders` 를 함께 준다.
 
 시간축 업스케일(TAAU/FSR/DLSS)은 히스토리를 쌓아야 하므로 `--screenshot-frame` 을 뒤쪽(100 이상)으로
 준다. 기본 8 로는 수렴 전 화면을 본다.

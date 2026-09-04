@@ -956,8 +956,16 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         componentHeader("유체", &scene::Object::fluid)) {
         scene::Fluid& fluid = active.fluids[static_cast<size_t>(object.fluid)];
         int particles = static_cast<int>(fluid.particleCount);
-        if (ImGui::SliderInt("입자 수", &particles, 64, 32768)) {
+        if (ImGui::SliderInt("입자 수", &particles, 64, gfx::FLUID_MAX_PARTICLES)) {
             fluid.particleCount = static_cast<uint32_t>(particles);
+        }
+        // 하드웨어 프로파일이 상한을 낮췄으면 슬라이더 값보다 적게 뿌린다. 그 사실을 여기서 말한다.
+        if (fluid.particleCount > renderer.fluidParticleLimit) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(상한 %u)", renderer.fluidParticleLimit);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("자동 튜닝이 이 기기의 상한을 정했다. --auto-tune off 로 풀 수 있다");
+            }
         }
         ImGui::DragFloat3("방출 반쪽 크기", glm::value_ptr(fluid.emitterHalfExtents), 0.01F, 0.01F, 50.0F);
         ImGui::DragFloat("입자 반지름", &fluid.particleRadius, 0.001F, 0.005F, 1.0F, "%.3f");
@@ -1309,6 +1317,24 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     // 광선 그림자와 반사는 래스터 안에서 도는 것이라 경로 추적과는 무관하다.
     bool rayQueryReady = renderer.rayQueryShadowsAvailable() && !rasterOnly;
     scene::PostProcess& post = active.post;
+
+    if (section("하드웨어")) {
+        if (autoTune == gfx::AutoTune::OFF) {
+            ImGui::Text("자동 튜닝: %s", gfx::autoTuneName(autoTune));
+        } else {
+            ImGui::Text("자동 튜닝: %s · 등급 %s", gfx::autoTuneName(autoTune), gfx::tierName(hardwareProfile.tier));
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("실행 인자 --auto-tune off|safe|aggressive 로 고른다");
+        }
+        // 왜 그렇게 골랐는지 그대로 보여 준다. 설정을 되돌리기 전에 근거를 알 수 있어야 한다.
+        for (const std::string& reason : hardwareProfile.reasons) {
+            ImGui::BulletText("%s", reason.c_str());
+        }
+        // 기동 시의 판정이라 그 뒤에 바뀐 것은 여기 나오지 않는다. 사용자가 고쳤거나, 가속 구조가
+        // 예산을 넘어 렌더러가 스스로 광선 기능을 끈 경우가 그렇다.
+        ImGui::TextDisabled("기동 시 판정이다. 지금 값은 아래 절들이 보여 준다");
+    }
 
     if (section("프로파일러")) {
         gfx::GpuProfiler& profiler = renderer.profiler();

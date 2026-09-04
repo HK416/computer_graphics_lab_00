@@ -15,6 +15,7 @@
 #include "gfx/bindless.h"
 #include "gfx/context.h"
 #include "gfx/geometry.h"
+#include "gfx/hardware_profile.h"
 #include "gfx/renderer.h"
 #include "gfx/texture.h"
 #include "scene/scene.h"
@@ -47,6 +48,11 @@ struct Options {
     float renderScale = 1.0F;
     // 0 통과, 1 내장 공간 업스케일
     uint32_t upscaler = 1;
+    // 하드웨어에 맞춰 기본 설정을 고른다. 명령줄에서 명시한 항목은 덮지 않는다.
+    gfx::AutoTune autoTune = gfx::AutoTune::SAFE;
+    // 명령줄에서 실제로 준 항목. 자동 튜닝이 이 값들을 건드리지 않게 표시해 둔다.
+    bool renderScaleGiven = false;
+    bool upscalerGiven = false;
     // 시작할 때 경로 추적을 켠다. 하드웨어가 지원하지 않으면 사유를 남기고 무시한다.
     bool pathTracing = false;
     // 스크린샷 비교용. 두 패스 오클루전 컬링을 끄거나 mesh shader 경로 대신 컴퓨트 컬링 경로를 쓴다.
@@ -54,8 +60,10 @@ struct Options {
     bool meshShader = true;
     // 콜라이더 표시. 스크린샷으로 렌더 결과만 견줄 때 끈다.
     bool showColliders = true;
-    // 시작할 때 광선 반사를 켠다. 광선 질의가 없으면 렌더러가 스스로 끈다.
+    // 시작할 때 광선 반사를 켠다. 광선 질의가 없으면 렌더러가 스스로 끈다. --no-reflections 로 끄면
+    // 높은 등급에서 자동 튜닝이 켜는 것도 막는다.
     bool reflections = false;
+    bool reflectionsGiven = false;
     // 프레임마다 카메라를 이만큼(도) 궤도 회전한다. 정지 화면에서는 드러나지 않는 팝인을 재현한다.
     float orbitDegreesPerFrame = 0.0F;
     float triangleBudget = 0.0F;
@@ -101,6 +109,9 @@ private:
     void loadScenes();
     // 파일 없이 코드로 만드는 모델. 유체 입자와 «메쉬 › 구» 프리미티브가 쓰는 구 하나다.
     void registerBuiltinModels();
+    // 하드웨어를 조회해 기본 설정을 고르고 렌더러와 편집기에 적는다. 명령줄에서 명시한 항목은
+    // 건드리지 않는다.
+    void applyHardwareProfile();
 
     // 해석된 모델을 GPU 에 올리기 전에 하는 CPU 작업 전부. 텍스처 디코딩과 LOD 계층 구축이다.
     // 어느 스레드에서든 부를 수 있고 안에서 워커를 나눠 쓴다. 단계별 시간을 ms 로 돌려준다.
@@ -185,6 +196,8 @@ private:
     std::vector<LoadedModel> loadedModels;
     // 기본 도형마다의 전역 메쉬 번호. asset::Primitive 순서와 같다.
     std::vector<uint32_t> primitiveMeshes;
+    // 기동 시 고른 하드웨어 프로파일. 편집기가 판정 근거를 보여 준다.
+    gfx::HardwareProfile hardwareProfile;
     // 마지막으로 미사용 모델을 살핀 때의 장면 번호와 그 장면의 구조 리비전.
     size_t collectedScene = SIZE_MAX;
     uint64_t collectedTopology = 0;

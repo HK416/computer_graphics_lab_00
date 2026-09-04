@@ -93,6 +93,9 @@ struct Context {
         VkDeviceSize usage = 0;
     };
     MemoryBudget deviceMemoryBudget() const;
+    // 장치 전용 힙의 «크기» 합. 예산과 달리 다른 프로세스나 이미 만든 자원에 영향받지 않아 기기의
+    // 성격을 재는 데 쓴다. 자동 튜닝의 등급 판정이 이 값을 본다.
+    VkDeviceSize deviceLocalMemoryBytes() const;
     // 0 이 아니면 드라이버 예산 대신 이 값을 예산으로 본다. --gpu-budget 이 채우며, 모델과 가속 구조의
     // 예산 검사가 모두 같은 값을 보게 여기 둔다.
     VkDeviceSize memoryBudgetOverride = 0;

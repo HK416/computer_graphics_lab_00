@@ -133,6 +133,7 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     if (!options.meshShader) {
         renderer->useMeshShader = false;
     }
+    applyHardwareProfile();
     orbitDegreesPerFrame = options.orbitDegreesPerFrame;
     renderer->setUiCallback([this](VkCommandBuffer commandBuffer) { editorUi->record(commandBuffer); });
     editorUi->setModelLoader(assetRoot, [this](const std::filesystem::path& path) { requestModel(path); });
@@ -181,6 +182,81 @@ void Application::loadScenes() {
     geometry->build();
     scenes.setActive(0);
     spdlog::info("기본 장면 준비 완료: {}", created.name);
+}
+
+void Application::applyHardwareProfile() {
+    // HardwareProfile::upscaler 는 헤더가 Vulkan 을 끌어오지 않도록 숫자로 둔다. 그 번호가
+    // gfx::Upscaler 와 어긋나면 조용히 엉뚱한 업스케일러가 켜진다.
+    static_assert(static_cast<uint32_t>(gfx::Upscaler::SPATIAL) == 1);
+    static_assert(static_cast<uint32_t>(gfx::Upscaler::TAAU) == 2);
+    static_assert(static_cast<uint32_t>(gfx::Upscaler::FSR) == 3);
+    static_assert(static_cast<uint32_t>(gfx::Upscaler::DLSS) == 4);
+
+    gfx::ProfileInputs inputs;
+    switch (context->properties.deviceType) {
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+        inputs.deviceType = gfx::ProfileInputs::DeviceType::INTEGRATED;
+        break;
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+        inputs.deviceType = gfx::ProfileInputs::DeviceType::DISCRETE;
+        break;
+    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+        inputs.deviceType = gfx::ProfileInputs::DeviceType::VIRTUAL;
+        break;
+    case VK_PHYSICAL_DEVICE_TYPE_CPU:
+        inputs.deviceType = gfx::ProfileInputs::DeviceType::CPU;
+        break;
+    default:
+        inputs.deviceType = gfx::ProfileInputs::DeviceType::OTHER;
+        break;
+    }
+    // 남은 예산이 아니라 힙 «크기» 를 본다. 예산은 다른 프로세스와 이미 만든 자원에 따라 흔들려
+    // 같은 기계가 실행마다 다른 등급을 받는다.
+    inputs.deviceMemoryBytes = context->deviceLocalMemoryBytes();
+    inputs.meshShader = context->caps.meshShader;
+    inputs.rayQuery = context->caps.rayQuery;
+    inputs.rayTracingPipeline = context->caps.rayTracingPipeline;
+    // 창 크기가 아니라 모니터 해상도를 본다. 창은 기동 시 고정 크기라 «이 화면이 얼마나 넓어질 수
+    // 있는가» 를 말해 주지 못한다.
+    if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window)); mode != nullptr) {
+        inputs.displayWidth = static_cast<uint32_t>(mode->w);
+        inputs.displayHeight = static_cast<uint32_t>(mode->h);
+    }
+    // 내장 TAAU 는 늘 있으므로 더 나은 것이 있으면 그것을 고른다.
+    for (const gfx::UpscalerInfo& info : renderer->upscalers()) {
+        if (info.available && (info.kind == gfx::Upscaler::FSR || info.kind == gfx::Upscaler::DLSS)) {
+            inputs.bestTemporalUpscaler = static_cast<uint32_t>(info.kind);
+        }
+    }
+
+    hardwareProfile = gfx::chooseProfile(inputs, options.autoTune);
+    editorUi->hardwareProfile = hardwareProfile;
+    editorUi->autoTune = options.autoTune;
+    if (options.autoTune == gfx::AutoTune::OFF) {
+        spdlog::info("자동 튜닝 꺼짐: 기본값을 그대로 쓴다");
+        return;
+    }
+
+    // 명령줄이 정한 것은 자동 튜닝보다 세다. 스크린샷 비교가 인자대로 도는 것이 중요하다.
+    if (!options.renderScaleGiven) {
+        renderer->renderScale = hardwareProfile.renderScale;
+    }
+    if (!options.upscalerGiven) {
+        renderer->upscaler = static_cast<gfx::Upscaler>(hardwareProfile.upscaler);
+    }
+    renderer->ssaoSamples = hardwareProfile.ssaoSamples;
+    renderer->shadowCascades = hardwareProfile.shadowCascades;
+    renderer->fluidParticleLimit = hardwareProfile.fluidParticleLimit;
+    // 반사는 --reflections 로 켠 것을 끄지 않고 --no-reflections 로 끈 것을 켜지 않는다.
+    if (!options.reflectionsGiven) {
+        renderer->useReflections = hardwareProfile.reflections;
+    }
+    renderer->useRayQueryShadows = hardwareProfile.rayQueryShadows;
+
+    spdlog::info("자동 튜닝({}): 등급 {}", gfx::autoTuneName(options.autoTune), gfx::tierName(hardwareProfile.tier));
+    for (const std::string& reason : hardwareProfile.reasons) {
+        spdlog::info("  - {}", reason);
+    }
 }
 
 void Application::registerBuiltinModels() {

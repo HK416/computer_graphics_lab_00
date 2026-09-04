@@ -193,6 +193,7 @@ add_executable(cg_lab
     src/gfx/bindless.cpp
     src/gfx/fluid.cpp
     src/gfx/geometry.cpp
+    src/gfx/hardware_profile.cpp
     src/gfx/lod_network.cpp
     src/gfx/profiler.cpp
     src/gfx/profiler_math.cpp
@@ -366,6 +367,7 @@ add_executable(cg_lab_shadow_tests tests/shadow_test.cpp src/gfx/shadow_math.cpp
 add_executable(cg_lab_upscaler_tests tests/upscaler_test.cpp src/gfx/upscaler_math.cpp)
 add_executable(cg_lab_vertex_pack_tests tests/vertex_pack_test.cpp)
 add_executable(cg_lab_primitives_tests tests/primitives_test.cpp src/asset/primitives.cpp)
+add_executable(cg_lab_hardware_profile_tests tests/hardware_profile_test.cpp src/gfx/hardware_profile.cpp)
 add_executable(cg_lab_debug_lines_tests tests/debug_lines_test.cpp src/gfx/debug_lines.cpp src/scene/scene.cpp
     src/asset/animation.cpp src/core/error.cpp src/core/job_system.cpp)
 target_include_directories(cg_lab_vertex_pack_tests PRIVATE src)
@@ -382,6 +384,13 @@ if(MSVC)
     target_compile_options(cg_lab_primitives_tests PRIVATE /W4 /utf-8)
 else()
     target_compile_options(cg_lab_primitives_tests PRIVATE -Wall -Wextra)
+endif()
+
+target_include_directories(cg_lab_hardware_profile_tests PRIVATE src)
+if(MSVC)
+    target_compile_options(cg_lab_hardware_profile_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(cg_lab_hardware_profile_tests PRIVATE -Wall -Wextra)
 endif()
 
 target_include_directories(cg_lab_debug_lines_tests PRIVATE src)
@@ -478,7 +487,7 @@ foreach(test_target
         cg_lab_tests cg_lab_animation_tests cg_lab_camera_tests cg_lab_scene_tests
         cg_lab_scene_io_tests cg_lab_profiler_tests cg_lab_shadow_tests cg_lab_concurrency_tests
         cg_lab_upscaler_tests cg_lab_vertex_pack_tests cg_lab_physics_tests cg_lab_primitives_tests
-        cg_lab_debug_lines_tests)
+        cg_lab_debug_lines_tests cg_lab_hardware_profile_tests)
     if(MSVC)
         target_compile_options(${test_target} PRIVATE /UNDEBUG)
     else()
@@ -503,6 +512,7 @@ add_test(NAME concurrency COMMAND cg_lab_concurrency_tests)
 add_test(NAME vertex_pack COMMAND cg_lab_vertex_pack_tests)
 add_test(NAME primitives COMMAND cg_lab_primitives_tests)
 add_test(NAME debug_lines COMMAND cg_lab_debug_lines_tests)
+add_test(NAME hardware_profile COMMAND cg_lab_hardware_profile_tests)
 add_test(NAME physics COMMAND cg_lab_physics_tests)
 
 # cmake --build --preset debug --target run 으로 빌드한 뒤 바로 실행한다.

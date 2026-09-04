@@ -203,7 +203,7 @@ bool FluidSimulator::prepare(const scene::Scene& scene, bool sceneSwitched) {
         State& state = states[i];
         const scene::Fluid& settings = scene.fluids[i];
         state.objectIndex = owners[i];
-        state.count = state.objectIndex == UINT32_MAX ? 0 : std::min(settings.particleCount, FLUID_MAX_PARTICLES);
+        state.count = state.objectIndex == UINT32_MAX ? 0 : std::min(settings.particleCount, particleLimit);
         if (state.count == 0) {
             continue;
         }

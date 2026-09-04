@@ -672,6 +672,18 @@ Context::MemoryBudget Context::deviceMemoryBudget() const {
     return total;
 }
 
+VkDeviceSize Context::deviceLocalMemoryBytes() const {
+    const VkPhysicalDeviceMemoryProperties* memory = nullptr;
+    vmaGetMemoryProperties(allocator, &memory);
+    VkDeviceSize total = 0;
+    for (uint32_t heap = 0; heap < memory->memoryHeapCount; ++heap) {
+        if ((memory->memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) {
+            total += memory->memoryHeaps[heap].size;
+        }
+    }
+    return total;
+}
+
 Context::~Context() {
     // 할당기를 지우기 전에 맡아 둔 자원을 모두 비운다.
     collectRetired(UINT64_MAX);

@@ -13,6 +13,7 @@
 #include <SDL3/SDL_events.h>
 #include <vulkan/vulkan.h>
 
+#include "gfx/hardware_profile.h"
 // 되돌리기 기록이 SceneSnapshot 을 값으로 들고 있어 전방 선언으로는 부족하다.
 #include "scene/scene.h"
 
@@ -197,6 +198,9 @@ public:
     // asset::Primitive 순서의 전역 메쉬 번호. 내장 도형은 해제되지 않으므로 번호가 고정이다.
     // 애플리케이션이 채운다.
     std::vector<uint32_t> primitiveMeshes;
+    // 기동 시 고른 하드웨어 프로파일과 그 세기. «하드웨어» 패널이 판정 근거를 그대로 보여 준다.
+    gfx::HardwareProfile hardwareProfile;
+    gfx::AutoTune autoTune = gfx::AutoTune::SAFE;
 };
 
 } // namespace editor

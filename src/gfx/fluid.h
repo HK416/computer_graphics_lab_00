@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -93,6 +94,11 @@ public:
     // 유체 index 의 입자 수. 그릴 수 없으면 0.
     uint32_t particleCount(uint32_t index) const;
     uint32_t fluidCount() const { return static_cast<uint32_t>(states.size()); }
+    // 부품이 더 달라고 해도 이보다 많이 뿌리지 않는다. 하드웨어 프로파일이 정한다.
+    //
+    // ponytail: 상한이 «줄어드는» 프레임에는 다시 뿌리지 않아 앞쪽 입자만 남고 잘린다. 버퍼는
+    // 늘어날 때만 다시 잡기 때문이다. 기동 시 한 번만 정해지는 지금은 드러나지 않는다.
+    void setParticleLimit(uint32_t limit) { particleLimit = std::min(limit, FLUID_MAX_PARTICLES); }
     uint32_t totalParticles() const;
     // 용기의 경계 구. 그림자 시점 컬링이 쓴다.
     glm::vec4 bounds(uint32_t index) const;
@@ -145,6 +151,7 @@ private:
     // 유체에게 넘어가므로, 값이 달라진 프레임에는 전부 다시 뿌린다.
     uint64_t lastComponentRevision = 0;
     bool wasSimulating = false;
+    uint32_t particleLimit = FLUID_MAX_PARTICLES;
 
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipeline emitPipeline = VK_NULL_HANDLE;

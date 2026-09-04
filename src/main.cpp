@@ -46,6 +46,10 @@ int main(int argc, char* argv[]) {
             options.play = true;
         } else if (argument == "--reflections") {
             options.reflections = true;
+            options.reflectionsGiven = true;
+        } else if (argument == "--no-reflections") {
+            options.reflections = false;
+            options.reflectionsGiven = true;
         } else if (argument == "--no-colliders") {
             options.showColliders = false;
         } else if (argument == "--no-occlusion") {
@@ -60,8 +64,15 @@ int main(int argc, char* argv[]) {
             options.triangleBudget = static_cast<float>(std::atof(argv[++i]));
         } else if (argument == "--render-scale" && i + 1 < argc) {
             options.renderScale = static_cast<float>(std::atof(argv[++i]));
+            options.renderScaleGiven = true;
         } else if (argument == "--upscaler" && i + 1 < argc) {
             options.upscaler = static_cast<uint32_t>(std::atoi(argv[++i]));
+            options.upscalerGiven = true;
+        } else if (argument == "--auto-tune" && i + 1 < argc) {
+            std::string_view level = argv[++i];
+            if (!gfx::parseAutoTune(level, options.autoTune)) {
+                spdlog::warn("모르는 --auto-tune 값입니다: {} (off|safe|aggressive)", level);
+            }
         } else if (argument == "--threads" && i + 1 < argc) {
             options.threadCount = static_cast<unsigned>(std::atoi(argv[++i]));
         } else if (argument == "--gpu-budget" && i + 1 < argc) {
