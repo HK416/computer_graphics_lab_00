@@ -45,7 +45,7 @@ ctest --test-dir build/debug --output-on-failure
 ```
 
 테스트 이름: `lod_network` `animation` `camera` `scene` `scene_io` `profiler` `shadow` `upscaler`
-`concurrency` `vertex_pack` `physics` `primitives`.
+`concurrency` `vertex_pack` `physics` `primitives` `debug_lines`.
 
 선택 기능:
 
@@ -182,6 +182,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `GpuFluidCollider` `GpuFluidParams` `FluidPushConstants` (`src/gfx/fluid.h`) | `FluidCollider` `FluidParams` `FluidPushConstants` (`shaders/fluid_common.glsl`) |
 | `scene::ColliderShape` (`src/scene/scene.h`) | `FLUID_COLLIDER_*` (`fluid_common.glsl`) |
 | `Options::debugMode`, `Renderer::debugMode` | `DEBUG_MODE_*` (`scene_types.glsl`) |
+| `DebugLineVertex` (`src/gfx/debug_lines.h`), `DebugLinePushConstants` (`renderer.cpp`) | 동명 구조체 (`shaders/debug_line_common.glsl`) |
 
 전부 `scalar` 레이아웃이다.
 

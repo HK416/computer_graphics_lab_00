@@ -78,6 +78,8 @@ set(shader_sources
     shaders/mesh.frag
     shaders/mesh_oit.frag
     shaders/fullscreen.vert
+    shaders/debug_line.vert
+    shaders/debug_line.frag
     shaders/oit_composite.frag
     shaders/tonemap.frag
     shaders/bloom_downsample.comp
@@ -186,6 +188,7 @@ add_executable(cg_lab
     src/core/job_system.cpp
     src/editor/editor.cpp
     src/gfx/context.cpp
+    src/gfx/debug_lines.cpp
     src/gfx/environment.cpp
     src/gfx/bindless.cpp
     src/gfx/fluid.cpp
@@ -363,6 +366,8 @@ add_executable(cg_lab_shadow_tests tests/shadow_test.cpp src/gfx/shadow_math.cpp
 add_executable(cg_lab_upscaler_tests tests/upscaler_test.cpp src/gfx/upscaler_math.cpp)
 add_executable(cg_lab_vertex_pack_tests tests/vertex_pack_test.cpp)
 add_executable(cg_lab_primitives_tests tests/primitives_test.cpp src/asset/primitives.cpp)
+add_executable(cg_lab_debug_lines_tests tests/debug_lines_test.cpp src/gfx/debug_lines.cpp src/scene/scene.cpp
+    src/asset/animation.cpp src/core/error.cpp src/core/job_system.cpp)
 target_include_directories(cg_lab_vertex_pack_tests PRIVATE src)
 target_link_libraries(cg_lab_vertex_pack_tests PRIVATE glm::glm)
 if(MSVC)
@@ -377,6 +382,15 @@ if(MSVC)
     target_compile_options(cg_lab_primitives_tests PRIVATE /W4 /utf-8)
 else()
     target_compile_options(cg_lab_primitives_tests PRIVATE -Wall -Wextra)
+endif()
+
+target_include_directories(cg_lab_debug_lines_tests PRIVATE src)
+target_link_libraries(cg_lab_debug_lines_tests PRIVATE SDL3::SDL3 spdlog::spdlog glm::glm Threads::Threads)
+target_compile_definitions(cg_lab_debug_lines_tests PRIVATE GLM_ENABLE_EXPERIMENTAL)
+if(MSVC)
+    target_compile_options(cg_lab_debug_lines_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(cg_lab_debug_lines_tests PRIVATE -Wall -Wextra)
 endif()
 add_executable(cg_lab_concurrency_tests tests/lock_free_queue_test.cpp src/core/job_system.cpp)
 target_include_directories(cg_lab_concurrency_tests PRIVATE src)
@@ -463,7 +477,8 @@ endif()
 foreach(test_target
         cg_lab_tests cg_lab_animation_tests cg_lab_camera_tests cg_lab_scene_tests
         cg_lab_scene_io_tests cg_lab_profiler_tests cg_lab_shadow_tests cg_lab_concurrency_tests
-        cg_lab_upscaler_tests cg_lab_vertex_pack_tests cg_lab_physics_tests cg_lab_primitives_tests)
+        cg_lab_upscaler_tests cg_lab_vertex_pack_tests cg_lab_physics_tests cg_lab_primitives_tests
+        cg_lab_debug_lines_tests)
     if(MSVC)
         target_compile_options(${test_target} PRIVATE /UNDEBUG)
     else()
@@ -487,6 +502,7 @@ add_test(NAME upscaler COMMAND cg_lab_upscaler_tests)
 add_test(NAME concurrency COMMAND cg_lab_concurrency_tests)
 add_test(NAME vertex_pack COMMAND cg_lab_vertex_pack_tests)
 add_test(NAME primitives COMMAND cg_lab_primitives_tests)
+add_test(NAME debug_lines COMMAND cg_lab_debug_lines_tests)
 add_test(NAME physics COMMAND cg_lab_physics_tests)
 
 # cmake --build --preset debug --target run 으로 빌드한 뒤 바로 실행한다.

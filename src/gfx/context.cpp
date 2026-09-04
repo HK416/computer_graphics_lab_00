@@ -264,6 +264,7 @@ Capabilities queryCapabilities(const FeatureChain& f,
     caps.samplerFilterMinmax = f.v12.samplerFilterMinmax == VK_TRUE;
     caps.pipelineStatistics = f.features2.features.pipelineStatisticsQuery == VK_TRUE;
     caps.depthClamp = f.features2.features.depthClamp == VK_TRUE;
+    caps.wideLines = f.features2.features.wideLines == VK_TRUE;
     caps.shaderFloat16 = f.v12.shaderFloat16 == VK_TRUE;
     // FSR 셰이더가 SPIR-V Int16 능력을 선언한다. 켜 두지 않으면 셰이더 모듈 생성이 거부된다.
     caps.shaderInt16 = f.features2.features.shaderInt16 == VK_TRUE && f.v11.storageBuffer16BitAccess == VK_TRUE;
@@ -562,6 +563,8 @@ Context::Context(SDL_Window* window) {
     enabled.features2.features.multiDrawIndirect = VK_TRUE;
     enabled.features2.features.drawIndirectFirstInstance = VK_TRUE;
     enabled.features2.features.fillModeNonSolid = VK_TRUE;
+    // 콜라이더 표시가 굵은 선을 쓴다. 없으면 1 화소로 그린다.
+    enabled.features2.features.wideLines = caps.wideLines ? VK_TRUE : VK_FALSE;
     enabled.features2.features.independentBlend = VK_TRUE;
     enabled.features2.features.fragmentStoresAndAtomics = VK_TRUE;
     enabled.features2.features.samplerAnisotropy = VK_TRUE;

@@ -46,6 +46,8 @@ int main(int argc, char* argv[]) {
             options.play = true;
         } else if (argument == "--reflections") {
             options.reflections = true;
+        } else if (argument == "--no-colliders") {
+            options.showColliders = false;
         } else if (argument == "--no-occlusion") {
             options.occlusionCulling = false;
         } else if (argument == "--no-mesh-shader") {

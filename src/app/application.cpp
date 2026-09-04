@@ -107,6 +107,7 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     editorUi->workerCount = jobs.workerCount();
     editorUi->primitiveMeshes = primitiveMeshes;
     renderer->debugMode = options.debugMode;
+    renderer->showColliders = options.showColliders;
     if (options.lodLevel != AUTOMATIC_LOD) {
         renderer->automaticLod = false;
         renderer->lodLevel = options.lodLevel;

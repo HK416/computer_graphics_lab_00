@@ -371,19 +371,22 @@ void stepRigidBodies(scene::Scene& scene, float dt, core::JobSystem* jobs) {
             Body& body = bodies[i];
             const scene::RigidBody& component =
                 scene.rigidBodies[static_cast<size_t>(scene.objects[body.object].rigidBody)];
-            scene::Transform world = scene::Transform::fromMatrix(scene.worldMatrix(body.object));
+            glm::mat4 worldMatrix = scene.worldMatrix(body.object);
+            scene::Transform world = scene::Transform::fromMatrix(worldMatrix);
+            // 세계 공간 크기는 편집기의 콜라이더 표시와 같은 함수로 낸다. 어긋나면 보이는 것과
+            // 부딪히는 것이 달라진다.
+            scene::ColliderPose pose = scene::colliderPose(component, worldMatrix);
             body.shape = component.shape;
-            body.position = world.position;
-            body.rotation = glm::normalize(world.rotation);
+            body.position = pose.position;
+            body.rotation = pose.rotation;
             body.scale = world.scale;
             body.velocity = component.velocity;
             body.angularVelocity = component.angularVelocity;
             body.restitution = component.restitution;
             body.friction = component.friction;
             body.useGravity = component.useGravity;
-            float scaleMax = std::max({world.scale.x, world.scale.y, world.scale.z});
-            body.radius = component.radius * scaleMax;
-            body.halfExtents = component.halfExtents * world.scale;
+            body.radius = pose.radius;
+            body.halfExtents = pose.halfExtents;
             bool fixed =
                 component.kinematic || component.shape == scene::ColliderShape::PLANE || component.mass <= 0.0F;
             body.inverseMass = fixed ? 0.0F : 1.0F / component.mass;

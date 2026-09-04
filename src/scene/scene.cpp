@@ -1,5 +1,6 @@
 #include "scene/scene.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -155,6 +156,18 @@ void Scene::resolveWorld(uint32_t index) {
     cachedVisible[index] = (object.visible && cachedVisible[parent] != 0) ? 1 : 0;
     // 부모가 움직였으면 자손의 세계 변환도 바뀐 것이다.
     cachedDirty[index] |= cachedDirty[parent];
+}
+
+ColliderPose colliderPose(const RigidBody& body, const glm::mat4& world) {
+    Transform transform = Transform::fromMatrix(world);
+    ColliderPose pose;
+    pose.position = transform.position;
+    pose.rotation = glm::normalize(transform.rotation);
+    // 구는 한 배율만 받을 수 있어 가장 큰 축을 쓴다. 그러지 않으면 눌린 배율에서 콜라이더가 메쉬를
+    // 뚫고 나온다.
+    pose.radius = body.radius * std::max({transform.scale.x, transform.scale.y, transform.scale.z});
+    pose.halfExtents = body.halfExtents * transform.scale;
+    return pose;
 }
 
 void Scene::refresh() {

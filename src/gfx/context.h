@@ -40,6 +40,8 @@ struct Capabilities {
     bool timestamps = false;
     // 그림자 절두체 근평면 앞의 캐스터를 잘라 내지 않고 눌러 담을 수 있는지.
     bool depthClamp = false;
+    // 1 화소보다 굵은 선을 그릴 수 있는지. 콜라이더 표시가 굵게 그리는 데 쓴다.
+    bool wideLines = false;
     uint32_t subgroupSize = 0;
 };
 

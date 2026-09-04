@@ -114,6 +114,16 @@ struct RigidBody {
     bool operator==(const RigidBody&) const = default;
 };
 
+// 강체 부품이 세계 공간에서 차지하는 모양. 솔버와 편집기의 콜라이더 표시가 어긋나지 않도록 규칙을
+// 여기서 한 번만 정한다. 구는 가장 큰 축의 배율을 받고 상자는 축마다 따로 받는다.
+struct ColliderPose {
+    glm::vec3 position{0.0F};
+    glm::quat rotation{1.0F, 0.0F, 0.0F, 0.0F};
+    float radius = 0.0F;
+    glm::vec3 halfExtents{0.0F};
+};
+ColliderPose colliderPose(const RigidBody& body, const glm::mat4& world);
+
 // 유체 부품. 입자 상태는 GPU 에만 있고 여기에는 방출·시뮬레이션 설정만 둔다. 방출 상자는 오브젝트
 // 지역 공간이고 용기는 월드 공간이다. 값이 바뀌면 렌더러가 입자를 다시 뿌린다.
 struct Fluid {

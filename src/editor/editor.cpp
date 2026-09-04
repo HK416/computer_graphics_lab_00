@@ -1680,6 +1680,20 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
 
     if (section("파이프라인")) {
         ImGui::Checkbox("와이어프레임", &renderer.wireframe);
+        ImGui::Checkbox("콜라이더 표시", &renderer.showColliders);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("강체 콜라이더는 초록, 유체 용기는 청록, 방출 상자는 노랑으로 덧그린다");
+        }
+        // 경로 추적은 깊이 버퍼를 채우지 않아 가림을 판정할 수 없다. 그 모드에서는 늘 보인다.
+        bool depthAvailable = !renderer.usePathTracing;
+        ImGui::BeginDisabled(!renderer.showColliders || !depthAvailable);
+        ImGui::SameLine();
+        ImGui::Checkbox("가림 판정", &renderer.colliderOcclusion);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(depthAvailable ? "끄면 물체에 가려도 선이 그대로 보인다"
+                                             : "경로 추적은 깊이 버퍼를 채우지 않아 늘 보인다");
+        }
+        ImGui::EndDisabled();
         ImGui::BeginDisabled(!renderer.meshShaderAvailable() || rasterOnly);
         ImGui::Checkbox("mesh shader 경로", &renderer.useMeshShader);
         ImGui::EndDisabled();
@@ -1865,6 +1879,10 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
             clearSelection();
         }
     }
+
+    // 콜라이더를 밝게 그릴 오브젝트. 삭제와 장면 열기가 선택을 바꾸므로 그것들을 다 처리한 뒤에
+    // 넘긴다. 이 프레임의 렌더는 build 가 끝난 다음이다.
+    renderer.selectedObject = primarySelection();
 
     updateHistory(scenes.active(), scenes.current());
 

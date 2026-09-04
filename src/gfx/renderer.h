@@ -14,6 +14,7 @@
 #include <glm/vec4.hpp>
 #include <vulkan/vulkan.h>
 
+#include "gfx/debug_lines.h"
 #include "gfx/environment.h"
 #include "gfx/fluid.h"
 #include "gfx/lod_network.h"
@@ -278,6 +279,11 @@ public:
 
     float exposure = 1.0F;
     bool wireframe = false;
+    // 강체 콜라이더와 유체 경계를 선으로 덧그린다. Unity 의 기즈모처럼 물체 뒤로 숨는다.
+    bool showColliders = true;
+    bool colliderOcclusion = true;
+    // 밝게 그릴 오브젝트. 편집기가 고른 것을 넣는다.
+    int32_t selectedObject = -1;
     // shaders/scene_data.glsl 의 DEBUG_MODE_* 값.
     uint32_t debugMode = 0;
     // 자동 LOD 선정을 끄면 이 단계를 강제한다.
@@ -393,6 +399,9 @@ private:
         // 시점별로 컬링해 압축한 그림자 그리기 명령. 시점 하나가 알파 경로 둘을 쓴다.
         Buffer shadowDrawBuffer;
         uint32_t shadowDrawCapacity = 0;
+        // 디버그 선의 정점. 콜라이더 표시를 켰을 때만 채운다.
+        Buffer debugLineBuffer;
+        uint32_t debugLineCapacity = 0;
         uint32_t lightCapacity = 0;
         uint32_t instanceCapacity = 0;
         uint32_t groupCapacity = 0;
@@ -439,6 +448,10 @@ private:
     void createShadowPipeline();
     void createSsaoPipelines();
     void createBloomPipelines();
+    // 편집기의 콜라이더·유체 경계 표시. 톤 매핑과 공간 업스케일 뒤, UI 앞에 표시 해상도로 그린다.
+    void createDebugLinePipeline();
+    void reserveDebugLines(Frame& frame, uint32_t vertexCount);
+    void recordDebugLines(VkCommandBuffer commandBuffer, Frame& frame, const scene::Scene& scene, VkExtent2D extent);
     // 광선 질의 컴퓨트로 반사를 추적하고 시간축으로 누적해 색상에 더한다. 광선 질의가 있을 때만 만든다.
     void createReflectionPipelines();
     void recordReflectionPass(VkCommandBuffer commandBuffer, const Frame& frame);
@@ -498,6 +511,10 @@ private:
     VkPipeline histogramPipeline = VK_NULL_HANDLE;
     VkPipelineLayout exposurePipelineLayout = VK_NULL_HANDLE;
     VkPipeline exposurePipeline = VK_NULL_HANDLE;
+    VkPipelineLayout debugLinePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline debugLinePipeline = VK_NULL_HANDLE;
+    // 프레임마다 다시 채우는 선분 목록. 벡터를 그대로 두어 할당을 되쓴다.
+    std::vector<DebugLineVertex> debugLineVertices;
     // 자동 노출. 히스토그램은 프레임마다 지우고, 노출 값은 프레임을 넘어 적응한다.
     Buffer histogramBuffer;
     Buffer exposureBuffer;
