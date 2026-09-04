@@ -363,6 +363,10 @@ public:
     uint32_t fluidSphereMesh = 0xFFFFFFFFU;
     // 유체 부품이 요청해도 이보다 많은 입자는 뿌리지 않는다. 하드웨어 프로파일이 정한다.
     uint32_t fluidParticleLimit = FLUID_MAX_PARTICLES;
+    // 유체 부품 index 가 지금 CPU 에서 도는지. 편집기가 «자동» 이 무엇을 골랐는지 보여 주는 데 쓴다.
+    bool fluidOnCpu(uint32_t index) const { return fluid != nullptr && fluid->onCpu(index); }
+    // 이 장치에서 유체 GPU 백엔드를 쓸 수 있는지. 편집기가 못 고르게 막는 데 쓴다.
+    bool fluidGpuAvailable() const { return fluid != nullptr && fluid->gpuAvailable(); }
     // mesh shader 미지원 장치에서는 켤 수 없다.
     bool useMeshShader = false;
     bool meshShaderAvailable() const { return meshShaderPipelines[0] != VK_NULL_HANDLE; }

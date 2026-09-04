@@ -88,6 +88,13 @@ struct MeshRenderer {
     bool operator==(const MeshRenderer&) const = default;
 };
 
+// 시뮬레이션을 어디서 돌릴지. AUTO 는 하드웨어와 자동 튜닝이 정한다.
+enum class SimulationBackend : uint32_t {
+    AUTO = 0,
+    CPU = 1,
+    GPU = 2,
+};
+
 enum class ColliderShape : uint32_t {
     SPHERE = 0,
     BOX = 1,
@@ -127,6 +134,8 @@ ColliderPose colliderPose(const RigidBody& body, const glm::mat4& world);
 // 유체 부품. 입자 상태는 GPU 에만 있고 여기에는 방출·시뮬레이션 설정만 둔다. 방출 상자는 오브젝트
 // 지역 공간이고 용기는 월드 공간이다. 값이 바뀌면 렌더러가 입자를 다시 뿌린다.
 struct Fluid {
+    // 어디서 풀지. AUTO 는 GPU 를 쓰되 만들 수 없으면 CPU 로 내려간다.
+    SimulationBackend backend = SimulationBackend::AUTO;
     glm::vec3 emitterHalfExtents{0.5F};
     uint32_t particleCount = 8192;
     float particleRadius = 0.025F;

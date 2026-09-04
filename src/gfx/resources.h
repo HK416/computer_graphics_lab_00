@@ -61,6 +61,9 @@ Image createImage(Context& context, const ImageDesc& desc, const char* debugName
 
 // 빌드가 내놓은 SPIR-V 를 이름으로 읽어 셰이더 모듈을 만든다. 실패하면 즉시 중단한다.
 VkShaderModule createShaderModule(VkDevice device, const std::string& name);
+// 같은 일을 하되 실패하면 사유를 로그에 남기고 VK_NULL_HANDLE 을 돌려준다. 없으면 다른 경로로
+// 내려갈 수 있는 선택 기능이 쓴다.
+VkShaderModule tryCreateShaderModule(VkDevice device, const std::string& name);
 void destroyImage(Context& context, Image& image);
 
 // 이미지 배리어 한 장을 기록한다. 레이아웃 전이와 큐 패밀리 소유권 이전에 모두 쓴다.

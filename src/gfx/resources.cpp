@@ -2,7 +2,11 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <format>
+#include <string>
 #include <vector>
+
+#include <spdlog/spdlog.h>
 
 #include "core/error.h"
 #include "gfx/context.h"
@@ -11,18 +15,24 @@
 namespace gfx {
 namespace {
 
-std::vector<uint32_t> readSpirv(const std::string& name) {
+// 읽지 못하면 비어 있는 벡터를 돌려준다. 중단할지는 부르는 쪽이 정한다.
+std::vector<uint32_t> readSpirv(const std::string& name, std::string& reason) {
     std::filesystem::path path = std::filesystem::path(CG_LAB_SHADER_ROOT) / name;
     std::error_code error;
     auto size = std::filesystem::file_size(path, error);
     if (error || size == 0 || size % sizeof(uint32_t) != 0) {
-        core::fatal("셰이더를 읽을 수 없습니다: {}", path.string());
+        reason = std::format("셰이더를 읽을 수 없습니다: {}", path.string());
+        return {};
     }
 
     std::vector<uint32_t> code(size / sizeof(uint32_t));
     std::FILE* file = std::fopen(path.string().c_str(), "rb");
     if (file == nullptr || std::fread(code.data(), 1, size, file) != size) {
-        core::fatal("셰이더 읽기에 실패했습니다: {}", path.string());
+        reason = std::format("셰이더 읽기에 실패했습니다: {}", path.string());
+        if (file != nullptr) {
+            std::fclose(file);
+        }
+        return {};
     }
     std::fclose(file);
     return code;
@@ -224,12 +234,28 @@ void imageBarrier(VkCommandBuffer commandBuffer,
 }
 
 VkShaderModule createShaderModule(VkDevice device, const std::string& name) {
-    std::vector<uint32_t> code = readSpirv(name);
+    VkShaderModule module = tryCreateShaderModule(device, name);
+    if (module == VK_NULL_HANDLE) {
+        core::fatal("셰이더 모듈을 만들 수 없습니다: {}", name);
+    }
+    return module;
+}
+
+VkShaderModule tryCreateShaderModule(VkDevice device, const std::string& name) {
+    std::string reason;
+    std::vector<uint32_t> code = readSpirv(name, reason);
+    if (code.empty()) {
+        spdlog::warn("{}", reason);
+        return VK_NULL_HANDLE;
+    }
     VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     info.codeSize = code.size() * sizeof(uint32_t);
     info.pCode = code.data();
     VkShaderModule module = VK_NULL_HANDLE;
-    VK_CHECK(vkCreateShaderModule(device, &info, nullptr, &module));
+    if (vkCreateShaderModule(device, &info, nullptr, &module) != VK_SUCCESS) {
+        spdlog::warn("셰이더 모듈을 만들지 못했습니다: {}", name);
+        return VK_NULL_HANDLE;
+    }
     return module;
 }
 

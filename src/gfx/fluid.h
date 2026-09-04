@@ -10,7 +10,12 @@
 #include <vulkan/vulkan.h>
 
 #include "gfx/resources.h"
+#include "physics/fluid_sph.h"
 #include "scene/scene.h"
+
+namespace core {
+class JobSystem;
+} // namespace core
 
 namespace gfx {
 
@@ -20,6 +25,10 @@ class BindlessTextures;
 inline constexpr uint32_t FLUID_MAX_PARTICLES = 32768;
 inline constexpr uint32_t FLUID_CELL_CAPACITY = 32;
 inline constexpr uint32_t FLUID_MAX_COLLIDERS = 8;
+// CPU 백엔드와 셰이더가 같은 값을 써야 격자 규칙이 갈리지 않는다. physics 쪽이 커지면 fillParams 가
+// GPU 배열을 넘어 쓴다.
+static_assert(FLUID_MAX_COLLIDERS == physics::FLUID_MAX_COLLIDERS, "콜라이더 상한이 CPU 백엔드와 어긋난다");
+static_assert(FLUID_CELL_CAPACITY == physics::FLUID_CELL_CAPACITY, "격자 버킷 용량이 CPU 백엔드와 어긋난다");
 inline constexpr uint32_t FLUID_GROUP_SIZE = 128;
 inline constexpr uint32_t FLUID_FRAMES = 2;
 
@@ -83,7 +92,7 @@ inline constexpr uint32_t FLUID_FLAG_WRITE_TLAS = 2U;
 // 인스턴스를 렌더러의 인스턴스 버퍼에 직접 쓴다. 래스터와 경로 추적이 같은 인스턴스를 본다.
 class FluidSimulator {
 public:
-    FluidSimulator(Context& context, BindlessTextures& bindless);
+    FluidSimulator(Context& context, BindlessTextures& bindless, core::JobSystem& jobs);
     ~FluidSimulator();
     FluidSimulator(const FluidSimulator&) = delete;
     FluidSimulator& operator=(const FluidSimulator&) = delete;
@@ -93,6 +102,26 @@ public:
     bool prepare(const scene::Scene& scene, bool sceneSwitched);
     // 유체 index 의 입자 수. 그릴 수 없으면 0.
     uint32_t particleCount(uint32_t index) const;
+    // 유체 index 를 CPU 에서 푸는지. 편집기가 «지금 도는 백엔드» 를 보여 주는 데 쓴다.
+    bool onCpu(uint32_t index) const;
+    // 컴퓨트 파이프라인을 다 만들었는지. 거짓이면 GPU 백엔드를 고를 수 없다.
+    bool gpuAvailable() const { return gpuReady; }
+    // CPU 백엔드가 인스턴스를 직접 쓴다. 명령 기록 전에, 프레임 버퍼가 매핑된 채로 부른다.
+    // instances 와 tlasInstances 는 매핑 포인터이며 tlasInstances 가 널이면 쓰지 않는다.
+    //
+    // ponytail: 시뮬레이션이 여기서 동기로 돌아 주 스레드를 막는다. 기본 입자 수(8192)에 12 스레드로
+    // 프레임당 9 ms 쯤이고 그동안 GPU 는 논다. 겹치려면 지난 프레임 결과를 그리고 이번 프레임 계산을
+    // 백그라운드로 돌려야 한다(한 프레임 늦은 물이 된다).
+    void writeCpuInstances(uint32_t index,
+                           const scene::Scene& scene,
+                           float deltaSeconds,
+                           void* instances,
+                           uint32_t instanceBase,
+                           void* tlasInstances,
+                           uint32_t tlasBase,
+                           VkDeviceAddress sphereBlas,
+                           uint32_t sphereMesh,
+                           bool resetHistory);
     uint32_t fluidCount() const { return static_cast<uint32_t>(states.size()); }
     // 부품이 더 달라고 해도 이보다 많이 뿌리지 않는다. 하드웨어 프로파일이 정한다.
     //
@@ -136,15 +165,21 @@ private:
         // 이번 프레임 prepare 가 정한 것.
         uint32_t objectIndex = 0;
         uint32_t count = 0;
+        // CPU 백엔드면 참이다. GPU 버퍼는 만들지 않고 solver 가 상태를 든다.
+        bool cpu = false;
+        physics::FluidSolver solver;
     };
 
     void createPipelines();
     void destroyState(State& state);
     void ensureCapacity(State& state, uint32_t count);
+    // 두 백엔드가 함께 쓰는 시뮬레이션 상수.
+    physics::FluidParams deriveParams(const State& state, const scene::Scene& scene) const;
     void fillParams(GpuFluidParams& params, const State& state, const scene::Scene& scene) const;
 
     Context& context;
     BindlessTextures& bindless;
+    core::JobSystem& jobs;
     std::vector<State> states;
     const scene::Scene* lastScene = nullptr;
     // 마지막으로 본 부품 배치 번호. 부품을 붙이거나 떼면 유체 첨자가 밀려 states 의 슬롯이 다른
@@ -152,6 +187,8 @@ private:
     uint64_t lastComponentRevision = 0;
     bool wasSimulating = false;
     uint32_t particleLimit = FLUID_MAX_PARTICLES;
+    // 컴퓨트 파이프라인을 다 만들었는지. 하나라도 없으면 모든 유체가 CPU 로 내려간다.
+    bool gpuReady = false;
 
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipeline emitPipeline = VK_NULL_HANDLE;

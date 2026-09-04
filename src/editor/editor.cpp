@@ -955,6 +955,31 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
     if (object.fluid >= 0 && object.fluid < static_cast<int>(active.fluids.size()) &&
         componentHeader("유체", &scene::Object::fluid)) {
         scene::Fluid& fluid = active.fluids[static_cast<size_t>(object.fluid)];
+        constexpr std::array<const char*, 3> BACKEND_NAMES{"자동", "CPU", "GPU"};
+        // 컴퓨트 파이프라인을 만들지 못한 장치에서는 GPU 를 고를 수 없다. 하드웨어 게이트 규약대로
+        // 항목을 잠그고 사유를 보여 준다.
+        bool gpuUsable = renderer.fluidGpuAvailable();
+        if (ImGui::BeginCombo("백엔드", BACKEND_NAMES[static_cast<size_t>(fluid.backend)])) {
+            for (uint32_t i = 0; i < BACKEND_NAMES.size(); ++i) {
+                bool usable = gpuUsable || i != static_cast<uint32_t>(scene::SimulationBackend::GPU);
+                ImGui::BeginDisabled(!usable);
+                if (ImGui::Selectable(BACKEND_NAMES[i], static_cast<uint32_t>(fluid.backend) == i)) {
+                    fluid.backend = static_cast<scene::SimulationBackend>(i);
+                }
+                ImGui::EndDisabled();
+                if (!usable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    ImGui::SetTooltip("이 장치에서는 유체 컴퓨트 파이프라인을 만들지 못했다");
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("자동은 GPU 를 쓰되 만들지 못하면 CPU 로 내려간다");
+        }
+        // 자동이 무엇을 골랐는지는 렌더러만 안다. 그것을 그대로 보여 준다.
+        ImGui::SameLine();
+        ImGui::TextDisabled("(지금 %s)", renderer.fluidOnCpu(static_cast<uint32_t>(object.fluid)) ? "CPU" : "GPU");
+
         int particles = static_cast<int>(fluid.particleCount);
         if (ImGui::SliderInt("입자 수", &particles, 64, gfx::FLUID_MAX_PARTICLES)) {
             fluid.particleCount = static_cast<uint32_t>(particles);

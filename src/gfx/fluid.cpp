@@ -7,16 +7,23 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <spdlog/spdlog.h>
 
+#include "core/job_system.h"
 #include "gfx/bindless.h"
 #include "gfx/context.h"
+#include "gfx/geometry.h"
 #include "gfx/vk_check.h"
 
 namespace gfx {
 namespace {
 
+// 만들지 못하면 VK_NULL_HANDLE 을 돌려준다. 유체는 CPU 백엔드로 내려갈 수 있어 중단하지 않는다.
 VkPipeline createComputePipeline(Context& context, VkPipelineLayout layout, const char* shaderName) {
-    VkShaderModule module = createShaderModule(context.device, shaderName);
+    VkShaderModule module = tryCreateShaderModule(context.device, shaderName);
+    if (module == VK_NULL_HANDLE) {
+        return VK_NULL_HANDLE;
+    }
     VkPipelineShaderStageCreateInfo stage{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     stage.module = module;
@@ -25,7 +32,10 @@ VkPipeline createComputePipeline(Context& context, VkPipelineLayout layout, cons
     info.stage = stage;
     info.layout = layout;
     VkPipeline pipeline = VK_NULL_HANDLE;
-    VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline));
+    if (vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
+        spdlog::warn("유체 컴퓨트 파이프라인을 만들지 못했습니다: {}", shaderName);
+        pipeline = VK_NULL_HANDLE;
+    }
     vkDestroyShaderModule(context.device, module, nullptr);
     return pipeline;
 }
@@ -57,9 +67,16 @@ uint32_t groupsFor(uint32_t count) {
     return (count + FLUID_GROUP_SIZE - 1) / FLUID_GROUP_SIZE;
 }
 
+// 해시 격자의 셀 수. 입자의 두 배쯤을 2 의 거듭제곱으로 잡는다. 해시가 마스크로 접히므로 거듭제곱이
+// 아니면 안 된다. 두 백엔드가 같은 값을 써야 격자 규칙이 갈리지 않는다.
+uint32_t cellCountFor(uint32_t particles) {
+    return std::clamp<uint32_t>(std::bit_ceil(std::max(particles, 1U) * 2), 1024, 65536);
+}
+
 } // namespace
 
-FluidSimulator::FluidSimulator(Context& context, BindlessTextures& bindless) : context(context), bindless(bindless) {
+FluidSimulator::FluidSimulator(Context& context, BindlessTextures& bindless, core::JobSystem& jobs)
+    : context(context), bindless(bindless), jobs(jobs) {
     createPipelines();
 }
 
@@ -90,6 +107,12 @@ void FluidSimulator::createPipelines() {
     densityPipeline = createComputePipeline(context, pipelineLayout, "fluid_density.comp.spv");
     integratePipeline = createComputePipeline(context, pipelineLayout, "fluid_integrate.comp.spv");
     instancesPipeline = createComputePipeline(context, pipelineLayout, "fluid_instances.comp.spv");
+    // 하나라도 없으면 GPU 백엔드를 쓸 수 없다. 그때는 모든 유체가 CPU 로 내려간다.
+    gpuReady = emitPipeline != VK_NULL_HANDLE && gridPipeline != VK_NULL_HANDLE && densityPipeline != VK_NULL_HANDLE &&
+               integratePipeline != VK_NULL_HANDLE && instancesPipeline != VK_NULL_HANDLE;
+    if (!gpuReady) {
+        spdlog::warn("유체 GPU 백엔드를 만들지 못해 CPU 로 돈다");
+    }
 }
 
 void FluidSimulator::destroyState(State& state) {
@@ -124,8 +147,7 @@ void FluidSimulator::ensureCapacity(State& state, uint32_t count) {
     state.objectIndex = objectIndex;
     state.count = particleCount;
     state.capacity = count;
-    // 셀은 입자의 두 배쯤을 2 의 거듭제곱으로. 해시가 마스크로 접히므로 거듭제곱이어야 한다.
-    state.cellCount = std::clamp<uint32_t>(std::bit_ceil(count * 2), 1024, 65536);
+    state.cellCount = cellCountFor(count);
     VkDeviceSize particleBytes = static_cast<VkDeviceSize>(count) * sizeof(glm::vec4);
     for (Buffer& buffer : state.positions) {
         buffer = createBuffer(
@@ -207,7 +229,26 @@ bool FluidSimulator::prepare(const scene::Scene& scene, bool sceneSwitched) {
         if (state.count == 0) {
             continue;
         }
-        ensureCapacity(state, state.count);
+        // AUTO 는 GPU 를 쓴다. 컴퓨트 파이프라인을 만들지 못한 장치에서는 그것도 CPU 로 내려간다.
+        // GPU 를 명시해도 파이프라인이 없으면 CPU 로 내려간다. 편집기는 그때 GPU 항목 자체를 잠근다.
+        bool wantsCpu = settings.backend == scene::SimulationBackend::CPU || !gpuReady;
+        if (wantsCpu != state.cpu) {
+            // 백엔드를 바꾸면 상태를 새로 만든다. 옛 입자는 다른 쪽 저장소에 있다.
+            destroyState(state);
+            state.objectIndex = owners[i];
+            state.count = std::min(settings.particleCount, particleLimit);
+            state.cpu = wantsCpu;
+        }
+        if (state.cpu) {
+            // GPU 버퍼는 만들지 않지만 격자 규칙은 같아야 한다. 셀 수를 «용량» 에서 내는 것까지
+            // 같아야 입자 수를 줄였을 때 두 백엔드의 해시 충돌이 갈리지 않는다.
+            if (state.count > state.capacity || state.capacity == 0) {
+                state.capacity = state.count;
+                state.cellCount = cellCountFor(state.count);
+            }
+        } else {
+            ensureCapacity(state, state.count);
+        }
         glm::mat4 world = scene.visibleCached(state.objectIndex) ? scene.world(state.objectIndex) : glm::mat4{0.0F};
         if (!(settings == state.lastSettings) || world != state.lastWorld || playEdge) {
             state.needsEmit = true;
@@ -217,6 +258,91 @@ bool FluidSimulator::prepare(const scene::Scene& scene, bool sceneSwitched) {
         active = active || state.needsEmit || scene.simulating;
     }
     return active;
+}
+
+bool FluidSimulator::onCpu(uint32_t index) const {
+    return index < states.size() && states[index].cpu;
+}
+
+void FluidSimulator::writeCpuInstances(uint32_t index,
+                                       const scene::Scene& scene,
+                                       float deltaSeconds,
+                                       void* instances,
+                                       uint32_t instanceBase,
+                                       void* tlasInstances,
+                                       uint32_t tlasBase,
+                                       VkDeviceAddress sphereBlas,
+                                       uint32_t sphereMesh,
+                                       bool resetHistory) {
+    State& state = states[index];
+    if (!state.cpu || state.count == 0 || instances == nullptr) {
+        return;
+    }
+
+    physics::FluidParams params = deriveParams(state, scene);
+    bool emitted = false;
+    if (state.needsEmit || state.solver.particleCount() != state.count) {
+        state.solver.emit(params, state.count);
+        state.needsEmit = false;
+        emitted = true;
+    }
+    if (scene.simulating) {
+        state.solver.step(params, deltaSeconds, &jobs);
+    }
+
+    // 인스턴스 배치는 shaders/fluid_instances.comp 와 같아야 한다. 래스터와 광선 경로가 오브젝트
+    // 인스턴스와 같은 배열을 읽으므로 규칙이 어긋나면 입자만 엉뚱하게 그려진다.
+    const std::vector<glm::vec4>& current = state.solver.particles();
+    const std::vector<glm::vec4>& previous = state.solver.previousParticles();
+    bool history = !(resetHistory || emitted);
+    float radius = params.particleRadius;
+    auto* target = static_cast<GpuInstance*>(instances);
+    auto* tlas = static_cast<VkAccelerationStructureInstanceKHR*>(tlasInstances);
+    bool writeTlas = tlas != nullptr && sphereBlas != 0;
+
+    jobs.parallelFor(state.count, 256, [&](uint32_t begin, uint32_t end) {
+        for (uint32_t i = begin; i < end; ++i) {
+            glm::vec3 position{current[i]};
+            glm::vec3 before = history ? glm::vec3{previous[i]} : position;
+            glm::mat4 model = glm::scale(glm::translate(glm::mat4{1.0F}, position), glm::vec3{radius});
+
+            uint32_t slot = instanceBase + i;
+            GpuInstance& instance = target[slot];
+            instance.model = model;
+            instance.previousModel = glm::scale(glm::translate(glm::mat4{1.0F}, before), glm::vec3{radius});
+            // 균등 배율이라 노멀 행렬은 단위면 된다.
+            instance.normalMatrix = glm::mat4{1.0F};
+            instance.meshIndex = sphereMesh;
+            instance.bucket = 0;
+            instance.bucketBase = 0;
+            instance.jointOffset = NO_JOINTS;
+            instance.skinnedVertexOffset = NO_SKINNED_VERTICES;
+            instance.previousSkinnedVertexOffset = NO_SKINNED_VERTICES;
+            instance.skinnedMeshletOffset = 0;
+            instance.visibilityBase = 0;
+
+            if (writeTlas) {
+                // 매핑 버퍼는 쓰기 결합 메모리다. 비트필드에 바로 대입하면 담는 워드를 읽어 들여
+                // 고치는데, 그 읽기는 캐시가 없어 입자마다 네 번씩 비싸게 든다. 지역에서 채운 뒤
+                // 한 번에 옮긴다(updateTopLevel 도 같은 이유로 그렇게 한다).
+                VkAccelerationStructureInstanceKHR entry{};
+                // 가속 구조는 행 우선 3x4 다. glm 은 열 우선이라 옮겨 담는다.
+                for (uint32_t row = 0; row < 3; ++row) {
+                    for (uint32_t column = 0; column < 4; ++column) {
+                        entry.transform.matrix[row][column] = model[column][row];
+                    }
+                }
+                entry.instanceCustomIndex = slot & 0xFFFFFFU;
+                entry.mask = 0xFF;
+                entry.instanceShaderBindingTableRecordOffset = 0;
+                entry.flags = 0;
+                entry.accelerationStructureReference = sphereBlas;
+                tlas[tlasBase + i] = entry;
+            }
+        }
+    });
+
+    state.solver.keepRendered();
 }
 
 uint32_t FluidSimulator::particleCount(uint32_t index) const {
@@ -241,55 +367,41 @@ glm::vec4 FluidSimulator::bounds(uint32_t index) const {
     return glm::vec4{center, radius};
 }
 
-void FluidSimulator::fillParams(GpuFluidParams& params, const State& state, const scene::Scene& scene) const {
-    const scene::Fluid& settings = state.lastSettings;
-    float spacing = settings.particleRadius * 2.0F;
-    params.emitterWorld = state.lastWorld;
-    params.emitterHalfExtents = glm::vec4{settings.emitterHalfExtents, spacing};
-    params.containerMin = glm::vec4{settings.containerMin, settings.particleRadius};
-    params.containerMax = glm::vec4{settings.containerMax, 0.3F};
-    // 질량은 입자 하나가 간격 세제곱의 물을 대신하도록 잡는다. 그래야 밀도가 기준 밀도 언저리에서 시작한다.
-    params.gravity = glm::vec4{settings.gravity, settings.restDensity * spacing * spacing * spacing};
-    params.smoothingRadius = std::max(settings.smoothingRadius, spacing);
-    params.restDensity = settings.restDensity;
-    params.stiffness = settings.stiffness;
-    params.viscosity = settings.viscosity;
-    // 방출 격자. 상자 안에 x, y 로 채우고 남는 입자는 z 로 이어 쌓는다.
-    auto along = [spacing](float half) {
-        return std::max(1U, static_cast<uint32_t>(std::floor(half * 2.0F / spacing)));
-    };
-    uint32_t nx = along(settings.emitterHalfExtents.x);
-    uint32_t ny = along(settings.emitterHalfExtents.y);
-    uint32_t nz = std::max(1U, (state.count + nx * ny - 1) / (nx * ny));
-    params.lattice = glm::uvec4{nx, ny, nz, state.cellCount};
+physics::FluidParams FluidSimulator::deriveParams(const State& state, const scene::Scene& scene) const {
+    return physics::deriveFluidParams(state.lastSettings, state.lastWorld, state.count, state.cellCount, scene);
+}
 
-    // 강체를 콜라이더로 넘긴다. 일방향 결합이라 입자가 강체를 밀지는 못한다.
-    params.colliderCount = 0;
-    for (uint32_t index = 0; index < scene.objects.size() && params.colliderCount < FLUID_MAX_COLLIDERS; ++index) {
-        int32_t slot = scene.objects[index].rigidBody;
-        if (slot < 0 || static_cast<size_t>(slot) >= scene.rigidBodies.size() || !scene.visibleCached(index)) {
-            continue;
-        }
-        const scene::RigidBody& body = scene.rigidBodies[static_cast<size_t>(slot)];
-        scene::Transform world = scene::Transform::fromMatrix(scene.world(index));
-        GpuFluidCollider& collider = params.colliders[params.colliderCount++];
-        collider.type = static_cast<uint32_t>(body.shape);
-        glm::mat4 rigid = glm::translate(glm::mat4{1.0F}, world.position) * glm::mat4_cast(world.rotation);
-        switch (body.shape) {
+void FluidSimulator::fillParams(GpuFluidParams& params, const State& state, const scene::Scene& scene) const {
+    // 상수는 CPU 백엔드와 «같은 함수»로 낸다. 두 벌로 두면 백엔드를 바꿀 때마다 물이 달리 흐른다.
+    physics::FluidParams shared = deriveParams(state, scene);
+    params.emitterWorld = shared.emitterWorld;
+    params.emitterHalfExtents = glm::vec4{shared.emitterHalfExtents, shared.spacing};
+    params.containerMin = glm::vec4{shared.containerMin, shared.particleRadius};
+    params.containerMax = glm::vec4{shared.containerMax, shared.wallRestitution};
+    params.gravity = glm::vec4{shared.gravity, shared.particleMass};
+    params.smoothingRadius = shared.smoothingRadius;
+    params.restDensity = shared.restDensity;
+    params.stiffness = shared.stiffness;
+    params.viscosity = shared.viscosity;
+    params.lattice = glm::uvec4{shared.lattice, shared.cellCount};
+
+    params.colliderCount = shared.colliderCount;
+    for (uint32_t i = 0; i < shared.colliderCount; ++i) {
+        const physics::FluidCollider& source = shared.colliders[i];
+        GpuFluidCollider& collider = params.colliders[i];
+        collider.type = static_cast<uint32_t>(source.shape);
+        switch (source.shape) {
         case scene::ColliderShape::SPHERE:
-            collider.data0 =
-                glm::vec4{world.position, body.radius * std::max({world.scale.x, world.scale.y, world.scale.z})};
+            collider.data0 = glm::vec4{source.center, source.radius};
             break;
         case scene::ColliderShape::BOX:
-            collider.data0 = glm::vec4{body.halfExtents * world.scale, 0.0F};
-            collider.world = rigid;
-            collider.inverseWorld = glm::inverse(rigid);
+            collider.data0 = glm::vec4{source.halfExtents, 0.0F};
+            collider.world = source.world;
+            collider.inverseWorld = source.inverseWorld;
             break;
-        case scene::ColliderShape::PLANE: {
-            glm::vec3 normal = world.rotation * glm::vec3{0.0F, 1.0F, 0.0F};
-            collider.data0 = glm::vec4{normal, glm::dot(normal, world.position)};
+        case scene::ColliderShape::PLANE:
+            collider.data0 = glm::vec4{source.normal, source.offset};
             break;
-        }
         }
     }
 }
@@ -307,7 +419,8 @@ void FluidSimulator::record(VkCommandBuffer commandBuffer,
                             uint32_t sphereMesh,
                             bool resetHistory) {
     State& state = states[index];
-    if (state.count == 0) {
+    // CPU 백엔드는 writeCpuInstances 가 이미 인스턴스를 써 두었다.
+    if (state.count == 0 || state.cpu) {
         return;
     }
     frameSlot %= FLUID_FRAMES;
@@ -316,13 +429,10 @@ void FluidSimulator::record(VkCommandBuffer commandBuffer,
     fillParams(params, state, scene);
     std::memcpy(state.params[frameSlot].mapped, &params, sizeof(params));
 
-    // 서브스텝. 압력파 속도(√강성)와 낙하 속도로 안정 간격을 어림한다.
-    float h = params.smoothingRadius;
-    float gravity = std::max(glm::length(glm::vec3{params.gravity}), 0.1F);
-    float stableStep = std::min(0.4F * h / std::sqrt(std::max(params.stiffness, 1.0F)), 0.25F * std::sqrt(h / gravity));
-    float frameStep = std::min(deltaSeconds, 1.0F / 30.0F);
-    auto substeps =
-        scene.simulating ? std::clamp(static_cast<uint32_t>(std::ceil(frameStep / stableStep)), 1U, 8U) : 0U;
+    // 서브스텝 규칙은 CPU 백엔드와 «같은 함수» 를 쓴다. 두 벌로 두면 백엔드를 바꿀 때 물이 달리 흐른다.
+    physics::FluidParams shared = deriveParams(state, scene);
+    uint32_t substeps = scene.simulating ? physics::fluidSubsteps(shared, deltaSeconds) : 0U;
+    float frameStep = std::min(deltaSeconds, physics::FLUID_MAX_FRAME_STEP);
     float dt = substeps > 0 ? frameStep / static_cast<float>(substeps) : 0.0F;
 
     VkDescriptorSet bindlessSet = bindless.set();

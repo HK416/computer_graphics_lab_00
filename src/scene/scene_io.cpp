@@ -55,6 +55,16 @@ LightType toLightType(const std::string& name) {
 }
 
 constexpr std::array<const char*, 3> SHAPE_NAMES{"sphere", "box", "plane"};
+constexpr std::array<const char*, 3> BACKEND_NAMES{"auto", "cpu", "gpu"};
+
+SimulationBackend toBackend(const std::string& name) {
+    for (uint32_t i = 0; i < BACKEND_NAMES.size(); ++i) {
+        if (name == BACKEND_NAMES[i]) {
+            return static_cast<SimulationBackend>(i);
+        }
+    }
+    return SimulationBackend::AUTO;
+}
 
 ColliderShape toShape(const std::string& name) {
     for (uint32_t i = 0; i < SHAPE_NAMES.size(); ++i) {
@@ -184,7 +194,8 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
 
     json fluids = json::array();
     for (const Fluid& fluid : scene.fluids) {
-        fluids.push_back({{"emitterHalfExtents", toJson(fluid.emitterHalfExtents)},
+        fluids.push_back({{"backend", BACKEND_NAMES[static_cast<size_t>(fluid.backend)]},
+                          {"emitterHalfExtents", toJson(fluid.emitterHalfExtents)},
                           {"particleCount", fluid.particleCount},
                           {"particleRadius", fluid.particleRadius},
                           {"smoothingRadius", fluid.smoothingRadius},
@@ -342,6 +353,7 @@ SceneFile readScene(const std::string& text) {
 
     for (const json& entry : document.value("fluids", json::array())) {
         Fluid fluid;
+        fluid.backend = toBackend(entry.value("backend", std::string{"auto"}));
         fluid.emitterHalfExtents = toVec3(entry.value("emitterHalfExtents", json{}), fluid.emitterHalfExtents);
         fluid.particleCount = entry.value("particleCount", fluid.particleCount);
         fluid.particleRadius = entry.value("particleRadius", fluid.particleRadius);

@@ -485,6 +485,10 @@ VkDeviceAddress RayTracer::instanceBufferAddress(uint32_t frameSlot) const {
     return frameSlot < instanceBuffers.size() ? instanceBuffers[frameSlot].address : 0;
 }
 
+void* RayTracer::instanceBufferMapped(uint32_t frameSlot) const {
+    return frameSlot < instanceBuffers.size() ? instanceBuffers[frameSlot].mapped : nullptr;
+}
+
 VkDeviceAddress RayTracer::bottomLevelAddress(uint32_t mesh) const {
     if (mesh >= bottomLevels.size() || bottomLevels[mesh].handle == VK_NULL_HANDLE) {
         return 0;

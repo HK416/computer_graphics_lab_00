@@ -84,6 +84,7 @@ scene::Scene makeScene() {
     scene.attachRigidBody(2, body);
     scene::Fluid fluid;
     fluid.particleCount = 4096;
+    fluid.backend = scene::SimulationBackend::CPU;
     fluid.stiffness = 75.0F;
     fluid.containerMax = glm::vec3{3.0F, 4.0F, 5.0F};
     scene.attachFluid(0, fluid);
@@ -141,6 +142,7 @@ int main() {
     assert(std::abs(body.mass - 2.5F) < 1e-5F && std::abs(body.halfExtents.z - 1.5F) < 1e-5F);
     assert(body.velocity == glm::vec3{0.0F} && "속도는 저장하지 않는다");
     assert(loaded.scene.fluids[0].particleCount == 4096);
+    assert(loaded.scene.fluids[0].backend == scene::SimulationBackend::CPU && "백엔드도 장면에 남아야 한다");
     assert(std::abs(loaded.scene.fluids[0].stiffness - 75.0F) < 1e-5F);
     assert(std::abs(loaded.scene.fluids[0].containerMax.z - 5.0F) < 1e-5F);
 

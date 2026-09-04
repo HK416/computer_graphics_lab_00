@@ -104,6 +104,8 @@ public:
     // 주소를 기록하므로 먼저 불러야 한다.
     void reserveInstances(uint32_t frameSlot, uint32_t count);
     VkDeviceAddress instanceBufferAddress(uint32_t frameSlot) const;
+    // 호스트에서 보이는 자리라 CPU 유체 백엔드가 앞쪽 인스턴스를 직접 쓴다.
+    void* instanceBufferMapped(uint32_t frameSlot) const;
     // 메쉬의 하위 가속 구조 주소. 없으면(무덤, 미구축) 0.
     VkDeviceAddress bottomLevelAddress(uint32_t mesh) const;
     void trace(VkCommandBuffer commandBuffer,

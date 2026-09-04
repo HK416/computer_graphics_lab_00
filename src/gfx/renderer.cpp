@@ -402,7 +402,7 @@ Renderer::Renderer(
     createShadowPipeline();
     createSsaoPipelines();
     environment = std::make_unique<EnvironmentMap>(context, bindless);
-    fluid = std::make_unique<FluidSimulator>(context, bindless);
+    fluid = std::make_unique<FluidSimulator>(context, bindless, jobs);
 
     VkSemaphoreTypeCreateInfo timelineInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
     timelineInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -3590,24 +3590,40 @@ void Renderer::recordFluidPass(VkCommandBuffer commandBuffer,
             fluidTlasPrepended = particles;
         }
     }
+    // CPU 백엔드는 매핑된 버퍼에 직접 쓴다. TLAS 인스턴스 버퍼도 호스트에서 보이는 자리다.
+    void* tlasMapped = tlasAddress != 0 ? rayTracer->instanceBufferMapped(slot) : nullptr;
+
     uint32_t base = 0;
     for (uint32_t f = 0; f < batches.fluidDraws.count; ++f) {
         uint32_t count = fluid->particleCount(f);
         if (count == 0) {
             continue;
         }
-        fluid->record(commandBuffer,
-                      slot,
-                      f,
-                      scene,
-                      frameDeltaSeconds,
-                      frame.instanceBuffer.address,
-                      batches.fluidInstanceBase + base,
-                      tlasAddress,
-                      base,
-                      sphereBlas,
-                      fluidSphereMesh,
-                      temporalResetThisFrame);
+        if (fluid->onCpu(f)) {
+            fluid->writeCpuInstances(f,
+                                     scene,
+                                     frameDeltaSeconds,
+                                     frame.instanceBuffer.mapped,
+                                     batches.fluidInstanceBase + base,
+                                     tlasMapped,
+                                     base,
+                                     sphereBlas,
+                                     fluidSphereMesh,
+                                     temporalResetThisFrame);
+        } else {
+            fluid->record(commandBuffer,
+                          slot,
+                          f,
+                          scene,
+                          frameDeltaSeconds,
+                          frame.instanceBuffer.address,
+                          batches.fluidInstanceBase + base,
+                          tlasAddress,
+                          base,
+                          sphereBlas,
+                          fluidSphereMesh,
+                          temporalResetThisFrame);
+        }
         base += count;
     }
 }

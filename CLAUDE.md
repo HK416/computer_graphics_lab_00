@@ -45,7 +45,7 @@ ctest --test-dir build/debug --output-on-failure
 ```
 
 테스트 이름: `lod_network` `animation` `camera` `scene` `scene_io` `profiler` `shadow` `upscaler`
-`concurrency` `vertex_pack` `physics` `primitives` `debug_lines` `hardware_profile`.
+`concurrency` `vertex_pack` `physics` `primitives` `debug_lines` `hardware_profile` `fluid`.
 
 선택 기능:
 
@@ -129,7 +129,8 @@ cmd /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliar
 ## 구조
 
 `src/main.cpp` 가 인자를 파싱해 `app::Application` 을 띄운다. 계층은 `app` → `editor`/`gfx`/`scene`/
-`asset` → `core` 방향으로만 의존한다.
+`asset`/`physics` → `core` 방향으로만 의존한다. `physics` 는 `scene` 과 `core` 만 보고, `gfx` 는 유체
+CPU 백엔드를 부르느라 `physics` 를 하나 본다.
 
 | 경로 | 내용 |
 | --- | --- |
@@ -137,7 +138,7 @@ cmd /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliar
 | `src/asset` | glTF 적재, meshlet/LOD DAG 구축, 애니메이션 샘플링. CPU 측 표현 |
 | `src/scene` | 장면 그래프, 카메라, 커스텀 JSON 직렬화 |
 | `src/gfx` | Vulkan 컨텍스트, 리소스, 렌더 경로 전부. GPU SPH(`fluid.cpp`)도 여기 |
-| `src/physics` | 강체 솔버. `scene` 과 `core` 에만 의존하고 재생 중 `Application::run` 이 고정 간격으로 부른다 |
+| `src/physics` | 강체 솔버와 CPU SPH. `scene` 과 `core` 에만 의존한다. 강체는 재생 중 `Application::run` 이 고정 간격으로 부르고, 유체 CPU 백엔드는 `gfx::FluidSimulator` 가 부른다(그래서 `gfx` → `physics` 의존이 하나 있다) |
 | `src/editor` | ImGui 도킹 편집기 |
 | `src/core` | `fatal`, 잠금 없는 작업 큐 |
 | `shaders` | GLSL. `.glsl` 은 include 전용 공통 헤더 |
@@ -185,10 +186,15 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `GpuLight` (`src/gfx/renderer.h`) | `Light` (`scene_types.glsl`) |
 | `GpuFluidCollider` `GpuFluidParams` `FluidPushConstants` (`src/gfx/fluid.h`) | `FluidCollider` `FluidParams` `FluidPushConstants` (`shaders/fluid_common.glsl`) |
 | `scene::ColliderShape` (`src/scene/scene.h`) | `FLUID_COLLIDER_*` (`fluid_common.glsl`) |
+
 | `Options::debugMode`, `Renderer::debugMode` | `DEBUG_MODE_*` (`scene_types.glsl`) |
 | `DebugLineVertex` (`src/gfx/debug_lines.h`), `DebugLinePushConstants` (`renderer.cpp`) | 동명 구조체 (`shaders/debug_line_common.glsl`) |
 
 전부 `scalar` 레이아웃이다.
+
+배치가 아니라 «값» 이 묶인 자리도 하나 있다. `physics::FluidParams`(`src/physics/fluid_sph.h`)는 CPU
+백엔드가 쓰고, `FluidSimulator::fillParams` 가 그것을 `GpuFluidParams` 로 필드마다 옮겨 담는다. 유체
+설정을 더할 때는 세 곳(`FluidParams`, `GpuFluidParams`, `fluid_common.glsl`)을 함께 고친다.
 
 **푸시 상수 블록은 `layout(push_constant)` 만 쓰면 std430 이라** `vec2`/`ivec2`/`vec4` 가 8·16바이트
 경계로 밀려 C++ 의 빽빽한 배치와 조용히 어긋난다. 앞에 홀수 개의 4바이트 멤버가 오는 벡터를 넣을
