@@ -427,6 +427,14 @@ add_executable(cg_lab_concurrency_tests tests/lock_free_queue_test.cpp src/core/
 target_include_directories(cg_lab_concurrency_tests PRIVATE src)
 find_package(Threads REQUIRED)
 target_link_libraries(cg_lab_concurrency_tests PRIVATE Threads::Threads)
+# /utf-8 이 없으면 컴파일러가 소스를 CP949 로 읽어, 한글 뒤에 붙은 역슬래시가 다중 바이트의 꼬리로
+# 먹힌다. 그러면 "…됨\n" 이 줄바꿈 대신 글자 n 을 찍는다.
+if(MSVC)
+    target_compile_options(cg_lab_concurrency_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(cg_lab_concurrency_tests PRIVATE -Wall -Wextra)
+endif()
+
 target_include_directories(cg_lab_tests PRIVATE src)
 if(MSVC)
     target_compile_options(cg_lab_tests PRIVATE /W4 /utf-8)

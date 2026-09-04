@@ -882,8 +882,11 @@ void Application::run() {
             gfx::ProfilerScope scope(renderer->profiler(), "편집기 UI");
             editorUi->build(scenes, *geometry, deltaSeconds);
         }
-        // 편집기가 장면을 바꾼 뒤, 렌더러가 읽기 전에 캐시를 다시 만든다.
-        scenes.active().refresh();
+        {
+            // 편집기가 장면을 바꾼 뒤, 렌더러가 읽기 전에 캐시를 다시 만든다.
+            gfx::ProfilerScope scope(renderer->profiler(), "장면 정리");
+            scenes.active().refresh(&jobs);
+        }
         // 오브젝트가 지워지거나 장면이 바뀐 프레임에만 미사용 모델을 살핀다. 매 프레임 훑을 일은 아니다.
         if (scenes.current() != collectedScene || scenes.active().topologyRevision() != collectedTopology) {
             collectedScene = scenes.current();

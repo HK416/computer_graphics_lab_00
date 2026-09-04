@@ -42,6 +42,8 @@ private:
     std::mutex wakeMutex;
     std::condition_variable wakeCondition;
     std::atomic<uint32_t> pendingJobs{0};
+    // 지금 조건 변수에서 자고 있는 워커 수. 0 이면 깨울 것이 없어 notify 를 건너뛴다.
+    std::atomic<uint32_t> sleepers{0};
 };
 
 } // namespace core

@@ -1,6 +1,7 @@
 #include "scene/scene.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -135,28 +136,69 @@ void Scene::update(float deltaSeconds, core::JobSystem* jobs) {
     }
 }
 
-void Scene::resolveWorld(uint32_t index) {
-    if (cachedResolved[index] != 0) {
-        return;
-    }
-    // 순환 부모는 편집기가 막지만, 만에 하나 들어와도 재귀가 무한히 돌지 않도록 먼저 표시한다.
-    cachedResolved[index] = 1;
+// 오브젝트마다의 깊이를 정하고 깊이 순으로 늘어놓는다. 부모를 따라 올라가며 이미 정해진 조상을
+// 만나면 거기서 이어 받으므로 전체가 O(n) 이다. 계층이 바뀐 프레임에만 부른다.
+void Scene::rebuildDepthOrder() {
+    size_t count = objects.size();
+    constexpr uint32_t UNKNOWN = 0xFFFFFFFFU;
+    constexpr uint32_t WALKING = 0xFFFFFFFEU;
+    depths.assign(count, UNKNOWN);
 
-    const Object& object = objects[index];
-    glm::mat4 local = object.transform.matrix();
-    if (object.parent < 0) {
-        cachedWorlds[index] = local;
-        cachedVisible[index] = object.visible ? 1 : 0;
-        return;
+    std::vector<uint32_t> stack;
+    for (uint32_t index = 0; index < count; ++index) {
+        if (depths[index] < WALKING) {
+            continue;
+        }
+        stack.clear();
+        uint32_t current = index;
+        while (depths[current] >= WALKING) {
+            if (depths[current] == WALKING) {
+                // 순환이다. 편집기가 막지만 손으로 고친 파일이 들어올 수 있다. 뿌리로 본다.
+                depths[current] = 0;
+                break;
+            }
+            depths[current] = WALKING;
+            stack.push_back(current);
+            int32_t parent = objects[current].parent;
+            if (parent < 0 || static_cast<size_t>(parent) >= count) {
+                break;
+            }
+            current = static_cast<uint32_t>(parent);
+        }
+        while (!stack.empty()) {
+            uint32_t node = stack.back();
+            stack.pop_back();
+            if (depths[node] != WALKING) {
+                continue;
+            }
+            int32_t parent = objects[node].parent;
+            depths[node] = parent < 0 || static_cast<size_t>(parent) >= count ? 0 : depths[parent] + 1;
+        }
     }
 
-    auto parent = static_cast<uint32_t>(object.parent);
-    resolveWorld(parent);
-    cachedWorlds[index] = cachedWorlds[parent] * local;
-    cachedVisible[index] = (object.visible && cachedVisible[parent] != 0) ? 1 : 0;
-    // 부모가 움직였으면 자손의 세계 변환도 바뀐 것이다.
-    cachedDirty[index] |= cachedDirty[parent];
+    uint32_t levels = 0;
+    for (uint32_t depth : depths) {
+        levels = std::max(levels, depth + 1);
+    }
+    // 계수 정렬. 같은 깊이끼리 첨자 순서를 지킨다.
+    depthOffsets.assign(static_cast<size_t>(levels) + 1, 0);
+    for (uint32_t depth : depths) {
+        ++depthOffsets[static_cast<size_t>(depth) + 1];
+    }
+    for (size_t level = 1; level < depthOffsets.size(); ++level) {
+        depthOffsets[level] += depthOffsets[level - 1];
+    }
+    depthOrder.resize(count);
+    std::vector<uint32_t> cursor(depthOffsets.begin(), depthOffsets.end() - 1);
+    for (uint32_t index = 0; index < count; ++index) {
+        depthOrder[cursor[depths[index]]++] = index;
+    }
 }
+
+namespace {
+// refresh 의 비교 패스를 워커에 나눌 때의 덩어리 크기.
+constexpr uint32_t REFRESH_GRANULARITY = 512;
+} // namespace
 
 ColliderPose colliderPose(const RigidBody& body, const glm::mat4& world) {
     Transform transform = Transform::fromMatrix(world);
@@ -170,7 +212,7 @@ ColliderPose colliderPose(const RigidBody& body, const glm::mat4& world) {
     return pose;
 }
 
-void Scene::refresh() {
+void Scene::refresh(core::JobSystem* jobs) {
     size_t count = objects.size();
     // 지우고 같은 수만큼 새로 만들면 개수 비교로는 알 수 없다. 그때는 첨자마다 남의 지난 값을 보게
     // 되므로, 배열이 재배치되었다는 표식이 서 있으면 지난 사본을 통째로 버린다.
@@ -190,30 +232,78 @@ void Scene::refresh() {
     previousTransforms.resize(count);
     previousParents.resize(count, -2);
     previousVisible.resize(count, 2);
-    cachedWorlds.assign(count, glm::mat4{1.0F});
-    cachedVisible.assign(count, 0);
-    cachedResolved.assign(count, 0);
+    // 아래 깊이 순 풀이가 모든 첨자를 다시 쓰므로 매 프레임 채울 이유가 없다. 크기가 바뀔 때만 채워
+    // 둔다. 오브젝트 만 개면 1 MB 넘는 쓰기다.
+    if (cachedWorlds.size() != count) {
+        cachedWorlds.assign(count, glm::mat4{1.0F});
+        cachedVisible.assign(count, 0);
+    }
     cachedDirty.assign(count, sizeChanged ? 1 : 0);
 
-    for (uint32_t index = 0; index < count; ++index) {
-        const Object& object = objects[index];
-        auto visible = static_cast<uint8_t>(object.visible ? 1 : 0);
-        bool reparented = previousParents[index] != object.parent;
-        bool posed = object.animator >= 0 && static_cast<size_t>(object.animator) < animatorPosedFlags.size() &&
-                     animatorPosedFlags[object.animator] != 0;
-        if (reparented || previousTransforms[index] != object.transform || previousVisible[index] != visible || posed) {
-            cachedDirty[index] = 1;
-            transformChanged = true;
+    // 오브젝트마다 독립이라 워커에 나눈다. 두 «바뀌었다» 표식만 모아 온다.
+    std::atomic<uint32_t> transformFlag{transformChanged ? 1U : 0U};
+    std::atomic<uint32_t> topologyFlag{topologyChanged ? 1U : 0U};
+    auto compare = [&](uint32_t begin, uint32_t end) {
+        for (uint32_t index = begin; index < end; ++index) {
+            const Object& object = objects[index];
+            auto visible = static_cast<uint8_t>(object.visible ? 1 : 0);
+            bool reparented = previousParents[index] != object.parent;
+            bool posed = object.animator >= 0 && static_cast<size_t>(object.animator) < animatorPosedFlags.size() &&
+                         animatorPosedFlags[object.animator] != 0;
+            if (reparented || previousTransforms[index] != object.transform || previousVisible[index] != visible ||
+                posed) {
+                cachedDirty[index] = 1;
+                transformFlag.store(1, std::memory_order_relaxed);
+            }
+            if (reparented) {
+                topologyFlag.store(1, std::memory_order_relaxed);
+            }
+
+            previousTransforms[index] = object.transform;
+            previousParents[index] = object.parent;
+            previousVisible[index] = visible;
         }
-        topologyChanged = topologyChanged || reparented;
-
-        previousTransforms[index] = object.transform;
-        previousParents[index] = object.parent;
-        previousVisible[index] = visible;
+    };
+    if (jobs != nullptr && count > REFRESH_GRANULARITY) {
+        jobs->parallelFor(static_cast<uint32_t>(count), REFRESH_GRANULARITY, compare);
+    } else if (count > 0) {
+        compare(0, static_cast<uint32_t>(count));
     }
+    transformChanged = transformFlag.load(std::memory_order_relaxed) != 0;
+    topologyChanged = topologyFlag.load(std::memory_order_relaxed) != 0;
 
-    for (uint32_t index = 0; index < count; ++index) {
-        resolveWorld(index);
+    // 계층이 바뀐 프레임에만 깊이 순서를 다시 만든다. 그 다음에는 단계마다 워커에 나눠 푼다. 같은
+    // 단계의 오브젝트는 서로를 보지 않고 부모는 이미 앞 단계에서 끝나 있다.
+    if (topologyChanged || depths.size() != count) {
+        rebuildDepthOrder();
+    }
+    for (size_t level = 0; level + 1 < depthOffsets.size(); ++level) {
+        uint32_t first = depthOffsets[level];
+        uint32_t last = depthOffsets[level + 1];
+        auto solve = [&](uint32_t begin, uint32_t end) {
+            for (uint32_t slot = begin; slot < end; ++slot) {
+                uint32_t index = depthOrder[slot];
+                const Object& object = objects[index];
+                glm::mat4 local = object.transform.matrix();
+                if (depths[index] == 0) {
+                    cachedWorlds[index] = local;
+                    cachedVisible[index] = object.visible ? 1 : 0;
+                    continue;
+                }
+                auto parent = static_cast<uint32_t>(object.parent);
+                cachedWorlds[index] = cachedWorlds[parent] * local;
+                cachedVisible[index] = (object.visible && cachedVisible[parent] != 0) ? 1 : 0;
+                // 부모가 움직였으면 자손의 세계 변환도 바뀐 것이다.
+                cachedDirty[index] |= cachedDirty[parent];
+            }
+        };
+        if (jobs != nullptr && last - first > REFRESH_GRANULARITY) {
+            jobs->parallelFor(last - first, REFRESH_GRANULARITY, [&solve, first](uint32_t begin, uint32_t end) {
+                solve(first + begin, first + end);
+            });
+        } else {
+            solve(first, last);
+        }
     }
 
     bool lightsChanged = previousLights != lights;

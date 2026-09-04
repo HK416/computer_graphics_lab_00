@@ -36,6 +36,23 @@
 namespace gfx {
 namespace {
 
+// CPU 사본을 매핑된 버퍼로 붓는다. 쓰기 결합 메모리라 한 스레드로는 대역폭을 다 못 쓴다. 작은 배열은
+// 워커를 깨우는 값이 더 크므로 그대로 복사한다.
+template <typename T> void parallelCopy(core::JobSystem& jobs, const T* source, T* destination, size_t count) {
+    // 나눌 값어치는 원소 수가 아니라 바이트 수로 정한다. 덩어리 경계는 캐시 줄의 배수여야 쓰기 결합
+    // 버퍼가 반쪽만 차지 않는다.
+    constexpr size_t PARALLEL_BYTES = 128 * 1024;
+    constexpr size_t CHUNK_BYTES = 32 * 1024;
+    if (count * sizeof(T) < PARALLEL_BYTES) {
+        std::copy_n(source, count, destination);
+        return;
+    }
+    auto granularity = static_cast<uint32_t>(std::max<size_t>(CHUNK_BYTES / sizeof(T), 1));
+    jobs.parallelFor(static_cast<uint32_t>(count), granularity, [source, destination](uint32_t begin, uint32_t end) {
+        std::copy_n(source + begin, end - begin, destination + begin);
+    });
+}
+
 constexpr VkFormat COLOR_FORMAT = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkFormat DEPTH_FORMAT = VK_FORMAT_D32_SFLOAT;
 constexpr VkFormat OIT_ACCUMULATION_FORMAT = VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -1206,12 +1223,54 @@ void Renderer::buildShadowDraws(Frame& frame, const FrameBatches& batches, const
     auto* mapped = static_cast<VkDrawIndexedIndirectCommand*>(frame.shadowDrawBuffer.mapped);
     std::atomic<uint32_t> issued{0};
 
+    // 절두체 판정을 먼저 «오브젝트 전체 × 시점 전체» 로 한 번에 돌린다. 시점 수가 캐스케이드 넷뿐이라
+    // 시점으로만 나누면 워커 넷만 일하는데, 오브젝트로 나누면 전부 일한다. 아래 시점별 압축은 이 표를
+    // 비트로 읽기만 하므로 훨씬 싸다.
+    uint32_t opaqueFirst = batches.draws[0][0].first;
+    uint32_t opaqueCount = 0;
+    for (size_t mode = 0; mode < TRANSLUCENT_MODE; ++mode) {
+        opaqueCount += batches.draws[mode][0].count + batches.draws[mode][1].count;
+    }
+    auto viewCount = static_cast<uint32_t>(shadowViews.size());
+    shadowVisibleMask.assign(static_cast<size_t>(opaqueCount) * viewCount, 0);
+    std::vector<std::array<glm::vec4, MAX_FRUSTUM_PLANES>> viewPlanes(viewCount);
+    std::vector<uint32_t> viewPlaneCounts(viewCount);
+    for (uint32_t view = 0; view < viewCount; ++view) {
+        viewPlaneCounts[view] = extractFrustumPlanes(shadowViews[view].viewProjection, viewPlanes[view], true);
+    }
+    if (opaqueCount > 0) {
+        jobs.parallelFor(opaqueCount, 512, [&](uint32_t begin, uint32_t end) {
+            for (uint32_t i = begin; i < end; ++i) {
+                const glm::vec4& sphere = instanceBounds[opaqueFirst + i];
+                for (uint32_t view = 0; view < viewCount; ++view) {
+                    const ShadowView& shadowView = shadowViews[view];
+                    // 광원 절두체 밖이면 이 시점에 아무것도 남기지 않는다.
+                    if (shadowViewCulling &&
+                        !sphereInFrustum(viewPlanes[view], viewPlaneCounts[view], glm::vec3(sphere), sphere.w)) {
+                        continue;
+                    }
+                    // 그림자가 뻗어 나갈 범위까지 부풀려도 카메라에 닿지 않으면 화면에 나올 수 없다.
+                    if (shadowCasterCulling) {
+                        glm::vec3 direction = shadowView.directional
+                                                  ? shadowView.sweepDirection
+                                                  : glm::normalize(glm::vec3(sphere) - shadowView.origin);
+                        if (!sweptSphereInFrustum(
+                                cameraPlanes, cameraPlaneCount, glm::vec3(sphere), sphere.w, direction, sweep)) {
+                            continue;
+                        }
+                    }
+                    shadowVisibleMask[static_cast<size_t>(view) * opaqueCount + i] = 1;
+                }
+            }
+        });
+    }
+
     auto cullView = [&](uint32_t view) {
-        const ShadowView& shadowView = shadowViews[view];
-        std::array<glm::vec4, MAX_FRUSTUM_PLANES> planes{};
-        uint32_t planeCount = extractFrustumPlanes(shadowView.viewProjection, planes, true);
+        const std::array<glm::vec4, MAX_FRUSTUM_PLANES>& planes = viewPlanes[view];
+        uint32_t planeCount = viewPlaneCounts[view];
         uint32_t base = view * casterCount;
         uint32_t cursor = base;
+        const uint8_t* mask = shadowVisibleMask.data() + static_cast<size_t>(view) * opaqueCount;
 
         for (size_t mode = 0; mode < TRANSLUCENT_MODE; ++mode) {
             DrawBatch& batch = shadowBatches[view * TRANSLUCENT_MODE + mode];
@@ -1221,20 +1280,8 @@ void Renderer::buildShadowDraws(Frame& frame, const FrameBatches& batches, const
 
             for (uint32_t i = 0; i < count; ++i) {
                 uint32_t slot = first + i;
-                const glm::vec4& sphere = instanceBounds[slot];
-                // 광원 절두체 밖이면 이 시점에 아무것도 남기지 않는다.
-                if (shadowViewCulling && !sphereInFrustum(planes, planeCount, glm::vec3(sphere), sphere.w)) {
+                if (mask[slot - opaqueFirst] == 0) {
                     continue;
-                }
-                // 그림자가 뻗어 나갈 범위까지 부풀려도 카메라에 닿지 않으면 화면에 나올 수 없다.
-                if (shadowCasterCulling) {
-                    glm::vec3 direction = shadowView.directional
-                                              ? shadowView.sweepDirection
-                                              : glm::normalize(glm::vec3(sphere) - shadowView.origin);
-                    if (!sweptSphereInFrustum(
-                            cameraPlanes, cameraPlaneCount, glm::vec3(sphere), sphere.w, direction, sweep)) {
-                        continue;
-                    }
                 }
                 destination[cursor++] = source[slot];
             }
@@ -3030,25 +3077,44 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         return scene.visibleCached(index) && geometry.meshLive(scene.meshOf(index));
     };
 
+    // 오브젝트마다의 판단을 워커에 나눠 한 번만 뽑는다. 아래 두 직렬 패스는 이 배열만 훑는다.
+    // 그리지 않는 첨자에 지난 프레임 값이 남지 않게 통째로 비운다. 아래 두 패스는 drawable 로 먼저
+    // 거르지만, 나중에 누가 bucket 을 무조건 읽으면 조용히 틀리기 때문이다.
+    objectPlan.assign(scene.objects.size(), ObjectPlan{});
+    if (!scene.objects.empty()) {
+        jobs.parallelFor(static_cast<uint32_t>(scene.objects.size()), 512, [&](uint32_t begin, uint32_t end) {
+            for (uint32_t index = begin; index < end; ++index) {
+                ObjectPlan& plan = objectPlan[index];
+                plan.drawable = drawable(index);
+                if (!plan.drawable) {
+                    continue;
+                }
+                auto [mode, sided] = bucketOf(index);
+                plan.bucket = static_cast<uint8_t>(mode * 2 + sided);
+                plan.meshletCount = geometry.mesh(scene.meshOf(index)).meshletCount;
+                plan.groupCount = needMeshletGroups ? groupsFor(index) : 0;
+            }
+        });
+    }
+
     FrameBatches batches{};
     uint32_t totalGroups = 0;
     uint32_t totalMeshletDraws = 0;
     uint32_t totalVisibilityBits = 0;
-    for (uint32_t index = 0; index < scene.objects.size(); ++index) {
-        if (!drawable(index)) {
+    for (const ObjectPlan& plan : objectPlan) {
+        if (!plan.drawable) {
             continue;
         }
-        auto [mode, sided] = bucketOf(index);
+        size_t mode = plan.bucket / 2;
+        size_t sided = plan.bucket % 2;
         ++batches.draws[mode][sided].count;
-        totalVisibilityBits += geometry.mesh(scene.meshOf(index)).meshletCount;
+        totalVisibilityBits += plan.meshletCount;
         if (needMeshletGroups) {
-            uint32_t groups = groupsFor(index);
-            batches.groups[mode][sided].count += groups;
-            totalGroups += groups;
+            batches.groups[mode][sided].count += plan.groupCount;
+            totalGroups += plan.groupCount;
             // 컴퓨트 컬링은 모든 단계의 meshlet 을 후보로 보므로 상한도 전체 개수로 잡는다.
-            uint32_t candidates = geometry.mesh(scene.meshOf(index)).meshletCount;
-            batches.meshletDraws[mode][sided].count += candidates;
-            totalMeshletDraws += candidates;
+            batches.meshletDraws[mode][sided].count += plan.meshletCount;
+            totalMeshletDraws += plan.meshletCount;
         }
         ++batches.instanceCount;
     }
@@ -3131,20 +3197,20 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
 
     // 슬롯 배정은 버킷 커서를 순서대로 밀어야 해서 직렬이다. 채우기는 오브젝트마다 독립이라 워커에 나눈다.
     // 각 오브젝트가 쓸 그룹·가시성 비트 시작도 여기서 미리 정한다.
-    std::vector<uint32_t> objectGroupBase(scene.objects.size(), 0);
-    std::vector<uint32_t> objectVisibilityBase(scene.objects.size(), 0);
+    objectGroupBase.assign(scene.objects.size(), 0);
+    objectVisibilityBase.assign(scene.objects.size(), 0);
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
-        if (!drawable(index)) {
+        const ObjectPlan& plan = objectPlan[index];
+        if (!plan.drawable) {
             continue;
         }
-        auto [mode, sided] = bucketOf(index);
+        size_t mode = plan.bucket / 2;
+        size_t sided = plan.bucket % 2;
         objectInstanceSlots[index] = drawCursors[mode][sided]++;
         objectGroupBase[index] = groupCursors[mode][sided];
-        if (needMeshletGroups) {
-            groupCursors[mode][sided] += groupsFor(index);
-        }
+        groupCursors[mode][sided] += plan.groupCount;
         objectVisibilityBase[index] = visibilityCursor;
-        visibilityCursor += geometry.mesh(scene.meshOf(index)).meshletCount;
+        visibilityCursor += plan.meshletCount;
     }
 
     auto fillObject = [&](uint32_t index) {
@@ -3248,15 +3314,25 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         }
     }
 
-    std::copy_n(
-        drawCommands.data(), drawCommands.size(), static_cast<VkDrawIndexedIndirectCommand*>(frame.drawBuffer.mapped));
-    std::copy_n(drawMeshletData.data(), drawMeshletData.size(), static_cast<uint32_t*>(frame.drawMeshletBuffer.mapped));
-    std::copy_n(groupData.data(), groupData.size(), static_cast<GpuMeshletGroup*>(frame.meshletGroupBuffer.mapped));
+    // 매핑된 쓰기 결합 메모리로 붓는 복사다. 한 스레드로는 대역폭을 다 못 쓴다. 오브젝트 만 개 규모에서
+    // 인스턴스만 3 MB 가 넘어가므로 워커에 나눈다.
+    parallelCopy(jobs,
+                 drawCommands.data(),
+                 static_cast<VkDrawIndexedIndirectCommand*>(frame.drawBuffer.mapped),
+                 drawCommands.size());
+    parallelCopy(
+        jobs, drawMeshletData.data(), static_cast<uint32_t*>(frame.drawMeshletBuffer.mapped), drawMeshletData.size());
+    parallelCopy(
+        jobs, groupData.data(), static_cast<GpuMeshletGroup*>(frame.meshletGroupBuffer.mapped), groupData.size());
 
     // 그리지 않은 오브젝트도 지난 변환을 갱신해 둔다. 숨겼다 다시 보인 오브젝트가 오래된 자리에서
-    // 날아오는 것처럼 보이지 않게 한다.
-    for (uint32_t index = 0; index < scene.objects.size(); ++index) {
-        previousWorld[index] = scene.world(index);
+    // 날아오는 것처럼 보이지 않게 한다. 오브젝트마다 완전히 독립이라 워커에 나눈다.
+    if (!scene.objects.empty()) {
+        jobs.parallelFor(static_cast<uint32_t>(scene.objects.size()), 1024, [&](uint32_t begin, uint32_t end) {
+            for (uint32_t index = begin; index < end; ++index) {
+                previousWorld[index] = scene.world(index);
+            }
+        });
     }
 
     // 커질 때만 다시 잡는다. 지난 프레임이 아직 읽고 있을 수 있어 그때는 장치를 세운다. 스킨
@@ -3301,7 +3377,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         instances[slot].skinnedMeshletOffset = dispatch.boundsOffset;
         skinnedInstances[dispatchIndex] = SkinnedInstance{instances[slot].meshIndex, offset};
     }
-    std::copy_n(instanceData.data(), instanceData.size(), static_cast<GpuInstance*>(frame.instanceBuffer.mapped));
+    parallelCopy(
+        jobs, instanceData.data(), static_cast<GpuInstance*>(frame.instanceBuffer.mapped), instanceData.size());
     frameProfiler.end(instanceZone);
 
     auto* meshTasks = static_cast<VkDrawMeshTasksIndirectCommandEXT*>(frame.meshTaskIndirectBuffer.mapped);

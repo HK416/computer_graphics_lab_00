@@ -583,8 +583,24 @@ private:
     std::vector<ShadowView> shadowViews;
     // 시점 × 알파 경로마다의 그리기 구간. shadowDrawBuffer 기준이다.
     std::vector<DrawBatch> shadowBatches;
+    // 그림자 시점마다 «이 캐스터를 남길지» 비트. [시점][불투명 슬롯] 순으로 놓는다.
+    std::vector<uint8_t> shadowVisibleMask;
     // 인스턴스 슬롯별 세계 경계 구. 시점 컬링이 쓴다.
     std::vector<glm::vec4> instanceBounds;
+
+    // 오브젝트마다 «그릴 것인가, 어느 버킷에, meshlet 이 몇 개, 그룹이 몇 개» 를 워커에 나눠 한 번만
+    // 뽑아 둔 것. 메쉬 → 재질로 두 번 건너뛰는 조회라 세는 패스와 자리를 배정하는 패스가 각각 다시
+    // 하면 두 배로 든다. 그 두 패스는 커서를 순서대로 밀어야 해서 직렬일 수밖에 없다.
+    struct ObjectPlan {
+        uint32_t meshletCount = 0;
+        uint32_t groupCount = 0;
+        uint8_t bucket = 0;
+        bool drawable = false;
+    };
+    std::vector<ObjectPlan> objectPlan;
+    // 오브젝트마다의 meshlet 그룹·가시성 비트 시작. 프레임마다 다시 잡지 않으려고 멤버로 둔다.
+    std::vector<uint32_t> objectGroupBase;
+    std::vector<uint32_t> objectVisibilityBase;
     // 컬링 전후 그리기 수. 편집기에 보여준다.
     uint32_t shadowDrawsIssued = 0;
     uint32_t shadowDrawsTotal = 0;

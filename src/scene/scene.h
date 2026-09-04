@@ -277,7 +277,7 @@ struct Scene {
     // 훅을 거는 대신 비교하는 이유: Object::transform 이 public 이고 편집기 여러 곳에서 직접
     // 대입한다. 훅을 하나라도 빠뜨리면 화면이 조용히 틀리는데, 비교는 빠뜨릴 수가 없다.
     // 덤으로 오브젝트별 더티 플래그가 나와 그림자 시점 무효화에 그대로 쓰인다.
-    void refresh();
+    void refresh(core::JobSystem* jobs = nullptr);
 
     // 마지막 refresh 에서 무엇이든 바뀌었으면 증가한다. 소비자는 자기가 본 값과 비교만 하면 된다.
     uint64_t revision() const { return anyRevision; }
@@ -335,12 +335,18 @@ struct Scene {
     uint32_t duplicateObject(uint32_t index);
 
 private:
-    void resolveWorld(uint32_t index);
+    // 오브젝트를 깊이 순으로 늘어놓는다. 부모가 자식보다 먼저 오므로 깊이 한 단계씩 나눠 풀면 재귀도
+    // 메모 표식도 필요 없고, 같은 단계끼리는 서로를 보지 않아 워커에 나눌 수 있다. 계층이 바뀐
+    // 프레임에만 다시 만든다.
+    void rebuildDepthOrder();
 
     std::vector<glm::mat4> cachedWorlds;
     std::vector<uint8_t> cachedVisible;
     std::vector<uint8_t> cachedDirty;
-    std::vector<uint8_t> cachedResolved;
+    // 오브젝트마다의 깊이(뿌리가 0)와 깊이 순 나열, 그리고 단계마다의 시작 위치.
+    std::vector<uint32_t> depths;
+    std::vector<uint32_t> depthOrder;
+    std::vector<uint32_t> depthOffsets;
     std::vector<uint8_t> animatorPosedFlags;
 
     // 지난 refresh 때의 사본. 이것과 비교해 변경을 찾는다.
