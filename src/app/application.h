@@ -181,8 +181,8 @@ private:
     std::filesystem::path assetRoot;
     std::filesystem::path sceneRoot;
     std::vector<LoadedModel> loadedModels;
-    // 내장 구의 전역 메쉬 번호.
-    uint32_t sphereMesh = scene::INVALID_MESH;
+    // 기본 도형마다의 전역 메쉬 번호. asset::Primitive 순서와 같다.
+    std::vector<uint32_t> primitiveMeshes;
     // 마지막으로 미사용 모델을 살핀 때의 장면 번호와 그 장면의 구조 리비전.
     size_t collectedScene = SIZE_MAX;
     uint64_t collectedTopology = 0;

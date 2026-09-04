@@ -6,7 +6,6 @@
 #include <format>
 #include <fstream>
 #include <limits>
-#include <numbers>
 #include <optional>
 #include <vector>
 
@@ -14,7 +13,7 @@
 #include <spdlog/spdlog.h>
 
 #include "asset/model.h"
-#include "asset/vertex_pack.h"
+#include "asset/primitives.h"
 #include "core/error.h"
 #include "gfx/uploader.h"
 #include "physics/rigid_body.h"
@@ -79,61 +78,6 @@ void frameCamera(scene::Scene& scene, const gfx::GeometryStore& geometry) {
     }
 }
 
-// 내장 모델은 파일이 없어 이 이름을 경로 자리에 쓴다. 장면 파일에도 이 이름 그대로 적힌다.
-constexpr const char* BUILTIN_SPHERE_NAME = "<builtin:sphere>";
-
-// 반지름 1 의 위도·경도 구. 유체 입자와 «메쉬 › 구» 프리미티브가 쓴다. 입자는 수만 개가 그려지므로
-// 삼각형을 아낀다(16×12 분할, 384 삼각형).
-asset::Model makeSphereModel() {
-    constexpr uint32_t SEGMENTS = 16;
-    constexpr uint32_t RINGS = 12;
-
-    asset::Model model;
-    model.name = BUILTIN_SPHERE_NAME;
-
-    asset::Material material;
-    material.name = "구";
-    material.baseColorFactor = glm::vec4{0.35F, 0.55F, 0.9F, 1.0F};
-    material.metallicFactor = 0.0F;
-    material.roughnessFactor = 0.2F;
-    model.materials.push_back(material);
-
-    asset::Mesh mesh;
-    mesh.name = "구";
-    mesh.materialIndex = 0;
-    for (uint32_t ring = 0; ring <= RINGS; ++ring) {
-        float theta = std::numbers::pi_v<float> * static_cast<float>(ring) / static_cast<float>(RINGS);
-        for (uint32_t segment = 0; segment <= SEGMENTS; ++segment) {
-            float phi = 2.0F * std::numbers::pi_v<float> * static_cast<float>(segment) / static_cast<float>(SEGMENTS);
-            glm::vec3 normal{std::sin(theta) * std::cos(phi), std::cos(theta), std::sin(theta) * std::sin(phi)};
-            asset::Vertex vertex;
-            vertex.position = normal;
-            vertex.normal = asset::packUnitVector(normal);
-            vertex.tangent = asset::packTangent(glm::vec4{-std::sin(phi), 0.0F, std::cos(phi), 1.0F});
-            vertex.uv = glm::vec2{static_cast<float>(segment) / static_cast<float>(SEGMENTS),
-                                  static_cast<float>(ring) / static_cast<float>(RINGS)};
-            mesh.vertices.push_back(vertex);
-        }
-    }
-    // 바깥을 보는 반시계 감기. 극에서는 삼각형 하나가 퇴화하므로 그 줄은 하나만 넣는다.
-    for (uint32_t ring = 0; ring < RINGS; ++ring) {
-        for (uint32_t segment = 0; segment < SEGMENTS; ++segment) {
-            uint32_t a = ring * (SEGMENTS + 1) + segment;
-            uint32_t b = a + SEGMENTS + 1;
-            if (ring > 0) {
-                mesh.indices.insert(mesh.indices.end(), {a, a + 1, b});
-            }
-            if (ring + 1 < RINGS) {
-                mesh.indices.insert(mesh.indices.end(), {a + 1, b + 1, b});
-            }
-        }
-    }
-    mesh.boundsCenter = glm::vec3{0.0F};
-    mesh.boundsRadius = 1.0F;
-    model.meshes.push_back(std::move(mesh));
-    return model;
-}
-
 } // namespace
 
 Application::Application(const Options& options) : jobs(options.threadCount), options(options) {
@@ -157,9 +101,11 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     registerBuiltinModels();
     loadScenes();
     renderer = std::make_unique<gfx::Renderer>(*context, *geometry, *bindless, window, jobs);
-    renderer->fluidSphereMesh = sphereMesh;
+    // 입자는 수만 개가 그려지므로 극에 삼각형이 몰리지 않는 정이십면체 구를 쓴다.
+    renderer->fluidSphereMesh = primitiveMeshes[static_cast<size_t>(asset::Primitive::ICO_SPHERE)];
     editorUi = std::make_unique<editor::Editor>(*context, *renderer, window);
     editorUi->workerCount = jobs.workerCount();
+    editorUi->primitiveMeshes = primitiveMeshes;
     renderer->debugMode = options.debugMode;
     if (options.lodLevel != AUTOMATIC_LOD) {
         renderer->automaticLod = false;
@@ -237,10 +183,15 @@ void Application::loadScenes() {
 }
 
 void Application::registerBuiltinModels() {
-    asset::Model sphere = makeSphereModel();
-    asset::buildLodHierarchy(sphere.meshes[0], &jobs);
-    uint32_t model = registerModel(std::filesystem::path{BUILTIN_SPHERE_NAME}, sphere, true);
-    sphereMesh = loadedModels[model].meshBase;
+    auto count = static_cast<uint32_t>(asset::Primitive::COUNT);
+    primitiveMeshes.assign(count, scene::INVALID_MESH);
+    for (uint32_t i = 0; i < count; ++i) {
+        auto primitive = static_cast<asset::Primitive>(i);
+        asset::Model model = asset::makePrimitive(primitive);
+        asset::buildLodHierarchy(model.meshes[0], &jobs);
+        uint32_t registered = registerModel(std::filesystem::path{asset::primitiveAssetName(primitive)}, model, true);
+        primitiveMeshes[i] = loadedModels[registered].meshBase;
+    }
 }
 
 Application::PrepareTimings Application::prepareAssets(std::vector<asset::Texture*>& allTextures,
@@ -722,7 +673,9 @@ void Application::openScene(const std::filesystem::path& path) {
     modelIndices.reserve(loaded.models.size());
     for (const std::filesystem::path& modelPath : loaded.models) {
         // 상대 경로는 에셋 뿌리 기준으로 푼다. 내장 모델 이름은 그대로 찾는다.
-        bool builtin = modelPath.generic_string().rfind("<builtin:", 0) == 0;
+        // 내장 도형은 파일이 없어 이름 그대로 찾는다. 아는 이름만 그렇게 다뤄야, 깨진 파일의 엉뚱한
+        // 이름이 «파일을 못 찾았다»로 정직하게 실패한다.
+        bool builtin = asset::primitiveFromAssetName(modelPath.generic_string()) != asset::Primitive::COUNT;
         uint32_t index = ensureModel(modelPath.is_absolute() || builtin ? modelPath : assetRoot / modelPath);
         if (index >= loadedModels.size()) {
             spdlog::error("장면이 가리키는 모델을 읽지 못해 그 오브젝트는 메쉬 없이 둔다: {}", modelPath.string());

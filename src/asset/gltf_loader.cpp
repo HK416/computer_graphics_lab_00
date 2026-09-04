@@ -133,23 +133,6 @@ void generateTangents(std::vector<LoadVertex>& vertices, const std::vector<uint3
     }
 }
 
-void computeBounds(Mesh& mesh) {
-    if (mesh.vertices.empty()) {
-        return;
-    }
-    glm::vec3 minimum = mesh.vertices.front().position;
-    glm::vec3 maximum = minimum;
-    for (const Vertex& vertex : mesh.vertices) {
-        minimum = glm::min(minimum, vertex.position);
-        maximum = glm::max(maximum, vertex.position);
-    }
-    mesh.boundsCenter = (minimum + maximum) * 0.5F;
-    mesh.boundsRadius = 0.0F;
-    for (const Vertex& vertex : mesh.vertices) {
-        mesh.boundsRadius = std::max(mesh.boundsRadius, glm::distance(vertex.position, mesh.boundsCenter));
-    }
-}
-
 AlphaMode toAlphaMode(cgltf_alpha_mode mode) {
     switch (mode) {
     case cgltf_alpha_mode_mask:

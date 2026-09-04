@@ -19,6 +19,7 @@
 #include <SDL3/SDL.h>
 #include <spdlog/spdlog.h>
 
+#include "asset/primitives.h"
 #include "core/error.h"
 #include "editor/log_sink.h"
 #include "gfx/context.h"
@@ -448,6 +449,19 @@ void Editor::buildPopups(scene::SceneManager& scenes) {
 void Editor::buildCreateItems(scene::Scene& active, const gfx::GeometryStore& geometry, int parent) {
     if (ImGui::MenuItem("빈 오브젝트")) {
         deferred = [this, &active, parent] { createEmptyObject(active, parent); };
+    }
+    if (ImGui::BeginMenu("기본 도형")) {
+        for (uint32_t i = 0; i < primitiveMeshes.size(); ++i) {
+            uint32_t meshIndex = primitiveMeshes[i];
+            ImGui::BeginDisabled(!geometry.meshLive(meshIndex));
+            if (ImGui::MenuItem(asset::primitiveLabel(static_cast<asset::Primitive>(i)))) {
+                deferred = [this, &active, &geometry, meshIndex, parent] {
+                    createMeshObject(active, geometry, meshIndex, parent);
+                };
+            }
+            ImGui::EndDisabled();
+        }
+        ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("메쉬")) {
         // ponytail: 메쉬가 수백 개면 메뉴가 화면을 넘는다. 그때는 검색 칸을 둔다.

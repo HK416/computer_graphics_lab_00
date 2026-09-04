@@ -181,6 +181,7 @@ add_executable(cg_lab
     src/asset/gltf_loader.cpp
     src/asset/ktx2_loader.cpp
     src/asset/meshlet.cpp
+    src/asset/primitives.cpp
     src/core/error.cpp
     src/core/job_system.cpp
     src/editor/editor.cpp
@@ -361,12 +362,21 @@ add_executable(cg_lab_profiler_tests tests/profiler_test.cpp src/gfx/profiler_ma
 add_executable(cg_lab_shadow_tests tests/shadow_test.cpp src/gfx/shadow_math.cpp)
 add_executable(cg_lab_upscaler_tests tests/upscaler_test.cpp src/gfx/upscaler_math.cpp)
 add_executable(cg_lab_vertex_pack_tests tests/vertex_pack_test.cpp)
+add_executable(cg_lab_primitives_tests tests/primitives_test.cpp src/asset/primitives.cpp)
 target_include_directories(cg_lab_vertex_pack_tests PRIVATE src)
 target_link_libraries(cg_lab_vertex_pack_tests PRIVATE glm::glm)
 if(MSVC)
     target_compile_options(cg_lab_vertex_pack_tests PRIVATE /W4 /utf-8)
 else()
     target_compile_options(cg_lab_vertex_pack_tests PRIVATE -Wall -Wextra)
+endif()
+
+target_include_directories(cg_lab_primitives_tests PRIVATE src)
+target_link_libraries(cg_lab_primitives_tests PRIVATE glm::glm)
+if(MSVC)
+    target_compile_options(cg_lab_primitives_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(cg_lab_primitives_tests PRIVATE -Wall -Wextra)
 endif()
 add_executable(cg_lab_concurrency_tests tests/lock_free_queue_test.cpp src/core/job_system.cpp)
 target_include_directories(cg_lab_concurrency_tests PRIVATE src)
@@ -453,7 +463,7 @@ endif()
 foreach(test_target
         cg_lab_tests cg_lab_animation_tests cg_lab_camera_tests cg_lab_scene_tests
         cg_lab_scene_io_tests cg_lab_profiler_tests cg_lab_shadow_tests cg_lab_concurrency_tests
-        cg_lab_upscaler_tests cg_lab_vertex_pack_tests cg_lab_physics_tests)
+        cg_lab_upscaler_tests cg_lab_vertex_pack_tests cg_lab_physics_tests cg_lab_primitives_tests)
     if(MSVC)
         target_compile_options(${test_target} PRIVATE /UNDEBUG)
     else()
@@ -476,6 +486,7 @@ add_test(NAME shadow COMMAND cg_lab_shadow_tests)
 add_test(NAME upscaler COMMAND cg_lab_upscaler_tests)
 add_test(NAME concurrency COMMAND cg_lab_concurrency_tests)
 add_test(NAME vertex_pack COMMAND cg_lab_vertex_pack_tests)
+add_test(NAME primitives COMMAND cg_lab_primitives_tests)
 add_test(NAME physics COMMAND cg_lab_physics_tests)
 
 # cmake --build --preset debug --target run 으로 빌드한 뒤 바로 실행한다.

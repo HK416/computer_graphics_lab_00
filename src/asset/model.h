@@ -257,6 +257,9 @@ void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs = nullptr, LoadProgress
 // buildLodHierarchy 가 progress 에 더하는 총량. 단계마다 절반씩 줄어드는 인덱스 수의 합을 어림한 값이다.
 uint64_t lodWorkEstimate(const Mesh& mesh);
 
+// 정점에서 경계 구를 잰다. glTF 로더와 기본 도형이 함께 쓴다. 정의는 asset/primitives.cpp 에 있다.
+void computeBounds(Mesh& mesh);
+
 // 인코딩된 바이트를 푼다. PNG/JPEG 는 RGBA8 한 장으로, KTX2 는 담긴 블록과 밉을 그대로 꺼낸다.
 // 텍스처마다 독립이라 병렬로 돌릴 수 있다.
 void decodeTexture(Texture& texture);

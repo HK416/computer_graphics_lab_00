@@ -194,6 +194,9 @@ private:
 public:
     // 통계 표시용. 애플리케이션이 채운다.
     unsigned workerCount = 0;
+    // asset::Primitive 순서의 전역 메쉬 번호. 내장 도형은 해제되지 않으므로 번호가 고정이다.
+    // 애플리케이션이 채운다.
+    std::vector<uint32_t> primitiveMeshes;
 };
 
 } // namespace editor
