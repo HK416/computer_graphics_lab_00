@@ -138,7 +138,7 @@ GeometryStore::ModelRange GeometryStore::addModel(const asset::Model& model,
         const asset::Material& source = model.materials[i];
         GpuMaterial material{};
         material.baseColorFactor = source.baseColorFactor;
-        material.emissiveAndCutoff = glm::vec4{source.emissiveFactor, source.alphaCutoff};
+        material.emissiveAndCutoff = glm::vec4{source.emissiveFactor * source.emissiveStrength, source.alphaCutoff};
         material.metallicFactor = source.metallicFactor;
         material.roughnessFactor = source.roughnessFactor;
         material.normalScale = source.normalScale;

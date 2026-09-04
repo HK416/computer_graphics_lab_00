@@ -1334,7 +1334,24 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
 
     if (section("후처리")) {
         ImGui::SliderFloat("노출", &renderer.exposure, 0.05F, 8.0F, "%.2f");
-        ImGui::SliderFloat("Bloom 세기", &post.bloomIntensity, 0.0F, 1.0F, "%.2f");
+        ImGui::SliderFloat("Bloom 세기", &post.bloomIntensity, 0.0F, 2.0F, "%.2f");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("임계값을 넘은 부분을 흐려서 «더할» 세기");
+        }
+        ImGui::BeginDisabled(post.bloomIntensity <= 0.0F);
+        ImGui::SliderFloat("Bloom 임계값", &post.bloomThreshold, 0.0F, 8.0F, "%.2f");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("이 밝기를 넘는 곳만 번진다. 0 이면 화면 전체가 흐려진다");
+        }
+        ImGui::SliderFloat("Bloom 무릎", &post.bloomKnee, 0.0F, 1.0F, "%.2f");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("임계값 언저리를 부드럽게 넘기는 폭. 0 이면 경계에서 깜빡인다");
+        }
+        ImGui::SliderFloat("Bloom 번짐", &post.bloomScatter, 0.0F, 1.0F, "%.2f");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("클수록 넓은 밉 쪽에 무게를 두어 멀리 퍼진다");
+        }
+        ImGui::EndDisabled();
         ImGui::Checkbox("자동 노출", &post.autoExposure);
         ImGui::BeginDisabled(!post.autoExposure);
         ImGui::SliderFloat("적응 속도", &post.adaptationSpeed, 0.1F, 10.0F, "%.1f /s");

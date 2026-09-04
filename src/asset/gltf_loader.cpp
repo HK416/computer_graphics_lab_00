@@ -241,6 +241,9 @@ Material convertMaterial(const cgltf_material& source, const cgltf_data& data) {
     material.alphaCutoff = source.alpha_cutoff;
     material.doubleSided = source.double_sided != 0;
     material.emissiveFactor = glm::make_vec3(source.emissive_factor);
+    if (source.has_emissive_strength != 0) {
+        material.emissiveStrength = source.emissive_strength.emissive_strength;
+    }
     material.normalScale = source.normal_texture.scale;
     material.occlusionStrength = source.occlusion_texture.scale;
     material.normalTexture = textureIndex(source.normal_texture, data);

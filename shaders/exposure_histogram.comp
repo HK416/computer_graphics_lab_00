@@ -5,16 +5,23 @@
 #include "exposure.glsl"
 
 // 장면 휘도의 log2 히스토그램. 워크그룹 공유 메모리에 먼저 모은 뒤 전역 버퍼에 한 번만 더한다.
-// 입력은 Bloom 의 작은 밉이라 화소 수가 적고, 이미 평균이 잡혀 있어 잡음에 덜 흔들린다.
+//
+// 입력은 톤 매핑 전의 HDR 원본을 sourceSize 격자로 성기게 훑은 것이다. 예전에는 Bloom 의 작은 밉을
+// 읽었는데, Bloom 에 임계값이 생기면서 그 밉에는 «밝은 곳»만 남게 되어 장면 휘도로 쓸 수 없다.
 layout(local_size_x = 16, local_size_y = 16) in;
 
-layout(push_constant) uniform HistogramPushConstants {
+// scalar 를 붙이지 않으면 std430 이 ivec2 를 8 바이트 경계로 밀어 C++ 배치와 어긋난다.
+// 이 저장소의 다른 자료와 마찬가지로 scalar 로 맞춘다.
+layout(push_constant, scalar) uniform HistogramPushConstants {
     HistogramBuffer histogram;
     uint sourceTexture;
+    // 원본이 아니라 훑을 격자의 크기다. uv 는 정규화되어 있어 이 격자만큼만 표본을 뜬다.
     ivec2 sourceSize;
     // 빈 0 은 이 값보다 어두운(사실상 검은) 화소가 차지하고 평균에서 빠진다.
     float minLog;
     float inverseLogRange;
+    // 0 이 아니면 경로 추적 누적 버퍼라 표본 수로 나눈다.
+    uint sampleCount;
 } push;
 
 shared uint bins[HISTOGRAM_BINS];
@@ -27,7 +34,11 @@ void main() {
     ivec2 coordinate = ivec2(gl_GlobalInvocationID.xy);
     if (coordinate.x < push.sourceSize.x && coordinate.y < push.sourceSize.y) {
         vec2 uv = (vec2(coordinate) + 0.5) / vec2(push.sourceSize);
-        float value = luminance(fetchBindlessLod(push.sourceTexture, uv, 0.0).rgb);
+        vec3 sampled = fetchBindlessLod(push.sourceTexture, uv, 0.0).rgb;
+        if (push.sampleCount > 0u) {
+            sampled /= float(push.sampleCount);
+        }
+        float value = luminance(sampled);
         uint bin = 0u;
         if (value > 1e-4) {
             float normalized = clamp((log2(value) - push.minLog) * push.inverseLogRange, 0.0, 1.0);

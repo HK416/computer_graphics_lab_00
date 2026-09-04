@@ -185,6 +185,11 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 
 전부 `scalar` 레이아웃이다.
 
+**푸시 상수 블록은 `layout(push_constant)` 만 쓰면 std430 이라** `vec2`/`ivec2`/`vec4` 가 8·16바이트
+경계로 밀려 C++ 의 빽빽한 배치와 조용히 어긋난다. 앞에 홀수 개의 4바이트 멤버가 오는 벡터를 넣을
+때는 `layout(push_constant, scalar)` 를 붙인다(`shaders/exposure_histogram.comp` 가 그 예다).
+확인은 `spirv-dis <출력>.spv | grep Offset` 으로 한다.
+
 ### 하드웨어 기능 게이트
 
 `gfx::Capabilities`(`src/gfx/context.h`)가 기동 시 조회한 것으로 경로를 켜고 끈다. **미지원 기능에

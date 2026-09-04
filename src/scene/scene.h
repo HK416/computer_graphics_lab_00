@@ -169,8 +169,17 @@ struct Environment {
 // 톤 매핑 앞뒤의 후처리. Environment 와 따로 두는 이유는 그쪽 비교가 환경 맵을 다시 굽는
 // 조건이라, 여기 값을 만질 때마다 굽기가 돌면 안 되기 때문이다.
 struct PostProcess {
-    // 0 이면 Bloom 을 끈다. 흐린 이미지를 원본에 섞는 비율이다.
-    float bloomIntensity = 0.1F;
+    // 0 이면 Bloom 을 끈다. 임계값을 넘은 부분을 흐려서 «더할» 세기다. 원본과 섞는 것이 아니라
+    // 더하므로 1 을 넘겨도 된다.
+    float bloomIntensity = 0.6F;
+    // 이 밝기를 넘는 부분만 번진다. 노출을 곱하기 «전»의 HDR 값에 걸리므로, 자동 노출을 켜면
+    // 화면에서 날아가는 밝기와 임계값이 어긋날 수 있다.
+    float bloomThreshold = 1.0F;
+    // 임계값 언저리를 부드럽게 넘기는 폭. 0 이면 경계가 딱 끊겨 화면이 깜빡인다. 임계값보다 크면
+    // 곡선이 뒤집혀 어두운 곳까지 번지므로 렌더러가 임계값으로 자른다.
+    float bloomKnee = 0.5F;
+    // 올라오며 섞을 때 넓은 밉 쪽에 두는 무게. 크면 더 멀리 퍼진다.
+    float bloomScatter = 0.7F;
     bool autoExposure = false;
     // 자동 노출이 목표 값으로 옮겨 가는 속도(1/초).
     float adaptationSpeed = 2.0F;

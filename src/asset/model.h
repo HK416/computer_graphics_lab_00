@@ -186,6 +186,9 @@ struct Material {
     std::string name;
     glm::vec4 baseColorFactor{1.0F};
     glm::vec3 emissiveFactor{0.0F};
+    // KHR_materials_emissive_strength. emissiveFactor 는 규격상 [0,1] 이라 이것 없이는 방출이 절대
+    // 1 을 넘지 못하고, 그러면 Bloom 임계값도 넘지 못한다.
+    float emissiveStrength = 1.0F;
     float metallicFactor = 1.0F;
     float roughnessFactor = 1.0F;
     float alphaCutoff = 0.5F;

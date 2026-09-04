@@ -149,6 +149,29 @@ int main() {
     assert(old.scene.name == "옛 장면" && old.scene.objects.size() == 1);
     assert(old.scene.rigidBodies.empty() && old.scene.objects[0].rigidBody == -1);
 
+    // 판 3 부터 bloomIntensity 는 «섞는 비율»이 아니라 «더하는 세기»다. 옛 값을 그대로 읽으면
+    // 번짐이 거의 보이지 않으므로 새 기본값으로 되돌린다.
+    scene::SceneFile oldBloom =
+        scene::readScene(R"({"version":2,"name":"옛 후처리","post":{"bloomIntensity":0.1},"objects":[]})");
+    assert(oldBloom.scene.post.bloomIntensity == scene::PostProcess{}.bloomIntensity &&
+           "옛 판의 Bloom 세기는 뜻이 달라 새 기본값을 쓴다");
+    scene::SceneFile oldOff =
+        scene::readScene(R"({"version":2,"name":"Bloom 끔","post":{"bloomIntensity":0.0},"objects":[]})");
+    assert(oldOff.scene.post.bloomIntensity == 0.0F && "옛 판이라도 «끔»은 뜻이 같아 그대로 둔다");
+    scene::SceneFile newBloom = scene::readScene(
+        R"({"version":3,"name":"새 후처리","post":{"bloomIntensity":1.5,"bloomThreshold":2.0,"bloomKnee":0.25},
+            "objects":[]})");
+    assert(std::abs(newBloom.scene.post.bloomIntensity - 1.5F) < 1e-5F);
+    assert(std::abs(newBloom.scene.post.bloomThreshold - 2.0F) < 1e-5F);
+    assert(std::abs(newBloom.scene.post.bloomKnee - 0.25F) < 1e-5F);
+    assert(newBloom.scene.post.bloomScatter == scene::PostProcess{}.bloomScatter && "적지 않은 값은 기본값이다");
+
+    // 범위 밖을 가리키는 첨자는 «안 붙은 것»으로 읽어야 한다. 그대로 두면 배열 밖을 짚는다.
+    scene::SceneFile broken = scene::readScene(
+        R"({"version":3,"name":"깨진 장면","objects":[{"name":"a","parent":7,"fluid":3,"rigidBody":9}]})");
+    assert(broken.scene.objects[0].parent == -1 && broken.scene.objects[0].fluid == -1);
+    assert(broken.scene.objects[0].rigidBody == -1);
+
     // 환경 설정도 장면과 함께 저장되어야 한다. 안 그러면 장면을 다시 열 때 조명이 달라진다.
     const scene::Environment& environment = loaded.scene.environment;
     assert(environment.useHdr);

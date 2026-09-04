@@ -5,19 +5,39 @@
 #include "exposure.glsl"
 
 // Bloom 밉 한 단계를 만든다. 13탭(Jimenez, CoD: Advanced Warfare) 다운샘플이라 2x2 상자보다
-// 깜빡임이 적다. 첫 단계에서만 반딧불이를 억제하려고 휘도 가중(Karis) 평균을 건다.
+// 깜빡임이 적다. 첫 단계에서는 임계값 아래를 깎아 내고(soft knee) 반딧불이를 억제하려고
+// 휘도 가중(Karis) 평균을 건다.
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(push_constant) uniform BloomPushConstants {
     uint sourceTexture;
     uint destinationStorage;
+    // 이미 축소 비율이 곱해져 있다. 렌더 배율 때문에 한 단계가 2 배가 아닐 수 있어, 그대로 쓰면
+    // 커널이 원본 화소를 건너뛴다.
     vec2 sourceTexelSize;
     ivec2 destinationSize;
     // 0 이 아니면 경로 추적 누적 버퍼라 표본 수로 나눈다. 첫 단계에만 온다.
     uint sampleCount;
     // 첫 단계면 1.
     uint firstLevel;
+    // 이 밝기를 넘는 부분만 남긴다. knee 폭 안에서는 제곱으로 부드럽게 올라온다.
+    float threshold;
+    float knee;
+    // 상승 단계만 쓴다. 두 셰이더가 같은 파이프라인 배치를 공유해 여기에도 적어 둔다.
+    float scatter;
 } bloom;
+
+// 임계값 아래를 깎는다. 딱 잘라 내면 밝기가 임계값을 오갈 때마다 화소가 깜빡이므로, knee 폭
+// 안에서는 이차 곡선으로 이어 붙인다(Unity/Call of Duty 가 쓰는 곡선).
+// 이 곡선은 knee <= threshold 를 전제한다. 그렇지 않으면 어두운 화소의 가중치가 발산하므로 CPU 가
+// 넘겨주기 전에 자른다.
+vec3 prefilter(vec3 color) {
+    float brightest = max(color.r, max(color.g, color.b));
+    float soft = clamp(brightest - bloom.threshold + bloom.knee, 0.0, 2.0 * bloom.knee);
+    soft = soft * soft / max(4.0 * bloom.knee, 1e-4);
+    float weight = max(soft, brightest - bloom.threshold) / max(brightest, 1e-4);
+    return color * weight;
+}
 
 vec3 fetch(vec2 uv) {
     vec3 color = sampleBindless(bloom.sourceTexture, uv).rgb;
@@ -25,7 +45,11 @@ vec3 fetch(vec2 uv) {
         color /= float(bloom.sampleCount);
     }
     // NaN 이나 무한대가 한 번 들어오면 밉 사슬 전체가 오염된다.
-    return clamp(color, vec3(0.0), vec3(65504.0));
+    color = clamp(color, vec3(0.0), vec3(65504.0));
+    if (bloom.firstLevel != 0u) {
+        color = prefilter(color);
+    }
+    return color;
 }
 
 // 네 표본의 평균. 첫 단계에서는 밝은 표본의 가중치를 줄여 한 화소짜리 반딧불이를 누른다.

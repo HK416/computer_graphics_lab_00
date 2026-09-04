@@ -28,8 +28,8 @@ void main() {
         color /= float(pushConstants.sampleCount);
     }
     if (pushConstants.bloomIntensity > 0.0) {
-        // Bloom 은 원본과 밝기 총량이 비슷하므로 더하지 않고 섞는다. 세기는 흐린 쪽의 비율이다.
-        color = mix(color, sampleBindless(pushConstants.bloomTexture, inUv).rgb, pushConstants.bloomIntensity);
+        // Bloom 밉에는 임계값을 넘은 부분만 들어 있다. 섞으면 원본이 그만큼 어두워지므로 더한다.
+        color += sampleBindless(pushConstants.bloomTexture, inUv).rgb * pushConstants.bloomIntensity;
     }
     float exposure = pushConstants.exposure;
     if (pushConstants.autoExposure != 0u) {

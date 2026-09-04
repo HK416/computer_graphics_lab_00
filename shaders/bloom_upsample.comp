@@ -4,8 +4,9 @@
 #include "bindless.glsl"
 
 // 작은 밉을 3x3 텐트 필터로 키워 한 단계 큰 밉과 섞는다. 가장 작은 밉부터 0단계까지 올라오면
-// 0단계에 모든 단계의 흐림이 겹친다. 더하지 않고 섞는 이유는 밝기 총량을 원본과 비슷하게 묶어
-// 세기 슬라이더가 어느 값에서든 화면을 씻어 내지 않게 하기 위해서다(Unity 의 scatter 와 같다).
+// 0단계에 모든 단계의 흐림이 겹친다. 더하지 않고 섞는 이유는 밉마다의 밝기 총량을 묶어 두어
+// scatter 하나로 «얼마나 멀리 퍼지는가»만 조절되게 하기 위해서다(Unity 의 scatter 와 같다).
+// 화면에 더하는 세기는 톤 매핑이 따로 곱한다.
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(push_constant) uniform BloomPushConstants {
@@ -15,6 +16,10 @@ layout(push_constant) uniform BloomPushConstants {
     ivec2 destinationSize;
     uint sampleCount;
     uint firstLevel;
+    float threshold;
+    float knee;
+    // 넓은 밉 쪽에 두는 무게. 1 이면 가장 넓은 흐림만 남는다.
+    float scatter;
 } bloom;
 
 vec3 fetch(vec2 uv) {
@@ -40,9 +45,8 @@ void main() {
     result += fetch(uv + texel * vec2(1.0, 1.0));
     result *= 1.0 / 16.0;
 
-    const float scatter = 0.7;
     vec3 existing = imageLoad(bindlessStorageImagesRgba16[nonuniformEXT(bloom.destinationStorage)], destination).rgb;
     imageStore(bindlessStorageImagesRgba16[nonuniformEXT(bloom.destinationStorage)],
                destination,
-               vec4(mix(existing, result, scatter), 1.0));
+               vec4(mix(existing, result, bloom.scatter), 1.0));
 }

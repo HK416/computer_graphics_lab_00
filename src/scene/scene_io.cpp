@@ -132,6 +132,9 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
                                {"intensity", scene.environment.intensity},
                                {"yaw", scene.environment.yawDegrees}};
     document["post"] = {{"bloomIntensity", scene.post.bloomIntensity},
+                        {"bloomThreshold", scene.post.bloomThreshold},
+                        {"bloomKnee", scene.post.bloomKnee},
+                        {"bloomScatter", scene.post.bloomScatter},
                         {"autoExposure", scene.post.autoExposure},
                         {"adaptationSpeed", scene.post.adaptationSpeed},
                         {"exposureMinEv", scene.post.exposureMinEv},
@@ -281,7 +284,15 @@ SceneFile readScene(const std::string& text) {
     // 옛 파일에는 없는 키다. 빠진 값은 기본값을 쓴다.
     const json& post = document.value("post", json::object());
     PostProcess& postTarget = file.scene.post;
-    postTarget.bloomIntensity = post.value("bloomIntensity", postTarget.bloomIntensity);
+    // 판 3 부터 bloomIntensity 는 «섞는 비율»이 아니라 «더하는 세기»다. 옛 값을 그대로 읽으면
+    // 번짐이 거의 보이지 않으므로 새 기본값을 쓴다. 다만 0 은 뜻이 같은 «끔»이라 그대로 둔다.
+    float storedBloom = post.value("bloomIntensity", postTarget.bloomIntensity);
+    if (version >= 3 || storedBloom == 0.0F) {
+        postTarget.bloomIntensity = storedBloom;
+    }
+    postTarget.bloomThreshold = post.value("bloomThreshold", postTarget.bloomThreshold);
+    postTarget.bloomKnee = post.value("bloomKnee", postTarget.bloomKnee);
+    postTarget.bloomScatter = post.value("bloomScatter", postTarget.bloomScatter);
     postTarget.autoExposure = post.value("autoExposure", postTarget.autoExposure);
     postTarget.adaptationSpeed = post.value("adaptationSpeed", postTarget.adaptationSpeed);
     postTarget.exposureMinEv = post.value("exposureMinEv", postTarget.exposureMinEv);

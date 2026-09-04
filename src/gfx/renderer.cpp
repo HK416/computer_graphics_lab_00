@@ -258,6 +258,9 @@ struct BloomPushConstants {
     int32_t destinationSize[2];
     uint32_t sampleCount;
     uint32_t firstLevel;
+    float threshold;
+    float knee;
+    float scatter;
 };
 
 // shaders/exposure_histogram.comp 와 배치가 같아야 한다.
@@ -267,6 +270,7 @@ struct HistogramPushConstants {
     int32_t sourceSize[2];
     float minLog;
     float inverseLogRange;
+    uint32_t sampleCount;
 };
 
 // shaders/exposure_average.comp 와 배치가 같아야 한다.
@@ -1631,37 +1635,49 @@ void Renderer::recordPostEffects(VkCommandBuffer commandBuffer,
         vkCmdFillBuffer(commandBuffer, histogramBuffer.handle, 0, VK_WHOLE_SIZE, 0);
     }
 
-    // 1) 아래로 내려가며 밉 사슬을 만든다. 자동 노출도 여기서 나온 작은 밉을 읽는다.
+    // 1) 아래로 내려가며 밉 사슬을 만든다. 첫 단계에서 임계값 아래를 깎아 내므로, 이 사슬에는
+    // «밝은 곳»만 남는다. 자동 노출이 이 밉을 장면 휘도로 쓸 수 없는 이유다(아래 2번).
     size_t levels = targets.bloomStorageSlots.size();
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, bloomDownsamplePipeline);
-    vkCmdBindDescriptorSets(
-        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, bloomPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
-    VkExtent2D source = sourceExtent;
-    for (size_t level = 0; level < levels; ++level) {
-        VkExtent2D destination = extentOf(level);
-        BloomPushConstants pushConstants{};
-        pushConstants.sourceTexture = level == 0 ? sourceSlot : targets.bloomSampledSlots[level - 1];
-        pushConstants.destinationStorage = targets.bloomStorageSlots[level];
-        pushConstants.sourceTexelSize[0] = 1.0F / static_cast<float>(source.width);
-        pushConstants.sourceTexelSize[1] = 1.0F / static_cast<float>(source.height);
-        pushConstants.destinationSize[0] = static_cast<int32_t>(destination.width);
-        pushConstants.destinationSize[1] = static_cast<int32_t>(destination.height);
-        pushConstants.sampleCount = level == 0 ? sampleCount : 0U;
-        pushConstants.firstLevel = level == 0 ? 1U : 0U;
-        vkCmdPushConstants(
-            commandBuffer, bloomPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
-        vkCmdDispatch(commandBuffer, (destination.width + 7) / 8, (destination.height + 7) / 8, 1);
-        memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-        source = destination;
+    if (useBloom) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, bloomDownsamplePipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, bloomPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+        for (size_t level = 0; level < levels; ++level) {
+            VkExtent2D destination = extentOf(level);
+            BloomPushConstants pushConstants{};
+            pushConstants.sourceTexture = level == 0 ? sourceSlot : targets.bloomSampledSlots[level - 1];
+            pushConstants.destinationStorage = targets.bloomStorageSlots[level];
+            // 13탭 커널의 탭은 «대상» 화소의 ±0.5, ±1.0 자리에 놓여야 한다. 원본 텍셀 기준으로 잡으면
+            // 렌더 배율 때문에 축소가 2 배가 아닐 때 발자국이 대상 화소를 덮지 못한다. 축소가 정확히
+            // 2 배면 이 값은 예전의 1/원본 과 같다.
+            pushConstants.sourceTexelSize[0] = 0.5F / static_cast<float>(destination.width);
+            pushConstants.sourceTexelSize[1] = 0.5F / static_cast<float>(destination.height);
+            pushConstants.destinationSize[0] = static_cast<int32_t>(destination.width);
+            pushConstants.destinationSize[1] = static_cast<int32_t>(destination.height);
+            pushConstants.sampleCount = level == 0 ? sampleCount : 0U;
+            pushConstants.firstLevel = level == 0 ? 1U : 0U;
+            // 무릎이 임계값보다 크면 곡선이 뒤집혀 어두운 화소를 오히려 증폭한다. Unity 가 무릎을
+            // 임계값의 비율로 유도해 이 관계를 강제하는 것과 같은 이유로 여기서 자른다.
+            pushConstants.threshold = std::max(post.bloomThreshold, 0.0F);
+            pushConstants.knee = std::clamp(post.bloomKnee, 1e-3F, std::max(pushConstants.threshold, 1e-3F));
+            vkCmdPushConstants(commandBuffer,
+                               bloomPipelineLayout,
+                               VK_SHADER_STAGE_COMPUTE_BIT,
+                               0,
+                               sizeof(pushConstants),
+                               &pushConstants);
+            vkCmdDispatch(commandBuffer, (destination.width + 7) / 8, (destination.height + 7) / 8, 1);
+            memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                          VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                          VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        }
     }
 
-    // 2) 자동 노출. 2단계 밉(1/8 해상도)이면 히스토그램에 충분하다.
+    // 2) 자동 노출. HDR 원본을 1/8 격자로 성기게 훑는다. Bloom 밉을 쓰던 때와 화소 수는 같지만,
+    // 임계값 아래가 깎이지 않은 «장면 그대로»의 휘도를 본다.
     if (post.autoExposure) {
-        size_t histogramLevel = std::min<size_t>(2, levels - 1);
-        VkExtent2D histogramExtent = extentOf(histogramLevel);
+        VkExtent2D histogramExtent{std::max(sourceExtent.width / 8, 1U), std::max(sourceExtent.height / 8, 1U)};
         memoryBarrier(VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                       VK_ACCESS_2_TRANSFER_WRITE_BIT,
                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -1671,11 +1687,12 @@ void Renderer::recordPostEffects(VkCommandBuffer commandBuffer,
             commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, histogramPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
         HistogramPushConstants histogram{};
         histogram.histogram = histogramBuffer.address;
-        histogram.sourceTexture = targets.bloomSampledSlots[histogramLevel];
+        histogram.sourceTexture = sourceSlot;
         histogram.sourceSize[0] = static_cast<int32_t>(histogramExtent.width);
         histogram.sourceSize[1] = static_cast<int32_t>(histogramExtent.height);
         histogram.minLog = EXPOSURE_MIN_LOG;
         histogram.inverseLogRange = 1.0F / (EXPOSURE_MAX_LOG - EXPOSURE_MIN_LOG);
+        histogram.sampleCount = sampleCount;
         vkCmdPushConstants(
             commandBuffer, histogramPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(histogram), &histogram);
         vkCmdDispatch(commandBuffer, (histogramExtent.width + 15) / 16, (histogramExtent.height + 15) / 16, 1);
@@ -1720,6 +1737,7 @@ void Renderer::recordPostEffects(VkCommandBuffer commandBuffer,
             pushConstants.sourceTexelSize[1] = 1.0F / static_cast<float>(from.height);
             pushConstants.destinationSize[0] = static_cast<int32_t>(destination.width);
             pushConstants.destinationSize[1] = static_cast<int32_t>(destination.height);
+            pushConstants.scatter = std::clamp(post.bloomScatter, 0.0F, 1.0F);
             vkCmdPushConstants(commandBuffer,
                                bloomPipelineLayout,
                                VK_SHADER_STAGE_COMPUTE_BIT,
@@ -4146,6 +4164,7 @@ void Renderer::recordCommands(Frame& frame,
                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     }
+    // 톤 매핑(프래그먼트)뿐 아니라 Bloom 다운샘플과 자동 노출 히스토그램(컴퓨트)도 이 이미지를 읽는다.
     imageBarrier(commandBuffer,
                  targets.color.handle,
                  VK_IMAGE_ASPECT_COLOR_BIT,
@@ -4153,7 +4172,7 @@ void Renderer::recordCommands(Frame& frame,
                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
     // 경로 추적은 누적 버퍼가 이미 표본을 쌓고 있어 시간축 업스케일과 겹친다. 지터도 꺼져 있다.
