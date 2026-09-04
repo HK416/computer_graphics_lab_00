@@ -1,0 +1,89 @@
+#version 460
+
+#include "fluid_surface_common.glsl"
+#include "marching_cubes.glsl"
+
+// 셀마다 등치면 삼각형을 만들어 정점 버퍼 꼬리에 이어 붙인다. 자리는 원자 덧셈 하나로 잡으므로
+// 잠금이 없다. 셀 순서가 프레임마다 달라질 수 있으니 정점 순서에 기대는 코드를 쓰면 안 된다.
+//
+// src/physics/marching_cubes.cpp 의 marchFluidField 와 같은 표·같은 보간을 쓴다.
+layout(local_size_x = FLUID_SURFACE_GROUP_SIZE, local_size_y = FLUID_SURFACE_GROUP_SIZE,
+       local_size_z = FLUID_SURFACE_GROUP_SIZE) in;
+
+uint samples() {
+    return push.surfaceResolution + 1u;
+}
+
+float fieldAt(ivec3 coordinate) {
+    int limit = int(samples());
+    if (any(lessThan(coordinate, ivec3(0))) || any(greaterThanEqual(coordinate, ivec3(limit)))) {
+        // 격자 밖은 0 이라 표면이 경계에서 닫힌다.
+        return 0.0;
+    }
+    uint index = (uint(coordinate.z) * uint(limit) + uint(coordinate.y)) * uint(limit) + uint(coordinate.x);
+    return push.surfaceField.items[index];
+}
+
+// 중앙 차분. 칸 크기로 나누지 않으면 용기가 정육면체가 아닐 때 축마다 배율이 달라 법선이 기운다.
+vec3 gradientAt(ivec3 coordinate, vec3 cell) {
+    return vec3(fieldAt(coordinate + ivec3(1, 0, 0)) - fieldAt(coordinate - ivec3(1, 0, 0)),
+                fieldAt(coordinate + ivec3(0, 1, 0)) - fieldAt(coordinate - ivec3(0, 1, 0)),
+                fieldAt(coordinate + ivec3(0, 0, 1)) - fieldAt(coordinate - ivec3(0, 0, 1))) /
+           cell;
+}
+
+void main() {
+    uvec3 base = gl_GlobalInvocationID;
+    if (any(greaterThanEqual(base, uvec3(push.surfaceResolution)))) {
+        return;
+    }
+    FluidParams params = push.params.item;
+    vec3 origin = params.containerMin.xyz;
+    vec3 cell = (params.containerMax.xyz - origin) / float(push.surfaceResolution);
+    float iso = push.surfaceIso;
+
+    float values[8];
+    uint code = 0u;
+    for (uint corner = 0u; corner < 8u; ++corner) {
+        values[corner] = fieldAt(ivec3(base) + MC_CORNER_OFFSET[corner]);
+        if (values[corner] >= iso) {
+            code |= 1u << corner;
+        }
+    }
+    if (marchingEntry(code, 0u) == MC_TABLE_END) {
+        return;
+    }
+
+    uint count = 0u;
+    while (count < uint(MC_TABLE_WIDTH) && marchingEntry(code, count) != MC_TABLE_END) {
+        ++count;
+    }
+    uint slot = atomicAdd(push.surfaceCounter.items[0], count);
+    if (slot + count > push.surfaceCapacity) {
+        // 상한까지 자르면 «자리는 잡았지만 쓰지 않은» 칸이 남아 간접 그리기가 쓰레기를 읽는다.
+        // 처음 넘친 자리로 자르면 그 아래는 모두 실제로 쓰인 칸이다. slot 은 언제나 3 의 배수라
+        // 삼각형이 잘리지도 않는다.
+        atomicMin(push.surfaceCounter.items[0], slot);
+        return;
+    }
+
+    for (uint v = 0u; v < count; ++v) {
+        uint edge = marchingEntry(code, v);
+        uint a = MC_EDGE_CORNERS[edge].x;
+        uint b = MC_EDGE_CORNERS[edge].y;
+        float va = values[a];
+        float vb = values[b];
+        float t = abs(vb - va) > 1e-8 ? clamp((iso - va) / (vb - va), 0.0, 1.0) : 0.5;
+        ivec3 ca = ivec3(base) + MC_CORNER_OFFSET[a];
+        ivec3 cb = ivec3(base) + MC_CORNER_OFFSET[b];
+        vec3 pa = origin + vec3(ca) * cell;
+        vec3 pb = origin + vec3(cb) * cell;
+        // 값이 커지는 쪽이 유체 안이므로 바깥 법선은 기울기의 반대다.
+        vec3 normal = -mix(gradientAt(ca, cell), gradientAt(cb, cell), t);
+        if (dot(normal, normal) < 1e-24) {
+            normal = vec3(0.0, 1.0, 0.0);
+        }
+        push.surfaceVertices.items[slot + v].position = mix(pa, pb, t);
+        push.surfaceVertices.items[slot + v].normal = encodeUnitVector(normalize(normal));
+    }
+}

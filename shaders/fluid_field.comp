@@ -1,0 +1,58 @@
+#version 460
+
+#include "fluid_surface_common.glsl"
+
+// 입자에서 스칼라 장을 만든다. 표본마다 이웃 셀 스물일곱 개를 훑는다. 격자는 이미 fluid_grid.comp 가
+// 세워 둔 것을 그대로 쓴다.
+//
+// src/physics/marching_cubes.cpp 의 sampleField 와 **같은 식** 이어야 한다. 두 벌로 두면 백엔드마다
+// 물 표면 모양이 달라진다. 커널은 poly6 의 모양만 빌린 무차원 값이라 등치값도 무차원이다.
+layout(local_size_x = FLUID_SURFACE_GROUP_SIZE, local_size_y = FLUID_SURFACE_GROUP_SIZE,
+       local_size_z = FLUID_SURFACE_GROUP_SIZE) in;
+
+void main() {
+    uvec3 coordinate = gl_GlobalInvocationID;
+    uint samples = push.surfaceResolution + 1u;
+    if (any(greaterThanEqual(coordinate, uvec3(samples)))) {
+        return;
+    }
+    uint index = (coordinate.z * samples + coordinate.y) * samples + coordinate.x;
+    // 격자 가장자리는 0 으로 둔다. 용기를 가득 채운 물은 벽에 닿은 표본이 전부 높아 등치면이 안쪽에서
+    // 끊기고, 그러면 옆면이 없는 «뚜껑만 있는» 표면이 나온다. 가장자리를 비워 표면을 닫는다.
+    if (any(equal(coordinate, uvec3(0u))) || any(equal(coordinate, uvec3(push.surfaceResolution)))) {
+        push.surfaceField.items[index] = 0.0;
+        return;
+    }
+    FluidParams params = push.params.item;
+    vec3 origin = params.containerMin.xyz;
+    vec3 cell = (params.containerMax.xyz - origin) / float(push.surfaceResolution);
+    vec3 point = origin + vec3(coordinate) * cell;
+
+    // 커널 반지름을 그대로 쓴다. 이보다 좁히면 입자 하나하나가 따로 뭉쳐 표면이 자갈처럼 된다.
+    // 격자 이웃 탐색이 커널 반지름 기준이라 이보다 넓힐 수도 없다.
+    float radius = params.smoothingRadius;
+    float radiusSq = radius * radius;
+    float total = 0.0;
+
+    ivec3 base = fluidCell(point, params.smoothingRadius);
+    for (int z = -1; z <= 1; ++z) {
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                uint bucket = fluidHash(base + ivec3(x, y, z), params.lattice.w);
+                uint count = min(push.cellCounts.items[bucket], FLUID_CELL_CAPACITY);
+                for (uint i = 0u; i < count; ++i) {
+                    uint other = push.cellParticles.items[bucket * FLUID_CELL_CAPACITY + i];
+                    vec3 delta = push.positionsIn.items[other].xyz - point;
+                    float distanceSq = dot(delta, delta);
+                    if (distanceSq >= radiusSq) {
+                        continue;
+                    }
+                    float d = 1.0 - distanceSq / radiusSq;
+                    total += d * d * d;
+                }
+            }
+        }
+    }
+
+    push.surfaceField.items[index] = total;
+}

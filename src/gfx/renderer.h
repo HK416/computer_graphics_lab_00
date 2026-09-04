@@ -142,6 +142,9 @@ struct RenderTargets {
     Image depth;
     Image oitAccumulation;
     Image oitRevealage;
+    // 물 두께. 뒷면에서 앞면을 뺀 시야 거리를 가산 혼합으로 쌓은 것이라 겹친 층까지 더해진다.
+    Image fluidThickness;
+    uint32_t fluidThicknessSlot = 0;
     // 화면 UV 단위 모션 벡터. 불투명 패스가 함께 기록한다.
     Image velocity;
     Image tonemapped; // 렌더 해상도의 톤 매핑 결과. 공간 업스케일 입력이다.
@@ -368,6 +371,8 @@ public:
     bool fluidOnCpu(uint32_t index) const { return fluid != nullptr && fluid->onCpu(index); }
     // 이 장치에서 유체 GPU 백엔드를 쓸 수 있는지. 편집기가 못 고르게 막는 데 쓴다.
     bool fluidGpuAvailable() const { return fluid != nullptr && fluid->gpuAvailable(); }
+    // 물 표면 컴퓨트를 만들었는지. GPU 백엔드에서 «표면» 표시를 고를 수 있는지의 조건이다.
+    bool fluidSurfaceAvailable() const { return fluid != nullptr && fluid->surfaceAvailable(); }
     // 이 장치에서 강체 GPU 솔버를 쓸 수 있는지.
     bool rigidGpuAvailable() const { return rigidBodies != nullptr && rigidBodies->available(); }
     // 지난 프레임 GPU 솔버가 푼 강체 수. 편집기가 «지금 도는 백엔드»를 보여 주는 데 쓴다.
@@ -500,6 +505,13 @@ private:
     void recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame);
     // 유체를 진행하고 입자 인스턴스를 쓴다. 스킨 패스 뒤, 그림자 패스 앞. wantsTlas 면 상위 가속 구조
     // 인스턴스도 앞쪽에 써 두고 updateAccelerationStructures 가 그 뒤에 오브젝트를 잇는다.
+    void createFluidSurfacePipelines();
+    // 물 표면을 그린다. 하늘 뒤라 뒤에 있는 배경이 이미 색상 대상에 들어 있고, 미리 곱해진 알파로
+    // 섞으므로 화면 색 사본을 뜨지 않아도 투과가 맞는다.
+    void recordFluidSurfacePass(VkCommandBuffer commandBuffer,
+                                const Frame& frame,
+                                const FrameBatches& batches,
+                                const scene::Scene& scene);
     void recordFluidPass(VkCommandBuffer commandBuffer,
                          const Frame& frame,
                          const FrameBatches& batches,
@@ -640,6 +652,14 @@ private:
     std::unique_ptr<FluidSimulator> fluid;
     // 유체마다 용기의 경계 구. 그림자 시점 컬링이 쓴다.
     std::vector<glm::vec4> fluidBounds;
+    // 물 표면 파이프라인. 두께를 먼저 쌓고 그 위에 표면을 그린다.
+    VkPipelineLayout fluidSurfaceLayout = VK_NULL_HANDLE;
+    VkPipeline fluidThicknessPipeline = VK_NULL_HANDLE;
+    // 가장 가까운 물 표면의 깊이만 박는 프리패스. 표면 패스가 그 깊이와 같은 조각만 남긴다.
+    VkPipeline fluidDepthPipeline = VK_NULL_HANDLE;
+    // 두께 대상의 포맷. R32 혼합은 규격이 보장하지 않아 기동 시 조회해 정한다.
+    VkFormat thicknessFormat = VK_FORMAT_R16_SFLOAT;
+    VkPipeline fluidSurfacePipeline = VK_NULL_HANDLE;
     // 강체 GPU 솔버. 상태를 GPU 에 두고 결과만 되읽는다.
     std::unique_ptr<RigidBodySimulator> rigidBodies;
     uint32_t rigidSteps = 0;

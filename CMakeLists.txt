@@ -108,6 +108,11 @@ set(shader_sources
     shaders/fluid_density.comp
     shaders/fluid_integrate.comp
     shaders/fluid_instances.comp
+    shaders/fluid_field.comp
+    shaders/fluid_marching.comp
+    shaders/fluid_surface.vert
+    shaders/fluid_surface.frag
+    shaders/fluid_thickness.frag
     shaders/rigid_integrate.comp
     shaders/rigid_solve.comp
     shaders/rigid_finish.comp
@@ -216,6 +221,7 @@ add_executable(cg_lab
     src/gfx/uploader.cpp
     src/gfx/vma_impl.cpp
     src/physics/fluid_sph.cpp
+    src/physics/marching_cubes.cpp
     src/physics/rigid_body.cpp
     src/scene/camera.cpp
     src/scene/scene.cpp
@@ -497,13 +503,28 @@ else()
     target_compile_options(cg_lab_physics_tests PRIVATE -Wall -Wextra)
 endif()
 
+# 마칭 큐브 케이스 표와 등치면 추출. 셰이더 표가 C++ 표와 같은지도 본다.
+add_executable(cg_lab_marching_cubes_tests tests/marching_cubes_test.cpp src/physics/marching_cubes.cpp
+    src/physics/fluid_sph.cpp src/scene/scene.cpp src/asset/animation.cpp src/core/error.cpp
+    src/core/job_system.cpp)
+target_include_directories(cg_lab_marching_cubes_tests PRIVATE src)
+target_link_libraries(cg_lab_marching_cubes_tests PRIVATE SDL3::SDL3 spdlog::spdlog glm::glm Threads::Threads)
+target_compile_definitions(cg_lab_marching_cubes_tests PRIVATE GLM_ENABLE_EXPERIMENTAL
+    CG_LAB_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+if(MSVC)
+    target_compile_options(cg_lab_marching_cubes_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(cg_lab_marching_cubes_tests PRIVATE -Wall -Wextra)
+endif()
+
 # 테스트는 assert 로 확인한다. RelWithDebInfo 의 NDEBUG 를 그대로 두면 검사가 통째로 사라지고
 # 쓰지 않는 변수 경고만 남는다.
 foreach(test_target
         cg_lab_tests cg_lab_animation_tests cg_lab_camera_tests cg_lab_scene_tests
         cg_lab_scene_io_tests cg_lab_profiler_tests cg_lab_shadow_tests cg_lab_concurrency_tests
         cg_lab_upscaler_tests cg_lab_vertex_pack_tests cg_lab_physics_tests cg_lab_primitives_tests
-        cg_lab_debug_lines_tests cg_lab_hardware_profile_tests cg_lab_fluid_tests)
+        cg_lab_debug_lines_tests cg_lab_hardware_profile_tests cg_lab_fluid_tests
+        cg_lab_marching_cubes_tests)
     if(MSVC)
         target_compile_options(${test_target} PRIVATE /UNDEBUG)
     else()
@@ -531,6 +552,7 @@ add_test(NAME debug_lines COMMAND cg_lab_debug_lines_tests)
 add_test(NAME hardware_profile COMMAND cg_lab_hardware_profile_tests)
 add_test(NAME fluid COMMAND cg_lab_fluid_tests)
 add_test(NAME physics COMMAND cg_lab_physics_tests)
+add_test(NAME marching_cubes COMMAND cg_lab_marching_cubes_tests)
 
 # cmake --build --preset debug --target run 으로 빌드한 뒤 바로 실행한다.
 add_custom_target(run

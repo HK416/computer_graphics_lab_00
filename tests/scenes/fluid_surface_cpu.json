@@ -1,0 +1,226 @@
+{
+  "version": 3,
+  "name": "물 표면 점검 (CPU)",
+  "models": [
+    "<builtin:sphere>"
+  ],
+  "camera": {
+    "position": [
+      0.0,
+      1.0,
+      2.2
+    ],
+    "yaw": -90.0,
+    "pitch": -15.0,
+    "fovY": 60.0,
+    "near": 0.05,
+    "moveSpeed": 2.0,
+    "mode": "orbit",
+    "target": [
+      0.0,
+      0.45,
+      0.0
+    ],
+    "distance": 2.4
+  },
+  "ambient": {
+    "color": [
+      0.25,
+      0.25,
+      0.25
+    ],
+    "intensity": 1.0
+  },
+  "lights": [
+    {
+      "type": "directional",
+      "color": [
+        1.0,
+        0.97,
+        0.9
+      ],
+      "intensity": 3.0,
+      "range": 20.0,
+      "innerCone": 20.0,
+      "outerCone": 30.0,
+      "size": [
+        2.0,
+        2.0
+      ],
+      "castsShadow": true
+    }
+  ],
+  "animators": [],
+  "rigidBodies": [
+    {
+      "shape": "box",
+      "mass": 1.0,
+      "useGravity": false,
+      "kinematic": true,
+      "restitution": 0.2,
+      "friction": 0.6,
+      "radius": 0.5,
+      "halfExtents": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "shape": "sphere",
+      "mass": 1.0,
+      "useGravity": true,
+      "kinematic": false,
+      "restitution": 0.4,
+      "friction": 0.5,
+      "radius": 1.0,
+      "halfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ]
+    }
+  ],
+  "fluids": [
+    {
+      "emitterHalfExtents": [
+        0.45,
+        0.45,
+        0.45
+      ],
+      "particleCount": 8192,
+      "particleRadius": 0.025,
+      "smoothingRadius": 0.1,
+      "restDensity": 1000.0,
+      "stiffness": 50.0,
+      "viscosity": 0.5,
+      "containerMin": [
+        -0.5,
+        0.0,
+        -0.5
+      ],
+      "containerMax": [
+        0.5,
+        1.2,
+        0.5
+      ],
+      "gravity": [
+        0.0,
+        -9.81,
+        0.0
+      ],
+      "display": "surface",
+      "surfaceResolution": 40,
+      "surfaceIso": 2.0,
+      "surfaceRoughness": 0.05,
+      "waterColor": [
+        0.35,
+        0.65,
+        0.75
+      ],
+      "absorption": [
+        2.2,
+        0.5,
+        0.25
+      ],
+      "thicknessScale": 1.0,
+      "backend": "cpu"
+    }
+  ],
+  "objects": [
+    {
+      "name": "태양",
+      "parent": -1,
+      "position": [
+        0.0,
+        5.0,
+        0.0
+      ],
+      "rotation": [
+        -0.383,
+        0.0,
+        0.0,
+        0.924
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "visible": true,
+      "light": 0
+    },
+    {
+      "name": "바닥",
+      "parent": -1,
+      "position": [
+        0.0,
+        -0.1,
+        0.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "scale": [
+        1.2,
+        0.1,
+        1.2
+      ],
+      "visible": true,
+      "model": 0,
+      "mesh": 0,
+      "skin": -1,
+      "rigidBody": 0
+    },
+    {
+      "name": "공",
+      "parent": -1,
+      "position": [
+        0.25,
+        1.1,
+        0.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "scale": [
+        0.3,
+        0.3,
+        0.3
+      ],
+      "visible": true,
+      "model": 0,
+      "mesh": 0,
+      "skin": -1,
+      "rigidBody": 1
+    },
+    {
+      "name": "유체",
+      "parent": -1,
+      "position": [
+        0.0,
+        0.6,
+        0.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "visible": true,
+      "fluid": 0
+    }
+  ]
+}

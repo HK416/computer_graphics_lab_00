@@ -45,7 +45,8 @@ ctest --test-dir build/debug --output-on-failure
 ```
 
 테스트 이름: `lod_network` `animation` `camera` `scene` `scene_io` `profiler` `shadow` `upscaler`
-`concurrency` `vertex_pack` `physics` `primitives` `debug_lines` `hardware_profile` `fluid`.
+`concurrency` `vertex_pack` `physics` `primitives` `debug_lines` `hardware_profile` `fluid`
+`marching_cubes`.
 
 선택 기능:
 
@@ -188,6 +189,14 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `GpuRigidBody` `RigidPushConstants` (`src/gfx/rigid_body_gpu.h`) | `RigidBody` `RigidPushConstants` (`shaders/rigid_common.glsl`) |
 | `collideBoxBox` 등 접촉 생성 (`src/physics/rigid_body.cpp`) | `rigidCollide` (`shaders/rigid_common.glsl`) |
 | `physics::MAX_MANIFOLD_POINTS` (`src/physics/rigid_body.h`) | `RIGID_MAX_MANIFOLD` (`rigid_common.glsl`) |
+| `FluidSurfacePushConstants` (`src/gfx/fluid.h`) | 동명 블록 (`shaders/fluid_surface_common.glsl`) |
+| `FluidDrawPushConstants` (`src/gfx/renderer.cpp`) | 동명 블록 (`shaders/fluid_draw_common.glsl`) |
+| `physics::SurfaceVertex` (`src/physics/marching_cubes.h`) | `FluidSurfaceVertex` (`shaders/fluid_types.glsl`) |
+| `physics::MC_TABLE` `MC_EDGES` `MC_CORNERS` (`marching_cubes.cpp`) | `MC_TABLE` `MC_EDGE_CORNERS` `MC_CORNER_OFFSET` (`shaders/marching_cubes.glsl`) |
+
+마칭 큐브 표는 두 벌이 될 수밖에 없다. **손으로 고치지 않는다** — 규칙에서 만들어 낸 것이고
+`marching_cubes` 테스트가 셰이더 표를 파일에서 읽어 C++ 표와 같은지 확인한다. 장을 만드는 식
+(`fluid_field.comp` ↔ `physics::buildFluidField`)과 격자 가장자리를 0 으로 두는 규칙도 같아야 한다.
 
 강체 솔버 상수(`GRAVITY` `POSITION_CORRECTION` `PENETRATION_SLOP` `RESTITUTION_THRESHOLD`
 `POSITION_ITERATIONS`)는 `src/physics/rigid_body.h` 한 곳에만 두고 GPU 쪽은 푸시 상수로 실어 보낸다.

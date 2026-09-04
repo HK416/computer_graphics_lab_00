@@ -14,6 +14,7 @@
 #include "gfx/context.h"
 #include "gfx/geometry.h"
 #include "gfx/vk_check.h"
+#include "physics/marching_cubes.h"
 
 namespace gfx {
 namespace {
@@ -84,10 +85,17 @@ FluidSimulator::~FluidSimulator() {
     for (State& state : states) {
         destroyState(state);
     }
-    for (VkPipeline pipeline : {emitPipeline, gridPipeline, densityPipeline, integratePipeline, instancesPipeline}) {
+    for (VkPipeline pipeline : {emitPipeline,
+                                gridPipeline,
+                                densityPipeline,
+                                integratePipeline,
+                                instancesPipeline,
+                                fieldPipeline,
+                                marchingPipeline}) {
         vkDestroyPipeline(context.device, pipeline, nullptr);
     }
     vkDestroyPipelineLayout(context.device, pipelineLayout, nullptr);
+    vkDestroyPipelineLayout(context.device, surfaceLayout, nullptr);
 }
 
 void FluidSimulator::createPipelines() {
@@ -113,6 +121,23 @@ void FluidSimulator::createPipelines() {
     if (!gpuReady) {
         spdlog::warn("유체 GPU 백엔드를 만들지 못해 CPU 로 돈다");
     }
+
+    // 표면 패스는 푸시 상수가 달라 배치를 따로 만든다. 한 블록에 다 넣으면 128 바이트를 넘는다.
+    VkPushConstantRange surfaceRange{};
+    surfaceRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    surfaceRange.size = sizeof(FluidSurfacePushConstants);
+    VkPipelineLayoutCreateInfo surfaceInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    surfaceInfo.setLayoutCount = 1;
+    surfaceInfo.pSetLayouts = &bindlessLayout;
+    surfaceInfo.pushConstantRangeCount = 1;
+    surfaceInfo.pPushConstantRanges = &surfaceRange;
+    VK_CHECK(vkCreatePipelineLayout(context.device, &surfaceInfo, nullptr, &surfaceLayout));
+    fieldPipeline = createComputePipeline(context, surfaceLayout, "fluid_field.comp.spv");
+    marchingPipeline = createComputePipeline(context, surfaceLayout, "fluid_marching.comp.spv");
+    surfaceReady = fieldPipeline != VK_NULL_HANDLE && marchingPipeline != VK_NULL_HANDLE;
+    if (!surfaceReady) {
+        spdlog::warn("물 표면 컴퓨트를 만들지 못했습니다. GPU 백엔드는 입자로만 그린다");
+    }
 }
 
 void FluidSimulator::destroyState(State& state) {
@@ -127,6 +152,13 @@ void FluidSimulator::destroyState(State& state) {
     context.retireBuffer(state.previousRendered);
     context.retireBuffer(state.cellCounts);
     context.retireBuffer(state.cellParticles);
+    context.retireBuffer(state.surfaceField);
+    for (Buffer& buffer : state.surfaceVertices) {
+        context.retireBuffer(buffer);
+    }
+    for (Buffer& buffer : state.surfaceDrawArgs) {
+        context.retireBuffer(buffer);
+    }
     for (Buffer& buffer : state.params) {
         context.retireBuffer(buffer);
     }
@@ -180,6 +212,74 @@ void FluidSimulator::ensureCapacity(State& state, uint32_t count) {
     state.needsEmit = true;
 }
 
+void FluidSimulator::ensureSurface(State& state, const scene::Fluid& settings) {
+    bool wanted = settings.display == scene::FluidDisplay::SURFACE && (state.cpu || surfaceReady);
+    // CPU 백엔드는 표본마다 입자 전부를 훑으므로 해상도를 낮게 묶는다. 128³ 을 그대로 두면 명령 기록
+    // 도중 렌더 스레드가 수십 초를 먹는다.
+    uint32_t ceiling = state.cpu ? FLUID_MAX_CPU_SURFACE_RESOLUTION : FLUID_MAX_SURFACE_RESOLUTION;
+    uint32_t resolution = std::clamp(settings.surfaceResolution, 8U, ceiling);
+    if (!wanted) {
+        // 입자로 돌아갔으면 3 MB 짜리 버퍼를 붙들고 있을 이유가 없다.
+        if (state.surfaceResolution != 0) {
+            context.retireBuffer(state.surfaceField);
+            for (Buffer& buffer : state.surfaceVertices) {
+                context.retireBuffer(buffer);
+            }
+            for (Buffer& buffer : state.surfaceDrawArgs) {
+                context.retireBuffer(buffer);
+            }
+            state.surfaceResolution = 0;
+            state.surfaceCapacity = 0;
+        }
+        state.surfaceReady = false;
+        return;
+    }
+    state.surfaceReady = true;
+    if (state.surfaceResolution == resolution && state.surfaceCapacity != 0) {
+        return;
+    }
+    context.retireBuffer(state.surfaceField);
+    for (Buffer& buffer : state.surfaceVertices) {
+        context.retireBuffer(buffer);
+    }
+    for (Buffer& buffer : state.surfaceDrawArgs) {
+        context.retireBuffer(buffer);
+    }
+    state.surfaceResolution = resolution;
+    state.surfaceCapacity = FLUID_MAX_SURFACE_VERTICES;
+
+    uint32_t samples = resolution + 1;
+    VkDeviceSize fieldBytes = static_cast<VkDeviceSize>(samples) * samples * samples * sizeof(float);
+    VkDeviceSize vertexBytes = static_cast<VkDeviceSize>(state.surfaceCapacity) * sizeof(physics::SurfaceVertex);
+    // CPU 백엔드는 정점을 호스트에서 직접 쓴다. 장은 CPU 쪽에서 std::vector 로 들고 있으므로 GPU
+    // 버퍼를 만들지 않는다.
+    if (!state.cpu) {
+        state.surfaceField =
+            createBuffer(context, fieldBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, MemoryLocation::DEVICE, "물 표면 장");
+    }
+    // 마칭의 원자 카운터가 VkDrawIndirectCommand 의 vertexCount 자리를 직접 쓴다. GPU 백엔드는 원자
+    // 연산을 거는 자리라 장치 메모리여야 한다(호스트에서 보이는 메모리에 걸면 매우 느리다).
+    // CPU 백엔드는 호스트가 직접 채운다.
+    for (uint32_t slot = 0; slot < FLUID_FRAMES; ++slot) {
+        state.surfaceVertices[slot] = createBuffer(context,
+                                                   vertexBytes,
+                                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                   state.cpu ? MemoryLocation::HOST_WRITE : MemoryLocation::DEVICE,
+                                                   "물 표면 정점");
+        state.surfaceDrawArgs[slot] = createBuffer(
+            context,
+            sizeof(VkDrawIndirectCommand),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            state.cpu ? MemoryLocation::HOST_WRITE : MemoryLocation::DEVICE,
+            "물 표면 그리기 인자");
+        if (state.cpu) {
+            // GPU 경로는 recordSurface 가 프레임마다 채운다.
+            *static_cast<VkDrawIndirectCommand*>(state.surfaceDrawArgs[slot].mapped) =
+                VkDrawIndirectCommand{0, 1, 0, 0};
+        }
+    }
+}
+
 bool FluidSimulator::prepare(const scene::Scene& scene, bool sceneSwitched) {
     // 장면이 바뀌면 상태를 통째로 버린다. 유체 번호가 다른 장면 것과 겹치기 때문이다.
     if (sceneSwitched || &scene != lastScene) {
@@ -227,6 +327,8 @@ bool FluidSimulator::prepare(const scene::Scene& scene, bool sceneSwitched) {
         state.objectIndex = owners[i];
         state.count = state.objectIndex == UINT32_MAX ? 0 : std::min(settings.particleCount, particleLimit);
         if (state.count == 0) {
+            // 오브젝트가 사라졌어도 표면 버퍼는 놓아준다. 3 MB 짜리 두 벌이라 붙들 이유가 없다.
+            ensureSurface(state, scene::Fluid{});
             continue;
         }
         // AUTO 는 GPU 를 쓴다. 컴퓨트 파이프라인을 만들지 못한 장치에서는 그것도 CPU 로 내려간다.
@@ -249,6 +351,7 @@ bool FluidSimulator::prepare(const scene::Scene& scene, bool sceneSwitched) {
         } else {
             ensureCapacity(state, state.count);
         }
+        ensureSurface(state, settings);
         glm::mat4 world = scene.visibleCached(state.objectIndex) ? scene.world(state.objectIndex) : glm::mat4{0.0F};
         if (!(settings == state.lastSettings) || world != state.lastWorld || playEdge) {
             state.needsEmit = true;
@@ -520,6 +623,139 @@ void FluidSimulator::record(VkCommandBuffer commandBuffer,
                   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                   READER_STAGES,
                   VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+}
+
+bool FluidSimulator::surfaceActive(uint32_t index) const {
+    if (index >= states.size()) {
+        return false;
+    }
+    const State& state = states[index];
+    return state.surfaceReady && state.count > 0 && state.surfaceVertices[0].handle != VK_NULL_HANDLE;
+}
+
+VkDeviceAddress FluidSimulator::surfaceVertexAddress(uint32_t frameSlot, uint32_t index) const {
+    return index < states.size() ? states[index].surfaceVertices[frameSlot % FLUID_FRAMES].address : 0;
+}
+
+VkBuffer FluidSimulator::surfaceDrawBuffer(uint32_t frameSlot, uint32_t index) const {
+    return index < states.size() ? states[index].surfaceDrawArgs[frameSlot % FLUID_FRAMES].handle : VK_NULL_HANDLE;
+}
+
+void FluidSimulator::recordSurface(VkCommandBuffer commandBuffer,
+                                   uint32_t frameSlot,
+                                   uint32_t index,
+                                   const scene::Scene& scene) {
+    State& state = states[index];
+    if (!surfaceActive(index) || state.cpu) {
+        return;
+    }
+    // 설정 버퍼는 record 가 이번 프레임 슬롯에 채워 두었다. 다른 슬롯을 읽으면 지난 프레임 값이라
+    // 격자 셀 수가 0 일 수 있고, 그러면 해시가 버퍼 밖을 짚어 장치를 잃는다.
+    frameSlot %= FLUID_FRAMES;
+    // 마지막 서브스텝이 세운 격자는 그 스텝의 «입력» 위치로 만든 것이라 지금 위치와 한 스텝 어긋난다.
+    // 장을 만들기 전에 지금 위치로 다시 세운다. 디스패치 하나 값이다.
+    VkDescriptorSet bindlessSet = bindless.set();
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+    FluidPushConstants gridPush;
+    gridPush.params = state.params[frameSlot].address;
+    gridPush.positionsIn = state.positions[state.current].address;
+    gridPush.positionsOut = state.positions[state.current].address;
+    gridPush.velocitiesIn = state.velocities[state.current].address;
+    gridPush.velocitiesOut = state.velocities[state.current].address;
+    gridPush.cellCounts = state.cellCounts.address;
+    gridPush.cellParticles = state.cellParticles.address;
+    gridPush.previousRendered = state.previousRendered.address;
+    gridPush.particleCount = state.count;
+    // 지난 프레임이 이 슬롯의 인자를 읽고 있었을 수 있다. 채우기 전에 그것이 끝났음을 못 박는다.
+    memoryBarrier(commandBuffer,
+                  VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+                  VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+                  VK_PIPELINE_STAGE_2_CLEAR_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    vkCmdFillBuffer(commandBuffer, state.cellCounts.handle, 0, VK_WHOLE_SIZE, 0);
+    // 그리기 인자를 처음부터 채운다. 첫 칸(정점 수)은 마칭이 원자 덧셈으로 늘리고, 나머지는 고정이다.
+    VkBuffer drawArgs = state.surfaceDrawArgs[frameSlot].handle;
+    vkCmdFillBuffer(commandBuffer, drawArgs, 0, sizeof(uint32_t), 0);
+    vkCmdFillBuffer(commandBuffer, drawArgs, sizeof(uint32_t), sizeof(uint32_t), 1);
+    vkCmdFillBuffer(commandBuffer, drawArgs, 2 * sizeof(uint32_t), 2 * sizeof(uint32_t), 0);
+    memoryBarrier(commandBuffer,
+                  VK_PIPELINE_STAGE_2_CLEAR_BIT,
+                  VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, gridPipeline);
+    vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gridPush), &gridPush);
+    vkCmdDispatch(commandBuffer, groupsFor(state.count), 1, 1);
+    memoryBarrier(commandBuffer,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+    const scene::Fluid& settings = scene.fluids[index];
+    FluidSurfacePushConstants push;
+    push.params = state.params[frameSlot].address;
+    push.positionsIn = state.positions[state.current].address;
+    push.cellCounts = state.cellCounts.address;
+    push.cellParticles = state.cellParticles.address;
+    push.surfaceField = state.surfaceField.address;
+    push.surfaceVertices = state.surfaceVertices[frameSlot].address;
+    push.surfaceCounter = state.surfaceDrawArgs[frameSlot].address;
+    push.surfaceResolution = state.surfaceResolution;
+    push.surfaceCapacity = state.surfaceCapacity;
+    push.surfaceIso = settings.surfaceIso;
+
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, surfaceLayout, 0, 1, &bindlessSet, 0, nullptr);
+    vkCmdPushConstants(commandBuffer, surfaceLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+
+    uint32_t samples = state.surfaceResolution + 1;
+    uint32_t fieldGroups = (samples + FLUID_SURFACE_GROUP_SIZE - 1) / FLUID_SURFACE_GROUP_SIZE;
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, fieldPipeline);
+    vkCmdDispatch(commandBuffer, fieldGroups, fieldGroups, fieldGroups);
+    memoryBarrier(commandBuffer,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+    uint32_t cellGroups = (state.surfaceResolution + FLUID_SURFACE_GROUP_SIZE - 1) / FLUID_SURFACE_GROUP_SIZE;
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, marchingPipeline);
+    vkCmdDispatch(commandBuffer, cellGroups, cellGroups, cellGroups);
+    // 정점은 정점 셰이더가 주소로 읽고, 개수는 간접 그리기가 읽는다.
+    memoryBarrier(commandBuffer,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
+}
+
+void FluidSimulator::buildCpuSurface(uint32_t frameSlot, uint32_t index, const scene::Scene& scene) {
+    State& state = states[index];
+    if (!surfaceActive(index) || !state.cpu) {
+        return;
+    }
+    const scene::Fluid& settings = scene.fluids[index];
+    physics::FluidParams shared = deriveParams(state, scene);
+    // GPU 경로와 «같은 함수» 로 장을 만들고 «같은 표» 로 자른다. 두 벌로 두면 백엔드마다 물이 달라진다.
+    physics::buildFluidField(state.solver.particles(), shared, state.surfaceResolution, state.cpuField, &jobs);
+    glm::vec3 cell = (shared.containerMax - shared.containerMin) / static_cast<float>(state.surfaceResolution);
+    frameSlot %= FLUID_FRAMES;
+    auto* vertices = static_cast<physics::SurfaceVertex*>(state.surfaceVertices[frameSlot].mapped);
+    if (vertices == nullptr) {
+        return;
+    }
+    uint32_t written = physics::marchFluidField(state.cpuField,
+                                                state.surfaceResolution,
+                                                shared.containerMin,
+                                                cell,
+                                                settings.surfaceIso,
+                                                vertices,
+                                                state.surfaceCapacity,
+                                                &jobs);
+    *static_cast<VkDrawIndirectCommand*>(state.surfaceDrawArgs[frameSlot].mapped) =
+        VkDrawIndirectCommand{written, 1, 0, 0};
 }
 
 } // namespace gfx

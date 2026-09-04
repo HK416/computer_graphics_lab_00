@@ -133,11 +133,15 @@ struct ColliderPose {
 };
 ColliderPose colliderPose(const RigidBody& body, const glm::mat4& world);
 
-// 유체 부품. 입자 상태는 GPU 에만 있고 여기에는 방출·시뮬레이션 설정만 둔다. 방출 상자는 오브젝트
-// 지역 공간이고 용기는 월드 공간이다. 값이 바뀌면 렌더러가 입자를 다시 뿌린다.
+// 유체를 화면에 어떻게 낼지. 입자는 내장 구 인스턴스, 표면은 마칭 큐브로 뽑은 등치면이다.
+enum class FluidDisplay : uint8_t { PARTICLES, SURFACE };
+
+// 유체 부품. 입자 상태는 GPU 에만 있고 여기에는 방출·시뮬레이션·표시 설정만 둔다. 방출 상자는
+// 오브젝트 지역 공간이고 용기는 월드 공간이다. 값이 바뀌면 렌더러가 입자를 다시 뿌린다.
 struct Fluid {
     // 어디서 풀지. AUTO 는 GPU 를 쓰되 만들 수 없으면 CPU 로 내려간다.
     SimulationBackend backend = SimulationBackend::AUTO;
+    FluidDisplay display = FluidDisplay::PARTICLES;
     glm::vec3 emitterHalfExtents{0.5F};
     uint32_t particleCount = 8192;
     float particleRadius = 0.025F;
@@ -150,6 +154,20 @@ struct Fluid {
     glm::vec3 containerMin{-1.0F, 0.0F, -1.0F};
     glm::vec3 containerMax{1.0F, 2.0F, 1.0F};
     glm::vec3 gravity{0.0F, -9.81F, 0.0F};
+
+    // 아래는 표면 표시에만 쓰인다. 입자 표시에서는 무시된다.
+    // 용기를 덮는 격자의 축별 셀 수. 값이 클수록 곱하기 세제곱으로 비싸진다.
+    uint32_t surfaceResolution = 48;
+    // 등치값. 커널을 합친 무차원 값이라 입자 배치에 따라 손으로 맞춘다. 작으면 표면이 부풀고
+    // 크면 물이 얇아져 구멍이 뚫린다.
+    float surfaceIso = 0.5F;
+    // 통과한 빛에 남는 색. 확산 색이 아니라 흡수를 거치고 남은 색이다.
+    glm::vec3 waterColor{0.35F, 0.65F, 0.75F};
+    float surfaceRoughness = 0.05F;
+    // 미터당 흡수 계수. 빨강이 크면 두꺼운 곳이 푸르게 보인다.
+    glm::vec3 absorption{2.2F, 0.5F, 0.25F};
+    // 두께에 곱하는 값. 용기가 작을 때 색을 살리는 손잡이다.
+    float thicknessScale = 1.0F;
 
     bool operator==(const Fluid&) const = default;
 };

@@ -1,5 +1,6 @@
 #include "scene/scene_io.h"
 
+#include <algorithm>
 #include <array>
 
 #include <nlohmann/json.hpp>
@@ -205,7 +206,14 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
                           {"viscosity", fluid.viscosity},
                           {"containerMin", toJson(fluid.containerMin)},
                           {"containerMax", toJson(fluid.containerMax)},
-                          {"gravity", toJson(fluid.gravity)}});
+                          {"gravity", toJson(fluid.gravity)},
+                          {"display", fluid.display == FluidDisplay::SURFACE ? "surface" : "particles"},
+                          {"surfaceResolution", fluid.surfaceResolution},
+                          {"surfaceIso", fluid.surfaceIso},
+                          {"surfaceRoughness", fluid.surfaceRoughness},
+                          {"waterColor", toJson(fluid.waterColor)},
+                          {"absorption", toJson(fluid.absorption)},
+                          {"thicknessScale", fluid.thicknessScale}});
     }
     document["fluids"] = fluids;
 
@@ -366,6 +374,16 @@ SceneFile readScene(const std::string& text) {
         fluid.containerMin = toVec3(entry.value("containerMin", json{}), fluid.containerMin);
         fluid.containerMax = toVec3(entry.value("containerMax", json{}), fluid.containerMax);
         fluid.gravity = toVec3(entry.value("gravity", json{}), fluid.gravity);
+        fluid.display = entry.value("display", std::string{"particles"}) == "surface" ? FluidDisplay::SURFACE
+                                                                                      : FluidDisplay::PARTICLES;
+        // 상한은 gfx::FLUID_MAX_SURFACE_RESOLUTION 과 같은 값이다. scene 은 gfx 를 보지 못해 손으로
+        // 옮겨 적었다. 렌더러가 다시 한 번 묶으므로 여기서는 터무니없는 값만 걸러 낸다.
+        fluid.surfaceResolution = std::clamp(entry.value("surfaceResolution", fluid.surfaceResolution), 8U, 128U);
+        fluid.surfaceIso = entry.value("surfaceIso", fluid.surfaceIso);
+        fluid.surfaceRoughness = entry.value("surfaceRoughness", fluid.surfaceRoughness);
+        fluid.waterColor = toVec3(entry.value("waterColor", json{}), fluid.waterColor);
+        fluid.absorption = toVec3(entry.value("absorption", json{}), fluid.absorption);
+        fluid.thicknessScale = entry.value("thicknessScale", fluid.thicknessScale);
         file.scene.fluids.push_back(fluid);
     }
 

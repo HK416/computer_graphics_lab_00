@@ -31,6 +31,14 @@ static_assert(FLUID_MAX_COLLIDERS == physics::FLUID_MAX_COLLIDERS, "콜라이더
 static_assert(FLUID_CELL_CAPACITY == physics::FLUID_CELL_CAPACITY, "격자 버킷 용량이 CPU 백엔드와 어긋난다");
 inline constexpr uint32_t FLUID_GROUP_SIZE = 128;
 inline constexpr uint32_t FLUID_FRAMES = 2;
+// 물 표면 정점 상한. 한 유체가 이보다 많은 삼각형을 내면 거기서 잘린다. 16 바이트 × 이 값이 곧
+// 정점 버퍼 크기다(3 MB).
+inline constexpr uint32_t FLUID_MAX_SURFACE_VERTICES = 196608;
+// 표면 격자 해상도의 상한. 축마다의 셀 수라 표본 수는 세제곱으로 는다.
+inline constexpr uint32_t FLUID_MAX_SURFACE_RESOLUTION = 128;
+// CPU 백엔드의 상한. 표본마다 입자 전부를 훑으므로 GPU 와 같은 해상도를 줄 수 없다.
+inline constexpr uint32_t FLUID_MAX_CPU_SURFACE_RESOLUTION = 40;
+inline constexpr uint32_t FLUID_SURFACE_GROUP_SIZE = 4;
 
 // 아래 셋은 shaders/fluid_common.glsl 의 FluidCollider / FluidParams / FluidPushConstants 와 배치가 같아야
 // 한다(scalar).
@@ -84,6 +92,23 @@ struct FluidPushConstants {
 };
 static_assert(sizeof(FluidPushConstants) == 112, "유체 푸시 상수 배치가 셰이더와 어긋난다");
 
+// shaders/fluid_surface_common.glsl 의 FluidSurfacePushConstants 와 배치가 같아야 한다(scalar).
+// 시뮬레이션 푸시 상수와 나눈 것은 한 블록에 다 넣으면 규격이 보장하는 128 바이트를 넘기 때문이다.
+struct FluidSurfacePushConstants {
+    VkDeviceAddress params = 0;
+    VkDeviceAddress positionsIn = 0;
+    VkDeviceAddress cellCounts = 0;
+    VkDeviceAddress cellParticles = 0;
+    VkDeviceAddress surfaceField = 0;
+    VkDeviceAddress surfaceVertices = 0;
+    VkDeviceAddress surfaceCounter = 0;
+    uint32_t surfaceResolution = 0;
+    uint32_t surfaceCapacity = 0;
+    float surfaceIso = 0.5F;
+    uint32_t pad0 = 0;
+};
+static_assert(sizeof(FluidSurfacePushConstants) == 72, "유체 표면 푸시 상수 배치가 셰이더와 어긋난다");
+
 inline constexpr uint32_t FLUID_FLAG_RESET_HISTORY = 1U;
 inline constexpr uint32_t FLUID_FLAG_WRITE_TLAS = 2U;
 
@@ -106,6 +131,8 @@ public:
     bool onCpu(uint32_t index) const;
     // 컴퓨트 파이프라인을 다 만들었는지. 거짓이면 GPU 백엔드를 고를 수 없다.
     bool gpuAvailable() const { return gpuReady; }
+    // 표면 컴퓨트를 만들었는지. 거짓이면 GPU 백엔드에서는 표면을 그릴 수 없다.
+    bool surfaceAvailable() const { return surfaceReady; }
     // CPU 백엔드가 인스턴스를 직접 쓴다. 명령 기록 전에, 프레임 버퍼가 매핑된 채로 부른다.
     // instances 와 tlasInstances 는 매핑 포인터이며 tlasInstances 가 널이면 쓰지 않는다.
     //
@@ -122,6 +149,13 @@ public:
                            VkDeviceAddress sphereBlas,
                            uint32_t sphereMesh,
                            bool resetHistory);
+    // 유체 index 를 표면으로 그리는지. 부품 설정이 표면이고 정점 버퍼가 서 있어야 참이다.
+    bool surfaceActive(uint32_t index) const;
+    // 표면 정점 버퍼의 주소와 간접 그리기 인자 버퍼. surfaceActive 가 참일 때만 의미가 있다.
+    // 프레임마다 한 벌이라 지난 프레임이 아직 그리고 있는 것을 덮어쓰지 않는다.
+    VkDeviceAddress surfaceVertexAddress(uint32_t frameSlot, uint32_t index) const;
+    VkBuffer surfaceDrawBuffer(uint32_t frameSlot, uint32_t index) const;
+
     uint32_t fluidCount() const { return static_cast<uint32_t>(states.size()); }
     // 부품이 더 달라고 해도 이보다 많이 뿌리지 않는다. 하드웨어 프로파일이 정한다.
     //
@@ -147,6 +181,11 @@ public:
                 uint32_t sphereMesh,
                 bool resetHistory);
 
+    // 유체 index 의 물 표면을 만든다. GPU 백엔드는 컴퓨트 두 패스, CPU 백엔드는 작업 큐로 같은 표를
+    // 돌려 같은 정점 버퍼를 채운다. 시뮬레이션(record/writeCpuInstances) 뒤에 부른다.
+    void recordSurface(VkCommandBuffer commandBuffer, uint32_t frameSlot, uint32_t index, const scene::Scene& scene);
+    void buildCpuSurface(uint32_t frameSlot, uint32_t index, const scene::Scene& scene);
+
 private:
     struct State {
         std::array<Buffer, 2> positions;
@@ -155,6 +194,16 @@ private:
         Buffer cellCounts;
         Buffer cellParticles;
         std::array<Buffer, FLUID_FRAMES> params;
+        // 물 표면. 장은 (해상도+1)³ 개의 float, 정점 버퍼는 마칭이 이어 붙이는 자리다.
+        // drawArgs 는 VkDrawIndirectCommand 그대로라 마칭의 원자 카운터가 vertexCount 를 직접 쓴다.
+        // 정점과 인자는 프레임마다 한 벌이다. 한 벌만 두면 지난 프레임이 그리는 중에 덮어쓴다.
+        Buffer surfaceField;
+        std::array<Buffer, FLUID_FRAMES> surfaceVertices;
+        std::array<Buffer, FLUID_FRAMES> surfaceDrawArgs;
+        uint32_t surfaceResolution = 0;
+        uint32_t surfaceCapacity = 0;
+        bool surfaceReady = false;
+        std::vector<float> cpuField;
         uint32_t capacity = 0;
         uint32_t cellCount = 0;
         // 이번 스텝이 읽는 반쪽.
@@ -173,6 +222,8 @@ private:
     void createPipelines();
     void destroyState(State& state);
     void ensureCapacity(State& state, uint32_t count);
+    // 표면 버퍼를 부품 설정에 맞춰 잡는다. 표시가 입자면 있던 것을 놓아준다.
+    void ensureSurface(State& state, const scene::Fluid& settings);
     // 두 백엔드가 함께 쓰는 시뮬레이션 상수.
     physics::FluidParams deriveParams(const State& state, const scene::Scene& scene) const;
     void fillParams(GpuFluidParams& params, const State& state, const scene::Scene& scene) const;
@@ -196,6 +247,11 @@ private:
     VkPipeline densityPipeline = VK_NULL_HANDLE;
     VkPipeline integratePipeline = VK_NULL_HANDLE;
     VkPipeline instancesPipeline = VK_NULL_HANDLE;
+    // 표면 패스는 푸시 상수가 달라 파이프라인 배치를 따로 쓴다.
+    VkPipelineLayout surfaceLayout = VK_NULL_HANDLE;
+    VkPipeline fieldPipeline = VK_NULL_HANDLE;
+    VkPipeline marchingPipeline = VK_NULL_HANDLE;
+    bool surfaceReady = false;
 };
 
 } // namespace gfx

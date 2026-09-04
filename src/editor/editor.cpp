@@ -1009,7 +1009,8 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         }
         // 자동이 무엇을 골랐는지는 렌더러만 안다. 그것을 그대로 보여 준다.
         ImGui::SameLine();
-        ImGui::TextDisabled("(지금 %s)", renderer.fluidOnCpu(static_cast<uint32_t>(object.fluid)) ? "CPU" : "GPU");
+        bool onCpu = renderer.fluidOnCpu(static_cast<uint32_t>(object.fluid));
+        ImGui::TextDisabled("(지금 %s)", onCpu ? "CPU" : "GPU");
 
         int particles = static_cast<int>(fluid.particleCount);
         if (ImGui::SliderInt("입자 수", &particles, 64, gfx::FLUID_MAX_PARTICLES)) {
@@ -1022,6 +1023,42 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("자동 튜닝이 이 기기의 상한을 정했다. --auto-tune off 로 풀 수 있다");
             }
+        }
+        constexpr std::array<const char*, 2> DISPLAY_NAMES{"입자", "표면"};
+        bool surfaceUsable = renderer.fluidSurfaceAvailable() || onCpu;
+        ImGui::BeginDisabled(!surfaceUsable);
+        auto displayIndex = static_cast<int>(fluid.display);
+        if (ImGui::Combo("표시", &displayIndex, DISPLAY_NAMES.data(), static_cast<int>(DISPLAY_NAMES.size()))) {
+            fluid.display = static_cast<scene::FluidDisplay>(displayIndex);
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(surfaceUsable ? "표면은 마칭 큐브로 등치면을 뽑아 물처럼 그린다.\n"
+                                              "경로 추적·광선 반사는 아직 입자를 보고, 표면은 그림자를 던지지 않는다"
+                                            : "이 장치에서는 표면 컴퓨트를 만들지 못했다. CPU 백엔드로는 쓸 수 있다");
+        }
+        if (fluid.display == scene::FluidDisplay::SURFACE) {
+            uint32_t ceiling = onCpu ? gfx::FLUID_MAX_CPU_SURFACE_RESOLUTION : gfx::FLUID_MAX_SURFACE_RESOLUTION;
+            auto resolution = static_cast<int>(fluid.surfaceResolution);
+            if (ImGui::SliderInt("격자 해상도", &resolution, 8, static_cast<int>(gfx::FLUID_MAX_SURFACE_RESOLUTION))) {
+                fluid.surfaceResolution = static_cast<uint32_t>(resolution);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("축마다의 셀 수다. 표본 수는 세제곱으로 는다");
+            }
+            // CPU 백엔드는 표본마다 입자 전부를 훑으므로 렌더러가 더 낮게 묶는다. 그 사실을 말해 준다.
+            if (fluid.surfaceResolution > ceiling) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(CPU 상한 %u)", ceiling);
+            }
+            ImGui::SliderFloat("등치값", &fluid.surfaceIso, 0.05F, 4.0F, "%.2f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("작으면 표면이 부풀고 크면 물이 얇아져 구멍이 뚫린다");
+            }
+            ImGui::ColorEdit3("물 색", glm::value_ptr(fluid.waterColor));
+            ImGui::SliderFloat("표면 거칠기", &fluid.surfaceRoughness, 0.01F, 0.5F, "%.3f");
+            ImGui::DragFloat3("흡수 계수", glm::value_ptr(fluid.absorption), 0.05F, 0.0F, 20.0F);
+            ImGui::DragFloat("두께 배율", &fluid.thicknessScale, 0.05F, 0.05F, 20.0F);
         }
         ImGui::DragFloat3("방출 반쪽 크기", glm::value_ptr(fluid.emitterHalfExtents), 0.01F, 0.01F, 50.0F);
         ImGui::DragFloat("입자 반지름", &fluid.particleRadius, 0.001F, 0.005F, 1.0F, "%.3f");
