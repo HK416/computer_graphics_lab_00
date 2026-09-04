@@ -670,6 +670,8 @@ Context::MemoryBudget Context::deviceMemoryBudget() const {
 }
 
 Context::~Context() {
+    // 할당기를 지우기 전에 맡아 둔 자원을 모두 비운다.
+    collectRetired(UINT64_MAX);
     vmaDestroyAllocator(allocator);
     vkDestroyDevice(device, nullptr);
     if (debugMessenger != VK_NULL_HANDLE) {

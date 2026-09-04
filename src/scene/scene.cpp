@@ -12,6 +12,10 @@ namespace scene {
 
 namespace {
 
+// 부품 종류 수. refresh 가 만드는 배치표의 폭이며 Object 의 부품 첨자 개수와 같아야 한다.
+// 부품을 한 종류 더 넣으면 여기와 refresh 의 배치표 채우기도 함께 고쳐야 한다.
+constexpr size_t COMPONENT_KINDS = 5;
+
 // 살아남은 오브젝트가 하나도 가리키지 않는 부품을 버리고 첨자를 다시 맞춘다.
 // 애니메이터처럼 여러 오브젝트가 함께 가리키는 부품도 있어 소유가 아니라 참조를 기준으로 센다.
 template <typename T>
@@ -155,7 +159,18 @@ void Scene::resolveWorld(uint32_t index) {
 
 void Scene::refresh() {
     size_t count = objects.size();
-    bool sizeChanged = previousTransforms.size() != count;
+    // 지우고 같은 수만큼 새로 만들면 개수 비교로는 알 수 없다. 그때는 첨자마다 남의 지난 값을 보게
+    // 되므로, 배열이 재배치되었다는 표식이 서 있으면 지난 사본을 통째로 버린다.
+    bool structureReset = structureDirty;
+    structureDirty = false;
+    if (structureReset) {
+        previousTransforms.clear();
+        previousParents.clear();
+        previousVisible.clear();
+    }
+    // 사본을 버리면 크기가 0 이 되므로, 남은 오브젝트도 0 이면 크기 비교로는 아무것도 잡히지 않는다.
+    // 마지막 오브젝트를 지운 프레임이 그렇다.
+    bool sizeChanged = structureReset || previousTransforms.size() != count;
     bool topologyChanged = sizeChanged;
     bool transformChanged = sizeChanged;
 
@@ -191,6 +206,28 @@ void Scene::refresh() {
     bool lightsChanged = previousLights != lights;
     previousLights = lights;
 
+    // 부품 배열의 «배치»만 담는다. 크기 다섯 개를 앞에 두고 오브젝트마다 부품 첨자 다섯 개를 잇는다.
+    // 값(강체 속도 등)은 담지 않으므로 재생 중에는 변하지 않는다.
+    componentLayout.clear();
+    componentLayout.reserve(COMPONENT_KINDS + count * COMPONENT_KINDS);
+    componentLayout.push_back(static_cast<int32_t>(meshRenderers.size()));
+    componentLayout.push_back(static_cast<int32_t>(animators.size()));
+    componentLayout.push_back(static_cast<int32_t>(lights.size()));
+    componentLayout.push_back(static_cast<int32_t>(rigidBodies.size()));
+    componentLayout.push_back(static_cast<int32_t>(fluids.size()));
+    for (const Object& object : objects) {
+        componentLayout.push_back(object.meshRenderer);
+        componentLayout.push_back(object.animator);
+        componentLayout.push_back(object.light);
+        componentLayout.push_back(object.rigidBody);
+        componentLayout.push_back(object.fluid);
+    }
+    // 배치표가 같아도 배열이 재배치되었을 수 있다. 부품을 떼고 같은 자리에 다시 붙이면 배치는
+    // 그대로지만 부품은 다른 것이다.
+    bool componentsChanged = structureReset || componentLayout != previousComponentLayout;
+    // 맞바꾸면 프레임마다 새로 잡지 않고 두 벌의 용량을 번갈아 쓴다. 다음 프레임에 clear 로 채운다.
+    previousComponentLayout.swap(componentLayout);
+
     if (transformChanged) {
         ++transformRev;
     }
@@ -200,7 +237,10 @@ void Scene::refresh() {
     if (topologyChanged) {
         ++topologyRev;
     }
-    if (transformChanged || lightsChanged || topologyChanged) {
+    if (componentsChanged) {
+        ++componentRev;
+    }
+    if (transformChanged || lightsChanged || topologyChanged || componentsChanged) {
         ++anyRevision;
     }
 }
@@ -252,6 +292,8 @@ SceneSnapshot Scene::capture() const {
 void Scene::restore(const SceneSnapshot& snapshot) {
     // public 필드만 되돌린다. previous* 캐시와 리비전까지 되돌리면 다음 refresh 가 "변한 게
     // 없다"고 판단해 세계 변환과 그림자 캐시가 낡은 채로 남는다.
+    // 오브젝트 수가 같아도 다른 오브젝트가 그 자리에 올 수 있으므로 지난 사본은 버리게 표시한다.
+    markStructureDirty();
     name = snapshot.name;
     objects = snapshot.objects;
     meshRenderers = snapshot.meshRenderers;
@@ -342,6 +384,7 @@ int32_t Scene::attachFluid(uint32_t index, const Fluid& fluid) {
 }
 
 void Scene::detachComponent(uint32_t index, int32_t Object::* handle) {
+    markStructureDirty();
     objects[index].*handle = -1;
     // 어느 배열의 첨자인지는 handle 이 정한다. 종류마다 배열이 달라 전부 다시 압축한다. 부품 수가 적어 싸다.
     compactComponents(meshRenderers, objects, &Object::meshRenderer);
@@ -359,6 +402,7 @@ void Scene::removeObjects(const std::vector<uint32_t>& indices) {
     if (indices.empty()) {
         return;
     }
+    markStructureDirty();
     std::vector<bool> doomed(objects.size(), false);
     for (uint32_t index : indices) {
         if (index < objects.size()) {
@@ -403,6 +447,7 @@ void Scene::removeObjects(const std::vector<uint32_t>& indices) {
 }
 
 uint32_t Scene::duplicateObject(uint32_t index) {
+    markStructureDirty();
     std::vector<int32_t> remap(objects.size(), -1);
     auto original = static_cast<uint32_t>(objects.size());
 
@@ -442,10 +487,10 @@ uint32_t Scene::duplicateObject(uint32_t index) {
 }
 
 Scene& SceneManager::create(std::string name) {
-    Scene scene;
-    scene.name = std::move(name);
+    auto scene = std::make_unique<Scene>();
+    scene->name = std::move(name);
     scenes.push_back(std::move(scene));
-    return scenes.back();
+    return *scenes.back();
 }
 
 void SceneManager::setActive(size_t index) {

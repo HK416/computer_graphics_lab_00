@@ -110,6 +110,33 @@ void destroyBuffer(Context& context, Buffer& buffer) {
     buffer = {};
 }
 
+void Context::retireBuffer(Buffer& buffer) {
+    if (buffer.handle == VK_NULL_HANDLE) {
+        return;
+    }
+    // 이번 프레임의 명령은 이미 새 버퍼를 가리키므로, 이 프레임이 끝나면 옛 버퍼를 읽는 제출은
+    // 남아 있지 않다.
+    Buffer copy = buffer;
+    retireDeferred([this, copy]() mutable { destroyBuffer(*this, copy); });
+    buffer = {};
+}
+
+void Context::retireDeferred(std::function<void()> destroy) {
+    retiredResources.push_back(RetiredResource{std::move(destroy), retireFrame});
+}
+
+void Context::collectRetired(uint64_t completedFrame) {
+    size_t kept = 0;
+    for (RetiredResource& entry : retiredResources) {
+        if (entry.frame <= completedFrame) {
+            entry.destroy();
+        } else {
+            retiredResources[kept++] = std::move(entry);
+        }
+    }
+    retiredResources.resize(kept);
+}
+
 Image createImage(Context& context, const ImageDesc& desc, const char* debugName) {
     VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     imageInfo.imageType = desc.extent.depth > 1 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;

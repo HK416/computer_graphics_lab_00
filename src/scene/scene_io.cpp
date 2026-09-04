@@ -344,6 +344,10 @@ SceneFile readScene(const std::string& text) {
         file.scene.fluids.push_back(fluid);
     }
 
+    // 손으로 고친 파일이나 깨진 파일이 배열 밖을 가리킬 수 있다. 없는 부품은 안 붙은 것으로 본다.
+    auto handle = [](int32_t value, size_t size) {
+        return value >= 0 && static_cast<size_t>(value) < size ? value : -1;
+    };
     for (const json& entry : document.value("objects", json::array())) {
         Object object;
         object.name = entry.value("name", std::string{"오브젝트"});
@@ -352,10 +356,10 @@ SceneFile readScene(const std::string& text) {
         object.transform.rotation = toQuat(entry.value("rotation", json{}));
         object.transform.scale = toVec3(entry.value("scale", json{}), glm::vec3{1.0F});
         object.visible = entry.value("visible", true);
-        object.animator = entry.value("animator", -1);
-        object.light = entry.value("light", -1);
-        object.rigidBody = entry.value("rigidBody", -1);
-        object.fluid = entry.value("fluid", -1);
+        object.animator = handle(entry.value("animator", -1), file.scene.animators.size());
+        object.light = handle(entry.value("light", -1), file.scene.lights.size());
+        object.rigidBody = handle(entry.value("rigidBody", -1), file.scene.rigidBodies.size());
+        object.fluid = handle(entry.value("fluid", -1), file.scene.fluids.size());
         auto skin = entry.value("skin", -1);
         file.scene.objects.push_back(std::move(object));
         file.objectModels.push_back(entry.value("model", -1));
@@ -364,6 +368,12 @@ SceneFile readScene(const std::string& text) {
         if (file.objectModels.back() >= 0 || skin >= 0) {
             file.scene.attachMeshRenderer(static_cast<uint32_t>(file.scene.objects.size() - 1), INVALID_MESH, skin);
         }
+    }
+
+    // 부모는 배열에서 뒤에 올 수도 있어 다 읽은 뒤에 자른다. 범위 밖을 가리키면 세계 변환이 배열
+    // 밖을 짚는다.
+    for (Object& object : file.scene.objects) {
+        object.parent = handle(object.parent, file.scene.objects.size());
     }
     return file;
 }

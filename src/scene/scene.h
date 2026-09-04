@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -236,6 +237,14 @@ struct Scene {
     uint64_t lightRevision() const { return lightRev; }
     // 오브젝트 개수나 부모 관계가 바뀌면 증가한다. 인덱스가 통째로 재배치될 수 있다는 뜻이다.
     uint64_t topologyRevision() const { return topologyRev; }
+    // 부품을 붙이거나 떼어 부품 배열의 배치가 바뀌면 증가한다. 부품 하나를 떼면 다섯 배열이 모두
+    // 압축되므로(detachComponent) 첨자로 GPU 상태를 짝지어 둔 쪽은 이 값을 보고 다시 맞춰야 한다.
+    // 강체 속도처럼 재생 중 매 프레임 변하는 «값»은 보지 않으므로 재생만으로는 오르지 않는다.
+    uint64_t componentRevision() const { return componentRev; }
+
+    // 배열이 재배치되었음을 알린다. refresh 의 비교만으로는 «지우고 같은 수만큼 새로 만들기»를
+    // 알아챌 수 없어 덧붙인 보수적 표식이다. 빠뜨려도 지금보다 나빠지지 않는다.
+    void markStructureDirty() { structureDirty = true; }
 
     // 아래 셋은 refresh 이후에만 유효하다.
     const glm::mat4& world(uint32_t index) const { return cachedWorlds[index]; }
@@ -291,28 +300,41 @@ private:
     std::vector<int32_t> previousParents;
     std::vector<uint8_t> previousVisible;
     std::vector<Light> previousLights;
+    // 부품 배열 크기 다섯 개와 오브젝트별 부품 첨자 다섯 개를 이어 붙인 배치표. 값이 아니라 배치만
+    // 담으므로 재생 중에는 변하지 않는다. 아래는 refresh 전용 스크래치로, 둘을 맞바꿔 쓴다.
+    std::vector<int32_t> previousComponentLayout;
+    std::vector<int32_t> componentLayout;
+    bool structureDirty = true;
 
     uint64_t anyRevision = 1;
     uint64_t transformRev = 1;
     uint64_t lightRev = 1;
     uint64_t topologyRev = 1;
+    uint64_t componentRev = 1;
 };
 
 // 여러 장면을 담아 두고 전환한다.
+//
+// 장면을 포인터로 담는 이유: 렌더러와 유체 시뮬레이터가 «지난 프레임과 같은 장면인가»를 주소로
+// 판정한다. 값으로 담으면 장면을 하나 더 만들 때 벡터가 다시 잡히면서 모든 장면의 주소가 바뀌어,
+// 그 판정이 틀리고 편집기가 잡아 둔 Scene& 도 매달린 참조가 된다.
+//
+// ponytail: 그 주소 판정은 «장면을 지우는 API 가 없다»에도 기대고 있다. 장면 닫기를 넣으면 해제된
+// 자리에 새 장면이 놓여 주소가 같아질 수 있으므로, 그때는 장면마다 번호를 붙여야 한다.
 class SceneManager {
 public:
     Scene& create(std::string name);
     void setActive(size_t index);
 
-    Scene& active() { return scenes[activeIndex]; }
-    const Scene& active() const { return scenes[activeIndex]; }
+    Scene& active() { return *scenes[activeIndex]; }
+    const Scene& active() const { return *scenes[activeIndex]; }
     size_t count() const { return scenes.size(); }
     size_t current() const { return activeIndex; }
-    Scene& at(size_t index) { return scenes[index]; }
-    const Scene& at(size_t index) const { return scenes[index]; }
+    Scene& at(size_t index) { return *scenes[index]; }
+    const Scene& at(size_t index) const { return *scenes[index]; }
 
 private:
-    std::vector<Scene> scenes;
+    std::vector<std::unique_ptr<Scene>> scenes;
     size_t activeIndex = 0;
 };
 

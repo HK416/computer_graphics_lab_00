@@ -1,9 +1,13 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <vector>
 
 #include <vma/vk_mem_alloc.h>
 #include <vulkan/vulkan.h>
+
+#include "gfx/resources.h"
 
 struct SDL_Window;
 
@@ -90,6 +94,25 @@ struct Context {
     // 0 이 아니면 드라이버 예산 대신 이 값을 예산으로 본다. --gpu-budget 이 채우며, 모델과 가속 구조의
     // 예산 검사가 모두 같은 값을 보게 여기 둔다.
     VkDeviceSize memoryBudgetOverride = 0;
+
+    // 진행 중인 프레임이 아직 읽고 있을 수 있는 자원을 바로 지우지 않고 모아 둔다. 편집기가 유체
+    // 부품을 떼는 것처럼 자원이 사라지는 일은 프레임 한가운데 일어나는데, 그때마다 장치를 세우면
+    // 편집할 때마다 화면이 끊긴다. 대신 그 프레임이 끝난 뒤에 지운다.
+    void retireBuffer(Buffer& buffer);
+    // 파괴 함수가 여기 없는 자원(가속 구조 등)을 같은 규칙으로 맡긴다. 맡긴 순서대로 지우므로,
+    // 다른 자원을 붙들고 있는 것을 먼저 맡기면 수명 순서도 지켜진다.
+    void retireDeferred(std::function<void()> destroy);
+    // completedFrame 까지의 제출이 모두 끝났을 때 부른다. 그 전에 맡긴 것을 실제로 지운다.
+    void collectRetired(uint64_t completedFrame);
+    // 지금 기록 중인 프레임 번호. 렌더러가 프레임마다 채운다.
+    uint64_t retireFrame = 0;
+
+private:
+    struct RetiredResource {
+        std::function<void()> destroy;
+        uint64_t frame = 0;
+    };
+    std::vector<RetiredResource> retiredResources;
 };
 
 } // namespace gfx

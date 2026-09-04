@@ -93,29 +93,36 @@ void FluidSimulator::createPipelines() {
 }
 
 void FluidSimulator::destroyState(State& state) {
+    // 진행 중인 프레임의 명령 버퍼에 이 버퍼들의 주소가 이미 실려 있을 수 있다. 바로 지우면 GPU 가
+    // 사라진 메모리를 읽는다. 맡겨 두고 그 프레임이 끝난 뒤에 지운다.
     for (Buffer& buffer : state.positions) {
-        destroyBuffer(context, buffer);
+        context.retireBuffer(buffer);
     }
     for (Buffer& buffer : state.velocities) {
-        destroyBuffer(context, buffer);
+        context.retireBuffer(buffer);
     }
-    destroyBuffer(context, state.previousRendered);
-    destroyBuffer(context, state.cellCounts);
-    destroyBuffer(context, state.cellParticles);
+    context.retireBuffer(state.previousRendered);
+    context.retireBuffer(state.cellCounts);
+    context.retireBuffer(state.cellParticles);
     for (Buffer& buffer : state.params) {
-        destroyBuffer(context, buffer);
+        context.retireBuffer(buffer);
     }
-    state.capacity = 0;
-    state.cellCount = 0;
+    // 슬롯이 다른 유체에게 넘어갈 수 있으므로 판단에 쓰는 값도 함께 지운다. 남겨 두면 설정이 같은
+    // 다른 유체가 «변한 것이 없다»로 보여 옛 입자를 그대로 이어받는다.
+    state = State{};
 }
 
 void FluidSimulator::ensureCapacity(State& state, uint32_t count) {
     if (count <= state.capacity && state.capacity > 0) {
         return;
     }
-    // 진행 중인 프레임이 옛 버퍼를 읽고 있을 수 있다. 입자 수를 바꾸는 일은 드물어 장치를 세운다.
-    vkDeviceWaitIdle(context.device);
+    // destroyState 가 옛 버퍼를 맡겨 두므로 진행 중인 프레임을 기다릴 필요가 없다. 이번 프레임 prepare
+    // 가 이미 정해 둔 두 값은 살려 둔다.
+    uint32_t objectIndex = state.objectIndex;
+    uint32_t particleCount = state.count;
     destroyState(state);
+    state.objectIndex = objectIndex;
+    state.count = particleCount;
     state.capacity = count;
     // 셀은 입자의 두 배쯤을 2 의 거듭제곱으로. 해시가 마스크로 접히므로 거듭제곱이어야 한다.
     state.cellCount = std::clamp<uint32_t>(std::bit_ceil(count * 2), 1024, 65536);
@@ -166,6 +173,17 @@ bool FluidSimulator::prepare(const scene::Scene& scene, bool sceneSwitched) {
         }
     }
     states.resize(scene.fluids.size());
+
+    // 부품 배열이 압축되면 첨자가 밀려 states[k] 가 다른 유체를 맡게 된다. 설정과 변환이 우연히
+    // 같으면 «변한 것이 없다»로 보여 남의 입자를 그대로 이어받으므로, 그런 프레임에는 전부 버린다.
+    if (scene.componentRevision() != lastComponentRevision) {
+        lastComponentRevision = scene.componentRevision();
+        for (State& state : states) {
+            state.needsEmit = true;
+            state.lastSettings = scene::Fluid{};
+            state.lastWorld = glm::mat4{0.0F};
+        }
+    }
 
     // 부품 번호 -> 오브젝트. 오브젝트가 없는 부품은 그리지 않는다.
     std::vector<uint32_t> owners(scene.fluids.size(), UINT32_MAX);
@@ -358,7 +376,6 @@ void FluidSimulator::record(VkCommandBuffer commandBuffer,
         dispatch(emitPipeline);
         computeToCompute();
         state.needsEmit = false;
-        state.emitted = true;
         emitted = true;
     }
 

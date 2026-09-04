@@ -136,7 +136,11 @@ private:
     // 하나씩만 두고 프레임마다 다시 쓰기 때문에 필요하다.
     void barrierBeforeBuild(VkCommandBuffer commandBuffer);
     AccelerationStructure createStructure(VkAccelerationStructureTypeKHR type, VkDeviceSize size);
+    // 장치가 놀고 있을 때만 부른다(소멸자, 지오메트리 교체). 기록 중이면 retireStructure 를 쓴다.
     void destroyStructure(AccelerationStructure& structure);
+    // 명령 기록 도중 구조를 갈아 끼울 때 쓴다. 지난 프레임의 추적·질의가 아직 옛 구조를 읽고 있을 수
+    // 있어 바로 지우면 안 된다. 구조를 먼저 맡겨야 그 뒤에 맡기는 저장 버퍼보다 먼저 지워진다.
+    void retireStructure(AccelerationStructure& structure);
     void reserveScratch(Buffer& buffer, VkDeviceSize size, const char* debugName);
 
     Context& context;

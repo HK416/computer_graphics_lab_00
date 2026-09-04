@@ -253,6 +253,86 @@ int main() {
     animated.update(0.016F);
     assert(animated.animatorPosed(0) && "시각이 바뀌면 다시 포즈해야 한다");
 
+    // ---- 부품 배치 리비전 ----
+    scene::Scene attached;
+    attached.objects.push_back(scene::Object{});
+    attached.objects.push_back(scene::Object{});
+    attached.refresh();
+
+    uint64_t componentBase = attached.componentRevision();
+    attached.attachFluid(1);
+    attached.refresh();
+    assert(attached.componentRevision() != componentBase && "부품을 붙이면 배치 리비전이 올라야 한다");
+
+    componentBase = attached.componentRevision();
+    attached.refresh();
+    assert(attached.componentRevision() == componentBase && "가만히 두면 배치 리비전이 그대로여야 한다");
+
+    // 재생 중 강체 속도가 변하는 것은 «배치»가 아니다.
+    attached.attachRigidBody(0);
+    attached.refresh();
+    componentBase = attached.componentRevision();
+    uint64_t transformBase = attached.transformRevision();
+    attached.rigidBodies[0].velocity = glm::vec3{0.0F, -3.0F, 0.0F};
+    attached.refresh();
+    assert(attached.componentRevision() == componentBase && "강체 속도만 바뀌면 배치 리비전은 그대로여야 한다");
+    assert(attached.transformRevision() == transformBase && "값만 바뀌면 변환 리비전도 그대로여야 한다");
+
+    // ---- 다른 종류를 떼도 유체 첨자가 정합해야 한다 ----
+    // detachComponent 는 다섯 배열을 모두 압축한다. 강체를 떼면 유체 첨자가 밀릴 수 있다.
+    scene::Scene mixed;
+    for (int i = 0; i < 3; ++i) {
+        mixed.objects.push_back(scene::Object{});
+    }
+    mixed.attachRigidBody(0);
+    mixed.attachFluid(1);
+    mixed.attachFluid(2);
+    mixed.refresh();
+    componentBase = mixed.componentRevision();
+    mixed.detachComponent(0, &scene::Object::rigidBody);
+    mixed.refresh();
+    assert(mixed.rigidBodies.empty() && "가리키는 오브젝트가 없어진 강체는 사라져야 한다");
+    assert(mixed.fluids.size() == 2 && "유체는 그대로 둘이어야 한다");
+    assert(mixed.objects[1].fluid >= 0 && static_cast<size_t>(mixed.objects[1].fluid) < mixed.fluids.size() &&
+           "유체 첨자가 배열 안이어야 한다");
+    assert(mixed.objects[2].fluid >= 0 && static_cast<size_t>(mixed.objects[2].fluid) < mixed.fluids.size() &&
+           "유체 첨자가 배열 안이어야 한다");
+    assert(mixed.objects[1].fluid != mixed.objects[2].fluid && "두 유체가 같은 부품을 가리키면 안 된다");
+    assert(mixed.componentRevision() != componentBase && "부품을 떼면 배치 리비전이 올라야 한다");
+
+    // ---- 지우고 같은 수만큼 새로 만들어도 알아채야 한다 ----
+    scene::Scene swapped;
+    scene::Object first;
+    first.transform.position = glm::vec3{1.0F, 0.0F, 0.0F};
+    swapped.objects.push_back(first);
+    swapped.refresh();
+    uint64_t topologyBase = swapped.topologyRevision();
+    swapped.removeObject(0);
+    scene::Object replacement;
+    replacement.transform.position = glm::vec3{1.0F, 0.0F, 0.0F};
+    swapped.objects.push_back(replacement);
+    swapped.refresh();
+    assert(swapped.topologyRevision() != topologyBase && "같은 프레임에 지우고 만들어도 위상이 바뀐 것이다");
+    assert(swapped.objectDirty(0) && "새 오브젝트는 더티여야 한다");
+
+    // 마지막 하나까지 지우면 개수가 0 이라 «크기가 달라졌다»로도 잡히지 않는다. 미사용 모델 회수가
+    // 위상 리비전을 보므로 여기서 놓치면 모델이 GPU 에 남는다.
+    topologyBase = swapped.topologyRevision();
+    swapped.removeObject(0);
+    swapped.refresh();
+    assert(swapped.objects.empty());
+    assert(swapped.topologyRevision() != topologyBase && "모두 지운 것도 위상 변화다");
+
+    // ---- 장면을 더 만들어도 이미 잡아 둔 참조가 살아 있어야 한다 ----
+    scene::SceneManager manager;
+    scene::Scene& kept = manager.create("첫 장면");
+    kept.ambientIntensity = 0.5F;
+    for (int i = 0; i < 8; ++i) {
+        manager.create("추가 장면");
+    }
+    assert(&kept == &manager.at(0) && "장면을 더 만들어도 주소가 바뀌면 안 된다");
+    assert(manager.at(0).ambientIntensity == 0.5F && "잡아 둔 참조로 쓴 값이 살아 있어야 한다");
+
     std::printf("장면 계층 자체 점검 통과\n");
     return 0;
 }

@@ -145,11 +145,24 @@ void RayTracer::destroyStructure(AccelerationStructure& structure) {
     structure.address = 0;
 }
 
+void RayTracer::retireStructure(AccelerationStructure& structure) {
+    if (structure.handle != VK_NULL_HANDLE) {
+        VkDevice device = context.device;
+        PFN_vkDestroyAccelerationStructureKHR destroy = destroyAccelerationStructure;
+        VkAccelerationStructureKHR handle = structure.handle;
+        context.retireDeferred([device, destroy, handle]() { destroy(device, handle, nullptr); });
+        structure.handle = VK_NULL_HANDLE;
+    }
+    context.retireBuffer(structure.storage);
+    structure.address = 0;
+}
+
 void RayTracer::reserveScratch(Buffer& buffer, VkDeviceSize size, const char* debugName) {
     if (buffer.size >= size) {
         return;
     }
-    destroyBuffer(context, buffer);
+    // 스크래치도 기록 중에 커진다. 지난 프레임의 구축이 아직 옛 버퍼를 쓰고 있을 수 있다.
+    context.retireBuffer(buffer);
     // 구축 스크래치는 장치가 요구하는 정렬을 지켜야 한다.
     buffer = createBuffer(context,
                           size,
@@ -409,7 +422,7 @@ void RayTracer::updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
 
         // 같은 메쉬가 계속 오면 자리를 그대로 다시 쓴다. 크기가 모자랄 때만 새로 잡는다.
         if (skinnedBottomLevels[index].storage.size < sizes.accelerationStructureSize) {
-            destroyStructure(skinnedBottomLevels[index]);
+            retireStructure(skinnedBottomLevels[index]);
             skinnedBottomLevels[index] =
                 createStructure(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, sizes.accelerationStructureSize);
         }
@@ -550,7 +563,7 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
     getBuildSizes(context.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &instanceCount, &sizes);
 
     if (topLevel.storage.size < sizes.accelerationStructureSize) {
-        destroyStructure(topLevel);
+        retireStructure(topLevel);
         topLevel = createStructure(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, sizes.accelerationStructureSize);
 
         VkWriteDescriptorSetAccelerationStructureKHR accelerationWrite{
