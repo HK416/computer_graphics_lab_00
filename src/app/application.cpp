@@ -853,18 +853,24 @@ void Application::run() {
             // 애니메이션은 그리기 전에 진행시켜야 이번 프레임의 조인트 행렬이 올라간다.
             scenes.active().update(deltaSeconds, &jobs);
         }
+        // 고정 간격으로 나눠 돈다. 프레임이 길어도 여덟 스텝까지만 따라잡아 나선형으로 느려지지 않는다.
+        constexpr float PHYSICS_STEP = 1.0F / 120.0F;
+        // GPU 솔버가 끝낸 결과를 먼저 장면에 되쓴다. 아래 refresh 가 이 값으로 세계 변환을 다시 만든다.
+        renderer->applyRigidBodyReadback(scenes.active());
+        uint32_t rigidSteps = 0;
         if (scenes.active().simulating) {
             gfx::ProfilerScope scope(renderer->profiler(), "강체 물리");
-            // 고정 간격으로 나눠 돈다. 프레임이 길어도 여덟 스텝까지만 따라잡아 나선형으로 느려지지 않는다.
-            constexpr float PHYSICS_STEP = 1.0F / 120.0F;
             physicsAccumulator = std::min(physicsAccumulator + deltaSeconds, PHYSICS_STEP * 8.0F);
             while (physicsAccumulator >= PHYSICS_STEP) {
                 physics::stepRigidBodies(scenes.active(), PHYSICS_STEP, &jobs);
                 physicsAccumulator -= PHYSICS_STEP;
+                ++rigidSteps;
             }
         } else {
             physicsAccumulator = 0.0F;
         }
+        // GPU 백엔드 강체는 같은 간격으로 렌더러가 푼다.
+        renderer->setRigidBodySteps(rigidSteps, PHYSICS_STEP);
         // 밀린 크기 변경은 UI 가 렌더 타겟을 참조하기 전에 끝내야 한다.
         renderer->prepareFrame();
         renderer->setDisplayExtent(editorUi->desiredRenderExtent());

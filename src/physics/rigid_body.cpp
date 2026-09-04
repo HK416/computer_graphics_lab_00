@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <vector>
 
 #include <glm/gtc/quaternion.hpp>
@@ -15,35 +16,13 @@
 namespace physics {
 namespace {
 
-constexpr float GRAVITY = -9.81F;
+// GPU 솔버는 접촉을 Jacobi 로 풀어 수렴이 느리므로 더 많이 돈다(gfx::RIGID_SOLVER_ITERATIONS).
+// 나머지 상수는 rigid_body.h 에서 두 백엔드가 함께 쓴다.
 constexpr uint32_t SOLVER_ITERATIONS = 8;
-// Baumgarte 위치 보정 비율과 허용 침투. 너무 크면 튀고 너무 작으면 서서히 가라앉는다.
-constexpr float POSITION_CORRECTION = 0.2F;
-constexpr float PENETRATION_SLOP = 0.005F;
-// 이보다 느리게 닿으면 반발을 주지 않는다. 쉬고 있는 물체가 미세하게 떨리는 것을 막는다.
-constexpr float RESTITUTION_THRESHOLD = 1.0F;
 constexpr uint32_t GRANULARITY = 16;
 
-// 시뮬레이션 동안의 세계 공간 상태. 오브젝트와 부품은 끝날 때 한 번만 건드린다.
-struct Body {
-    uint32_t object = 0;
-    scene::ColliderShape shape = scene::ColliderShape::SPHERE;
-    glm::vec3 position{0.0F};
-    glm::quat rotation{1.0F, 0.0F, 0.0F, 0.0F};
-    glm::vec3 scale{1.0F};
-    glm::vec3 velocity{0.0F};
-    glm::vec3 angularVelocity{0.0F};
-    float inverseMass = 0.0F;
-    // 지역 축의 관성 역수. 세계 공간에서는 회전으로 감싼다.
-    glm::vec3 inverseInertia{0.0F};
-    float radius = 0.5F;
-    glm::vec3 halfExtents{0.5F};
-    float restitution = 0.3F;
-    float friction = 0.5F;
-    // 광역 검사용 경계 반지름. 평면은 무한이라 따로 다룬다.
-    float boundingRadius = 0.0F;
-    bool useGravity = true;
-};
+// 솔버 안에서 쓰는 짧은 이름.
+using Body = RigidBodyState;
 
 // 접촉 하나. 법선은 a 에서 b 를 향한다.
 struct Contact {
@@ -53,6 +32,8 @@ struct Contact {
     glm::vec3 normal{0.0F, 1.0F, 0.0F};
     float penetration = 0.0F;
     float normalImpulse = 0.0F;
+    // 위치 보정으로 이미 밀어낸 거리. 접촉을 다시 만들지 않고 보정을 여러 번 돌기 위한 것이다.
+    float appliedCorrection = 0.0F;
     // 풀기 전에 잰 접근 속도로 정한 반발 목표 속도. 반복마다 다시 재면 첫 반복이 튀긴 뒤 두 번째가 도로
     // 당겨 와 반발이 사라진다.
     float restitutionTarget = 0.0F;
@@ -79,10 +60,6 @@ glm::mat3 worldInverseInertia(const Body& body) {
                      0.0F,
                      body.inverseInertia.z} *
            glm::transpose(rotation);
-}
-
-bool isDynamic(const Body& body) {
-    return body.inverseMass > 0.0F;
 }
 
 // 상자 지역 공간에서 점까지의 가장 가까운 표면점과 침투. 점이 안이면 가장 가까운 면으로 밀어낸다.
@@ -116,6 +93,24 @@ bool closestOnBox(const Body& box, const glm::vec3& worldPoint, float radius, Co
     contact.point = box.position + box.rotation * surface;
     contact.penetration = gap[axis] + radius;
     return true;
+}
+
+// 한 짝의 접촉은 가장 깊은 MAX_MANIFOLD_POINTS 개만 남긴다. GLSL 의 addPoint 와 같은 규칙이어야
+// 두 백엔드가 같은 접촉을 본다. begin 은 이 짝의 첫 접촉이 들어간 자리다.
+void addManifoldPoint(std::vector<Contact>& out, size_t begin, const Contact& contact) {
+    if (out.size() - begin < MAX_MANIFOLD_POINTS) {
+        out.push_back(contact);
+        return;
+    }
+    size_t shallowest = begin;
+    for (size_t i = begin + 1; i < out.size(); ++i) {
+        if (out[i].penetration < out[shallowest].penetration) {
+            shallowest = i;
+        }
+    }
+    if (out[shallowest].penetration < contact.penetration) {
+        out[shallowest] = contact;
+    }
 }
 
 // 상자 여덟 꼭짓점.
@@ -181,6 +176,7 @@ void collideBoxPlane(const Body& box, const Body& plane, uint32_t ib, uint32_t i
     glm::vec3 normal = planeNormal(plane);
     glm::vec3 corners[8];
     boxCorners(box, corners);
+    size_t begin = out.size();
     for (const glm::vec3& corner : corners) {
         float distance = glm::dot(corner - plane.position, normal);
         if (distance >= 0.0F) {
@@ -192,35 +188,100 @@ void collideBoxPlane(const Body& box, const Body& plane, uint32_t ib, uint32_t i
         contact.normal = -normal;
         contact.point = corner;
         contact.penetration = -distance;
-        out.push_back(contact);
+        addManifoldPoint(out, begin, contact);
     }
 }
 
-// ponytail: 상자끼리는 서로의 꼭짓점이 상대 안에 들어왔는지로만 본다. 모서리끼리 걸치는 경우를
-// 놓치므로 정확히 하려면 분리축(SAT) 검사로 바꾼다.
+// 축에 투영한 상자의 반지름.
+float boxProjection(const glm::mat3& rotation, const glm::vec3& extent, const glm::vec3& axis) {
+    return std::abs(glm::dot(rotation[0], axis)) * extent.x + std::abs(glm::dot(rotation[1], axis)) * extent.y +
+           std::abs(glm::dot(rotation[2], axis)) * extent.z;
+}
+
+// 상자 대 상자. 여섯 면 축의 분리축 검사로 가장 얕게 겹치는 축을 찾고, 그 축에서 겨루는 면 안에 든
+// 상대 꼭짓점을 접촉으로 낸다. 나란히 놓인 상자면 네 점이 나와 넘어지지 않는다.
+//
+// 서로의 꼭짓점이 상대 안에 들어왔는지로만 보면 크기가 같은 상자를 쌓았을 때 꼭짓점이 옆면에 딱
+// 붙어 «가장 얕은 면»이 옆으로 잡히고 침투가 0 이 되어 서로를 그대로 통과한다.
+//
+// ponytail: 면 축 여섯 개만 본다. 모서리끼리 비스듬히 걸치는 경우(축 아홉 개)를 놓친다.
 void collideBoxBox(const Body& a, const Body& b, uint32_t ia, uint32_t ib, std::vector<Contact>& out) {
+    glm::mat3 rotationA = glm::mat3_cast(a.rotation);
+    glm::mat3 rotationB = glm::mat3_cast(b.rotation);
+    glm::vec3 center = b.position - a.position;
+
+    float bestOverlap = std::numeric_limits<float>::max();
+    glm::vec3 bestNormal{0.0F, 1.0F, 0.0F};
+    bool referenceIsA = true;
+    int bestAxis = 1;
+    for (int i = 0; i < 6; ++i) {
+        bool fromA = i < 3;
+        glm::vec3 axis = fromA ? rotationA[i] : rotationB[i - 3];
+        float distance = glm::dot(center, axis);
+        float overlap = boxProjection(rotationA, a.halfExtents, axis) + boxProjection(rotationB, b.halfExtents, axis) -
+                        std::abs(distance);
+        if (overlap <= 0.0F) {
+            // 이 축으로 떨어져 있다.
+            return;
+        }
+        if (overlap < bestOverlap) {
+            bestOverlap = overlap;
+            // 법선은 a 에서 b 를 향해야 한다.
+            bestNormal = distance < 0.0F ? -axis : axis;
+            referenceIsA = fromA;
+            bestAxis = fromA ? i : i - 3;
+        }
+    }
+
+    // 겨루는 면을 가진 쪽이 기준, 반대쪽이 입사다.
+    const Body& reference = referenceIsA ? a : b;
+    const Body& incident = referenceIsA ? b : a;
+    const glm::mat3& referenceRotation = referenceIsA ? rotationA : rotationB;
+    float axisSign = glm::dot(referenceRotation[bestAxis], bestNormal) < 0.0F ? -1.0F : 1.0F;
+    float direction = referenceIsA ? 1.0F : -1.0F;
+
     glm::vec3 corners[8];
-    boxCorners(a, corners);
+    boxCorners(incident, corners);
+    glm::quat inverse = glm::conjugate(reference.rotation);
+    size_t begin = out.size();
     for (const glm::vec3& corner : corners) {
-        Contact contact;
-        if (closestOnBox(b, corner, 0.0F, contact)) {
-            contact.a = ia;
-            contact.b = ib;
-            contact.normal = -contact.normal;
-            contact.point = corner;
-            out.push_back(contact);
+        glm::vec3 local = inverse * (corner - reference.position);
+        float depth = reference.halfExtents[bestAxis] - direction * axisSign * local[bestAxis];
+        if (depth <= 0.0F) {
+            continue;
         }
-    }
-    boxCorners(b, corners);
-    for (const glm::vec3& corner : corners) {
-        Contact contact;
-        if (closestOnBox(a, corner, 0.0F, contact)) {
-            contact.a = ia;
-            contact.b = ib;
-            contact.point = corner;
-            out.push_back(contact);
+        bool inside = true;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (axis != bestAxis && std::abs(local[axis]) > reference.halfExtents[axis] + PENETRATION_SLOP) {
+                inside = false;
+            }
         }
+        if (!inside) {
+            continue;
+        }
+        Contact contact;
+        contact.a = ia;
+        contact.b = ib;
+        contact.normal = bestNormal;
+        contact.point = corner;
+        contact.penetration = std::min(depth, bestOverlap);
+        addManifoldPoint(out, begin, contact);
     }
+    if (out.size() > begin) {
+        return;
+    }
+    // 면 안에 든 꼭짓점이 없으면(모서리끼리 걸침) 가장 깊은 지지점 하나로 대신한다.
+    Contact contact;
+    contact.a = ia;
+    contact.b = ib;
+    contact.normal = bestNormal;
+    contact.penetration = bestOverlap;
+    contact.point = b.position;
+    for (int axis = 0; axis < 3; ++axis) {
+        float side = glm::dot(rotationB[axis], bestNormal) < 0.0F ? 1.0F : -1.0F;
+        contact.point += rotationB[axis] * (side * b.halfExtents[axis]);
+    }
+    out.push_back(contact);
 }
 
 void collide(const std::vector<Body>& bodies, uint32_t ia, uint32_t ib, std::vector<Contact>& out) {
@@ -263,7 +324,7 @@ void collide(const std::vector<Body>& bodies, uint32_t ia, uint32_t ib, std::vec
     }
 }
 
-void solveContacts(std::vector<Body>& bodies, std::vector<Contact>& contacts, float dt) {
+void solveContacts(std::vector<Body>& bodies, std::vector<Contact>& contacts) {
     for (Contact& contact : contacts) {
         const Body& a = bodies[contact.a];
         const Body& b = bodies[contact.b];
@@ -331,18 +392,130 @@ void solveContacts(std::vector<Body>& bodies, std::vector<Contact>& contacts, fl
 
     // 남은 침투를 위치로 밀어낸다. 속도는 건드리지 않으므로 쉬는 물체가 떨지 않는다. 질량 역수 비율로
     // 나눠 무거운 쪽이 덜 밀린다.
-    for (const Contact& contact : contacts) {
-        Body& a = bodies[contact.a];
-        Body& b = bodies[contact.b];
-        float totalInverseMass = a.inverseMass + b.inverseMass;
-        float depth = contact.penetration - PENETRATION_SLOP;
-        if (totalInverseMass <= 0.0F || depth <= 0.0F) {
+    //
+    // 같은 짝의 여러 점은 «가장 깊은 것 하나»로만 민다. 나란히 놓인 상자는 네 점이 나오는데 넷을 다
+    // 밀면 네 배로 튀어 오른다. 접촉은 짝 단위로 이어 붙어 있으므로 구간을 훑는다.
+    for (uint32_t iteration = 0; iteration < POSITION_ITERATIONS; ++iteration) {
+        size_t index = 0;
+        while (index < contacts.size()) {
+            size_t end = index;
+            size_t deepest = index;
+            while (end < contacts.size() && contacts[end].a == contacts[index].a &&
+                   contacts[end].b == contacts[index].b) {
+                if (contacts[end].penetration > contacts[deepest].penetration) {
+                    deepest = end;
+                }
+                ++end;
+            }
+            Contact& contact = contacts[deepest];
+            Body& a = bodies[contact.a];
+            Body& b = bodies[contact.b];
+            float totalInverseMass = a.inverseMass + b.inverseMass;
+            // 이미 밀어낸 만큼은 빼고 남은 침투만 다시 민다. 접촉을 다시 만들지 않고도 반복할 수 있다.
+            float depth = contact.penetration - contact.appliedCorrection - PENETRATION_SLOP;
+            if (totalInverseMass > 0.0F && depth > 0.0F) {
+                float push = POSITION_CORRECTION * depth;
+                contact.appliedCorrection += push;
+                glm::vec3 correction = contact.normal * (push / totalInverseMass);
+                a.position -= correction * a.inverseMass;
+                b.position += correction * b.inverseMass;
+            }
+            index = end;
+        }
+    }
+}
+
+} // namespace
+
+void collectRigidBodies(const scene::Scene& scene, scene::SimulationBackend backend, std::vector<RigidBodyState>& out) {
+    out.clear();
+    for (uint32_t index = 0; index < scene.objects.size(); ++index) {
+        int32_t slot = scene.objects[index].rigidBody;
+        if (slot < 0 || static_cast<size_t>(slot) >= scene.rigidBodies.size()) {
             continue;
         }
-        glm::vec3 correction = contact.normal * (POSITION_CORRECTION * depth / totalInverseMass);
-        a.position -= correction * a.inverseMass;
-        b.position += correction * b.inverseMass;
+        const scene::RigidBody& component = scene.rigidBodies[static_cast<size_t>(slot)];
+        // AUTO 는 CPU 다. GPU 솔버는 골라야 돈다.
+        bool onGpu = component.backend == scene::SimulationBackend::GPU;
+        if ((backend == scene::SimulationBackend::GPU) != onGpu) {
+            continue;
+        }
+
+        glm::mat4 worldMatrix = scene.worldMatrix(index);
+        scene::Transform world = scene::Transform::fromMatrix(worldMatrix);
+        // 세계 공간 크기는 편집기의 콜라이더 표시와 같은 함수로 낸다. 어긋나면 보이는 것과
+        // 부딪히는 것이 달라진다.
+        scene::ColliderPose pose = scene::colliderPose(component, worldMatrix);
+
+        RigidBodyState body;
+        body.object = index;
+        body.shape = component.shape;
+        body.position = pose.position;
+        body.rotation = pose.rotation;
+        body.scale = world.scale;
+        body.velocity = component.velocity;
+        body.angularVelocity = component.angularVelocity;
+        body.restitution = component.restitution;
+        body.friction = component.friction;
+        body.useGravity = component.useGravity;
+        body.radius = pose.radius;
+        body.halfExtents = pose.halfExtents;
+        bool fixed = component.kinematic || component.shape == scene::ColliderShape::PLANE || component.mass <= 0.0F;
+        body.inverseMass = fixed ? 0.0F : 1.0F / component.mass;
+        if (!fixed) {
+            if (component.shape == scene::ColliderShape::SPHERE) {
+                float inertia = 0.4F * component.mass * body.radius * body.radius;
+                body.inverseInertia = glm::vec3{1.0F / inertia};
+            } else {
+                glm::vec3 size = body.halfExtents * 2.0F;
+                glm::vec3 inertia{component.mass / 12.0F * (size.y * size.y + size.z * size.z),
+                                  component.mass / 12.0F * (size.x * size.x + size.z * size.z),
+                                  component.mass / 12.0F * (size.x * size.x + size.y * size.y)};
+                body.inverseInertia = 1.0F / glm::max(inertia, glm::vec3{1.0e-6F});
+            }
+        }
+        body.boundingRadius =
+            component.shape == scene::ColliderShape::SPHERE ? body.radius : glm::length(body.halfExtents);
+        out.push_back(body);
     }
+}
+
+void writeBackRigidBodies(scene::Scene& scene, const std::vector<RigidBodyState>& bodies) {
+    // ponytail: 강체 안에 강체가 달린 계층은 부모가 뒤에 처리되면 자식이 한 스텝 어긋난다. 그런 배치는
+    // 드물어 위상 순서 정렬은 두지 않았다.
+    for (const RigidBodyState& body : bodies) {
+        scene::Object& object = scene.objects[body.object];
+        scene::RigidBody& component = scene.rigidBodies[static_cast<size_t>(object.rigidBody)];
+        component.velocity = body.velocity;
+        component.angularVelocity = body.angularVelocity;
+        if (!isDynamic(body)) {
+            continue;
+        }
+        scene::Transform world;
+        world.position = body.position;
+        world.rotation = body.rotation;
+        world.scale = body.scale;
+        glm::mat4 parentWorld =
+            object.parent >= 0 ? scene.worldMatrix(static_cast<uint32_t>(object.parent)) : glm::mat4{1.0F};
+        scene::Transform local = scene::Transform::fromMatrix(glm::inverse(parentWorld) * world.matrix());
+        object.transform.position = local.position;
+        object.transform.rotation = local.rotation;
+    }
+}
+
+namespace {
+
+// 반암시적 오일러 적분. 힘은 중력뿐이다. GPU 솔버의 rigid_integrate.comp 과 같아야 한다.
+void integrate(RigidBodyState& body, float dt) {
+    if (!isDynamic(body)) {
+        return;
+    }
+    if (body.useGravity) {
+        body.velocity.y += GRAVITY * dt;
+    }
+    body.position += body.velocity * dt;
+    glm::quat spin{0.0F, body.angularVelocity.x, body.angularVelocity.y, body.angularVelocity.z};
+    body.rotation = glm::normalize(body.rotation + 0.5F * dt * (spin * body.rotation));
 }
 
 } // namespace
@@ -351,69 +524,17 @@ void stepRigidBodies(scene::Scene& scene, float dt, core::JobSystem* jobs) {
     if (dt <= 0.0F) {
         return;
     }
-    // 1) 부품이 붙은 오브젝트를 모아 세계 공간 상태로 편다.
+    // 1) 부품이 붙은 오브젝트를 모아 세계 공간 상태로 편다. GPU 백엔드는 여기서 빠진다.
     std::vector<Body> bodies;
-    for (uint32_t index = 0; index < scene.objects.size(); ++index) {
-        int32_t slot = scene.objects[index].rigidBody;
-        if (slot < 0 || static_cast<size_t>(slot) >= scene.rigidBodies.size()) {
-            continue;
-        }
-        Body body;
-        body.object = index;
-        bodies.push_back(body);
-    }
+    collectRigidBodies(scene, scene::SimulationBackend::CPU, bodies);
     if (bodies.empty()) {
         return;
     }
 
+    // 2) 반암시적 오일러 적분.
     forRange(jobs, static_cast<uint32_t>(bodies.size()), [&](uint32_t begin, uint32_t end) {
         for (uint32_t i = begin; i < end; ++i) {
-            Body& body = bodies[i];
-            const scene::RigidBody& component =
-                scene.rigidBodies[static_cast<size_t>(scene.objects[body.object].rigidBody)];
-            glm::mat4 worldMatrix = scene.worldMatrix(body.object);
-            scene::Transform world = scene::Transform::fromMatrix(worldMatrix);
-            // 세계 공간 크기는 편집기의 콜라이더 표시와 같은 함수로 낸다. 어긋나면 보이는 것과
-            // 부딪히는 것이 달라진다.
-            scene::ColliderPose pose = scene::colliderPose(component, worldMatrix);
-            body.shape = component.shape;
-            body.position = pose.position;
-            body.rotation = pose.rotation;
-            body.scale = world.scale;
-            body.velocity = component.velocity;
-            body.angularVelocity = component.angularVelocity;
-            body.restitution = component.restitution;
-            body.friction = component.friction;
-            body.useGravity = component.useGravity;
-            body.radius = pose.radius;
-            body.halfExtents = pose.halfExtents;
-            bool fixed =
-                component.kinematic || component.shape == scene::ColliderShape::PLANE || component.mass <= 0.0F;
-            body.inverseMass = fixed ? 0.0F : 1.0F / component.mass;
-            if (!fixed) {
-                if (component.shape == scene::ColliderShape::SPHERE) {
-                    float inertia = 0.4F * component.mass * body.radius * body.radius;
-                    body.inverseInertia = glm::vec3{1.0F / inertia};
-                } else {
-                    glm::vec3 size = body.halfExtents * 2.0F;
-                    glm::vec3 inertia{component.mass / 12.0F * (size.y * size.y + size.z * size.z),
-                                      component.mass / 12.0F * (size.x * size.x + size.z * size.z),
-                                      component.mass / 12.0F * (size.x * size.x + size.y * size.y)};
-                    body.inverseInertia = 1.0F / glm::max(inertia, glm::vec3{1.0e-6F});
-                }
-            }
-            body.boundingRadius =
-                component.shape == scene::ColliderShape::SPHERE ? body.radius : glm::length(body.halfExtents);
-
-            // 2) 반암시적 오일러 적분. 힘은 중력뿐이다.
-            if (isDynamic(body)) {
-                if (body.useGravity) {
-                    body.velocity.y += GRAVITY * dt;
-                }
-                body.position += body.velocity * dt;
-                glm::quat spin{0.0F, body.angularVelocity.x, body.angularVelocity.y, body.angularVelocity.z};
-                body.rotation = glm::normalize(body.rotation + 0.5F * dt * (spin * body.rotation));
-            }
+            integrate(bodies[i], dt);
         }
     });
 
@@ -450,29 +571,10 @@ void stepRigidBodies(scene::Scene& scene, float dt, core::JobSystem* jobs) {
     }
 
     // 5) 순차 임펄스로 속도를 고친다.
-    solveContacts(bodies, contacts, dt);
+    solveContacts(bodies, contacts);
 
-    // 6) 세계 상태를 오브젝트의 지역 변환과 부품 속도로 되돌려 쓴다. 부모 변환을 읽으므로 직렬이다.
-    // ponytail: 강체 안에 강체가 달린 계층은 부모가 뒤에 처리되면 자식이 한 스텝 어긋난다. 그런 배치는
-    // 드물어 위상 순서 정렬은 두지 않았다.
-    for (const Body& body : bodies) {
-        scene::Object& object = scene.objects[body.object];
-        scene::RigidBody& component = scene.rigidBodies[static_cast<size_t>(object.rigidBody)];
-        component.velocity = body.velocity;
-        component.angularVelocity = body.angularVelocity;
-        if (!isDynamic(body)) {
-            continue;
-        }
-        scene::Transform world;
-        world.position = body.position;
-        world.rotation = body.rotation;
-        world.scale = body.scale;
-        glm::mat4 parentWorld =
-            object.parent >= 0 ? scene.worldMatrix(static_cast<uint32_t>(object.parent)) : glm::mat4{1.0F};
-        scene::Transform local = scene::Transform::fromMatrix(glm::inverse(parentWorld) * world.matrix());
-        object.transform.position = local.position;
-        object.transform.rotation = local.rotation;
-    }
+    // 6) 세계 상태를 오브젝트의 지역 변환과 부품 속도로 되돌려 쓴다.
+    writeBackRigidBodies(scene, bodies);
 }
 
 } // namespace physics

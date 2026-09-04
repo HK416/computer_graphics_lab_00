@@ -21,6 +21,7 @@
 #include "gfx/profiler.h"
 #include "gfx/raytracing.h"
 #include "gfx/resources.h"
+#include "gfx/rigid_body_gpu.h"
 #include "gfx/shadow_math.h"
 #include "gfx/upscaler.h"
 
@@ -367,6 +368,29 @@ public:
     bool fluidOnCpu(uint32_t index) const { return fluid != nullptr && fluid->onCpu(index); }
     // 이 장치에서 유체 GPU 백엔드를 쓸 수 있는지. 편집기가 못 고르게 막는 데 쓴다.
     bool fluidGpuAvailable() const { return fluid != nullptr && fluid->gpuAvailable(); }
+    // 이 장치에서 강체 GPU 솔버를 쓸 수 있는지.
+    bool rigidGpuAvailable() const { return rigidBodies != nullptr && rigidBodies->available(); }
+    // 지난 프레임 GPU 솔버가 푼 강체 수. 편집기가 «지금 도는 백엔드»를 보여 주는 데 쓴다.
+    uint32_t rigidGpuBodyCount() const { return rigidBodies != nullptr ? rigidBodies->bodyCount() : 0; }
+    // GPU 솔버가 끝낸 결과를 장면에 되쓴다. scene.refresh 앞에 부른다.
+    bool applyRigidBodyReadback(scene::Scene& scene) {
+        return rigidBodies != nullptr && rigidBodies->applyReadback(scene, completedFrames());
+    }
+    // 이번 프레임에 GPU 솔버가 돌 고정 간격 스텝 수. 애플리케이션의 물리 루프와 같은 값이다.
+    void setRigidBodySteps(uint32_t steps, float stepSeconds) {
+        rigidSteps = steps;
+        rigidStepSeconds = stepSeconds;
+    }
+    // GPU 가 끝낸 프레임의 배타적 상한. 이보다 번호가 작은 프레임의 결과는 되읽어도 안전하다.
+    // drawFrame 이 frameIndex - FRAMES_IN_FLIGHT + 1 값을 기다리므로 그 다음 프레임 머리에서는
+    // frameIndex - FRAMES_IN_FLIGHT 까지가 끝나 있다.
+    uint64_t completedFrames() const { return frameIndex >= FRAMES_IN_FLIGHT ? frameIndex - FRAMES_IN_FLIGHT : 0; }
+    // 재생을 켜고 끌 때 GPU 에 남은 상태를 버리고 장면 값으로 다시 시작하게 한다.
+    void invalidateRigidBodies() {
+        if (rigidBodies != nullptr) {
+            rigidBodies->invalidate();
+        }
+    }
     // mesh shader 미지원 장치에서는 켤 수 없다.
     bool useMeshShader = false;
     bool meshShaderAvailable() const { return meshShaderPipelines[0] != VK_NULL_HANDLE; }
@@ -616,6 +640,10 @@ private:
     std::unique_ptr<FluidSimulator> fluid;
     // 유체마다 용기의 경계 구. 그림자 시점 컬링이 쓴다.
     std::vector<glm::vec4> fluidBounds;
+    // 강체 GPU 솔버. 상태를 GPU 에 두고 결과만 되읽는다.
+    std::unique_ptr<RigidBodySimulator> rigidBodies;
+    uint32_t rigidSteps = 0;
+    float rigidStepSeconds = 0.0F;
     // 이번 프레임 유체 패스가 상위 가속 구조 인스턴스 버퍼 앞쪽에 써 둔 입자 수.
     uint32_t fluidTlasPrepended = 0;
     VkPipelineLayout hzbPipelineLayout = VK_NULL_HANDLE;

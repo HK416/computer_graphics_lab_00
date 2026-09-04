@@ -1,0 +1,126 @@
+#version 460
+
+#include "rigid_common.glsl"
+
+// Jacobi 한 반복. 물체마다 다른 물체 전부와의 접촉을 지금 속도로 풀어 한 번에 더한다. 읽는 배열과
+// 쓰는 배열이 달라 순서 의존이 없다.
+//
+// 광역 판정은 O(n²) 이다. 물체 수백 개까지는 이쪽이 격자보다 빠르고, 무엇보다 CPU 솔버와 같은 짝을
+// 본다. ponytail: 수천 개를 넘기면 해시 격자로 바꿔야 한다(유체가 쓰는 것과 같은 구조).
+layout(local_size_x = 64) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.bodyCount) {
+        return;
+    }
+    RigidBody self = push.bodiesIn.items[i];
+    // 평면과 운동학 물체는 밀리지 않는다.
+    if (!rigidDynamic(self)) {
+        push.bodiesOut.items[i] = self;
+        return;
+    }
+
+    mat3 inertiaSelf = worldInverseInertia(self);
+    vec3 deltaLinear = vec3(0.0);
+    vec3 deltaAngular = vec3(0.0);
+
+    for (uint j = 0u; j < push.bodyCount; ++j) {
+        if (j == i) {
+            continue;
+        }
+        RigidBody other = push.bodiesIn.items[j];
+        // 광역: 경계 구가 겹치는 짝만 본다. 평면은 무한이라 늘 통과시킨다.
+        if (other.shape != RIGID_SHAPE_PLANE) {
+            vec3 delta = other.position.xyz - self.position.xyz;
+            float reach = self.angularVelocity.w + other.angularVelocity.w;
+            if (dot(delta, delta) > reach * reach) {
+                continue;
+            }
+        }
+
+        // 접촉은 늘 (구, 무엇이든) 또는 (상자, 상자/평면) 순으로 만든다. 자기가 상자이고 상대가
+        // 구이면 순서를 바꿔 만든 뒤 법선을 뒤집는다. 평면은 정적이라 self 가 될 수 없다.
+        RigidManifold manifold;
+        if (self.shape == RIGID_SHAPE_SPHERE || other.shape != RIGID_SHAPE_SPHERE) {
+            manifold = rigidCollide(self, other);
+        } else {
+            manifold = rigidCollide(other, self);
+            manifold.normal = -manifold.normal;
+        }
+        if (manifold.count == 0) {
+            continue;
+        }
+        // 중심이 정확히 겹치면 접촉 법선을 정할 근거가 없어 두 물체가 «같은» 방향을 고른다. 한 접촉을
+        // 나눠 쓰는 CPU 와 달리 여기서는 물체마다 따로 만들기 때문이다. 그대로 두면 겹친 짝이 분리되지
+        // 않고 통째로 한쪽으로 가속한다. 번호로 갈라 서로 반대쪽으로 민다.
+        vec3 between = other.position.xyz - self.position.xyz;
+        if (dot(between, between) < 1.0e-12) {
+            manifold.normal = i < j ? vec3(0.0, 1.0, 0.0) : vec3(0.0, -1.0, 0.0);
+        }
+
+        float totalInverseMass = self.position.w + other.position.w;
+        if (totalInverseMass <= 0.0) {
+            continue;
+        }
+        mat3 inertiaOther = worldInverseInertia(other);
+        float restitution = min(self.inverseInertia.w, other.inverseInertia.w);
+        float friction = sqrt(self.halfExtents.w * other.halfExtents.w);
+        // 접촉 점이 여럿이면 임펄스를 나눠 준다. 같은 면을 네 번 밀면 네 배로 튄다.
+        float share = 1.0 / float(manifold.count);
+
+        for (int c = 0; c < manifold.count; ++c) {
+            vec3 point = manifold.points[c];
+            vec3 armSelf = point - self.position.xyz;
+            vec3 armOther = point - other.position.xyz;
+
+            // 반발 목표는 반복 전 속도로 잰다.
+            vec3 preSelf = self.preVelocity.xyz + cross(self.preAngularVelocity.xyz, armSelf);
+            vec3 preOther = other.preVelocity.xyz + cross(other.preAngularVelocity.xyz, armOther);
+            float preClosing = dot(preOther - preSelf, manifold.normal);
+            float restitutionTarget = preClosing < -push.restitutionThreshold ? -restitution * preClosing : 0.0;
+
+            vec3 velocitySelf = self.velocity.xyz + cross(self.angularVelocity.xyz, armSelf);
+            vec3 velocityOther = other.velocity.xyz + cross(other.angularVelocity.xyz, armOther);
+            vec3 relative = velocityOther - velocitySelf;
+
+            vec3 torqueSelf = cross(armSelf, manifold.normal);
+            vec3 torqueOther = cross(armOther, manifold.normal);
+            float angular = dot(torqueSelf, inertiaSelf * torqueSelf) + dot(torqueOther, inertiaOther * torqueOther);
+            float effectiveMass = 1.0 / (totalInverseMass + angular);
+
+            float closing = dot(relative, manifold.normal);
+            float lambda = max(effectiveMass * (-closing + restitutionTarget), 0.0) * share;
+            // 법선은 self 에서 other 를 향하므로 self 는 반대로 밀린다.
+            deltaLinear -= manifold.normal * lambda * self.position.w;
+            deltaAngular -= inertiaSelf * cross(armSelf, manifold.normal * lambda);
+
+            // 마찰. 접선 속도를 줄이되 쿨롱 원뿔 안에서만.
+            //
+            // 원뿔의 한계는 «이번 반복의 λ» 가 아니라 «이 스텝에 필요한 총 법선 임펄스» 로 잰다.
+            // 반복이 거듭될수록 λ 는 0 으로 줄어드는데 그것으로 재면 첫 반복 뒤로 마찰이 사라진다.
+            // 반복 전 속도로 재면 총량에 가깝다. 접선 임펄스 자체가 접선 속도에 비례해 줄어들므로
+            // 한계가 넉넉해도 과하게 걸리지 않는다.
+            // ponytail: CPU 는 실제로 쌓인 임펄스를 쓴다. 여기서는 어림값이라 수치가 완전히 같지 않다.
+            float coneLambda = max(effectiveMass * (-preClosing + restitutionTarget), 0.0) * share;
+            vec3 tangent = relative - manifold.normal * closing;
+            float tangentSpeed = length(tangent);
+            if (tangentSpeed > 1.0e-6) {
+                tangent /= tangentSpeed;
+                vec3 frictionTorqueSelf = cross(armSelf, tangent);
+                vec3 frictionTorqueOther = cross(armOther, tangent);
+                float frictionAngular = dot(frictionTorqueSelf, inertiaSelf * frictionTorqueSelf) +
+                                        dot(frictionTorqueOther, inertiaOther * frictionTorqueOther);
+                float frictionMass = 1.0 / (totalInverseMass + frictionAngular);
+                float limit = friction * max(lambda, coneLambda);
+                float tangentLambda = clamp(-frictionMass * tangentSpeed * share, -limit, limit);
+                deltaLinear -= tangent * tangentLambda * self.position.w;
+                deltaAngular -= inertiaSelf * cross(armSelf, tangent * tangentLambda);
+            }
+        }
+    }
+
+    self.velocity.xyz += deltaLinear;
+    self.angularVelocity.xyz += deltaAngular;
+    push.bodiesOut.items[i] = self;
+}

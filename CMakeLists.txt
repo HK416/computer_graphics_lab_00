@@ -108,6 +108,9 @@ set(shader_sources
     shaders/fluid_density.comp
     shaders/fluid_integrate.comp
     shaders/fluid_instances.comp
+    shaders/rigid_integrate.comp
+    shaders/rigid_solve.comp
+    shaders/rigid_finish.comp
     shaders/hzb_reduce.comp
     shaders/pathtrace.rgen
     shaders/pathtrace.rmiss
@@ -199,6 +202,7 @@ add_executable(cg_lab
     src/gfx/profiler_math.cpp
     src/gfx/raytracing.cpp
     src/gfx/renderer.cpp
+    src/gfx/rigid_body_gpu.cpp
     src/gfx/shadow_math.cpp
     src/gfx/resources.cpp
     src/gfx/stb_impl.cpp

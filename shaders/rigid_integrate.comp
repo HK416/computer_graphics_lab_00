@@ -1,0 +1,30 @@
+#version 460
+
+#include "rigid_common.glsl"
+
+// 반암시적 오일러 적분. 힘은 중력뿐이다. src/physics/rigid_body.cpp 의 integrate 와 같아야 한다.
+// 반복을 시작하기 전의 속도도 여기서 남긴다. 반발 목표를 그것으로 재야 첫 반복이 튀긴 것을 두 번째
+// 반복이 도로 당겨 오지 않는다.
+layout(local_size_x = 64) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.bodyCount) {
+        return;
+    }
+    RigidBody body = push.bodiesIn.items[i];
+    if (rigidDynamic(body)) {
+        if ((body.flags & RIGID_FLAG_GRAVITY) != 0u) {
+            body.velocity.y += push.gravity * push.dt;
+        }
+        body.position.xyz += body.velocity.xyz * push.dt;
+        vec4 spin = vec4(body.angularVelocity.xyz, 0.0);
+        // 쿼터니언 곱 (spin * rotation). spin 은 실수부가 0 이다.
+        vec4 q = body.rotation;
+        vec4 product = vec4(spin.w * q.xyz + q.w * spin.xyz + cross(spin.xyz, q.xyz), spin.w * q.w - dot(spin.xyz, q.xyz));
+        body.rotation = normalize(q + 0.5 * push.dt * product);
+    }
+    body.preVelocity = body.velocity;
+    body.preAngularVelocity = body.angularVelocity;
+    push.bodiesOut.items[i] = body;
+}

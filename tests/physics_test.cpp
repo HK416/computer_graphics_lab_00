@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -97,6 +98,51 @@ int main() {
         simulate(scene, 3.0F, &jobs);
         assert(std::abs(scene.objects[0].transform.position.y - 1.0F) < 1e-6F && "운동학 상자는 그대로다");
         assert(std::abs(scene.objects[ball].transform.position.y - 1.35F) < 0.02F && "구는 상자 윗면에서 멈춘다");
+    }
+
+    // 쉬는 물체는 떨지 않아야 한다. 위치 보정이 과하면 매 스텝 튀어 올랐다 도로 떨어진다.
+    {
+        scene::Scene scene;
+        addFloor(scene);
+        uint32_t ball = addSphere(scene, glm::vec3{0.0F, 1.0F, 0.0F}, 0.5F, 0.0F);
+        simulate(scene, 3.0F, &jobs);
+        float lowest = 1.0e9F;
+        float highest = -1.0e9F;
+        for (int i = 0; i < 120; ++i) {
+            physics::stepRigidBodies(scene, STEP, &jobs);
+            float y = scene.objects[ball].transform.position.y;
+            lowest = std::min(lowest, y);
+            highest = std::max(highest, y);
+        }
+        std::printf("  쉬는 구 진폭 %.6f\n", static_cast<double>(highest - lowest));
+        assert(highest - lowest < 0.002F && "쉬는 구는 떨지 않아야 한다");
+    }
+
+    // 동적 상자를 쌓으면 서로 위에 선다. 상자 대 평면과 상자 대 상자를 함께 본다.
+    {
+        scene::Scene scene;
+        addFloor(scene);
+        std::array<uint32_t, 3> boxes{};
+        for (int i = 0; i < 3; ++i) {
+            scene::Object object;
+            object.name = "상자";
+            object.transform.position = glm::vec3{0.0F, 0.3F + static_cast<float>(i) * 0.55F, 0.0F};
+            scene.objects.push_back(std::move(object));
+            auto index = static_cast<uint32_t>(scene.objects.size() - 1);
+            scene::RigidBody body;
+            body.shape = scene::ColliderShape::BOX;
+            body.halfExtents = glm::vec3{0.25F};
+            body.restitution = 0.05F;
+            scene.attachRigidBody(index, body);
+            boxes[static_cast<size_t>(i)] = index;
+        }
+        simulate(scene, 3.0F, &jobs);
+        for (int i = 0; i < 3; ++i) {
+            float y = scene.objects[boxes[static_cast<size_t>(i)]].transform.position.y;
+            float expected = 0.25F + static_cast<float>(i) * 0.5F;
+            std::printf("  상자 %d: y=%.3f (기대 %.3f)\n", i, static_cast<double>(y), static_cast<double>(expected));
+            assert(std::abs(y - expected) < 0.06F && "쌓은 상자는 서로 위에 서 있어야 한다");
+        }
     }
 
     // 같은 질량의 정면 충돌은 운동량을 보존한다.

@@ -105,6 +105,8 @@ enum class ColliderShape : uint32_t {
 // 강체 부품. 재생 중에 physics 가 세계 공간에서 적분해 오브젝트 변환에 되돌려 쓴다. 운동학 물체는
 // 힘을 받지 않고 다른 물체만 밀어낸다. 평면은 늘 운동학으로 다룬다.
 struct RigidBody {
+    // 어디서 풀지. AUTO 는 CPU 를 쓴다. GPU 솔버는 Jacobi 라 CPU 의 순차 임펄스와 수치가 다르다.
+    SimulationBackend backend = SimulationBackend::AUTO;
     ColliderShape shape = ColliderShape::SPHERE;
     float mass = 1.0F;
     bool useGravity = true;

@@ -185,6 +185,13 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `GpuMesh` `GpuMeshLod` `GpuMeshlet` `GpuMaterial` `GpuInstance` (`src/gfx/geometry.h`) | 동명 구조체 (`scene_types.glsl`) |
 | `GpuLight` (`src/gfx/renderer.h`) | `Light` (`scene_types.glsl`) |
 | `GpuFluidCollider` `GpuFluidParams` `FluidPushConstants` (`src/gfx/fluid.h`) | `FluidCollider` `FluidParams` `FluidPushConstants` (`shaders/fluid_common.glsl`) |
+| `GpuRigidBody` `RigidPushConstants` (`src/gfx/rigid_body_gpu.h`) | `RigidBody` `RigidPushConstants` (`shaders/rigid_common.glsl`) |
+| `collideBoxBox` 등 접촉 생성 (`src/physics/rigid_body.cpp`) | `rigidCollide` (`shaders/rigid_common.glsl`) |
+| `physics::MAX_MANIFOLD_POINTS` (`src/physics/rigid_body.h`) | `RIGID_MAX_MANIFOLD` (`rigid_common.glsl`) |
+
+강체 솔버 상수(`GRAVITY` `POSITION_CORRECTION` `PENETRATION_SLOP` `RESTITUTION_THRESHOLD`
+`POSITION_ITERATIONS`)는 `src/physics/rigid_body.h` 한 곳에만 두고 GPU 쪽은 푸시 상수로 실어 보낸다.
+두 벌로 두면 백엔드를 바꿀 때 거동이 갈린다.
 | `scene::ColliderShape` (`src/scene/scene.h`) | `FLUID_COLLIDER_*` (`fluid_common.glsl`) |
 
 | `Options::debugMode`, `Renderer::debugMode` | `DEBUG_MODE_*` (`scene_types.glsl`) |

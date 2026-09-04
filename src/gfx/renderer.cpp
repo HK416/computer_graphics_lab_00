@@ -403,6 +403,7 @@ Renderer::Renderer(
     createSsaoPipelines();
     environment = std::make_unique<EnvironmentMap>(context, bindless);
     fluid = std::make_unique<FluidSimulator>(context, bindless, jobs);
+    rigidBodies = std::make_unique<RigidBodySimulator>(context, bindless);
 
     VkSemaphoreTypeCreateInfo timelineInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
     timelineInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -2750,6 +2751,8 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
 }
 
 FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene) {
+    // 강체 GPU 솔버는 이번 프레임 인스턴스에 영향을 주지 않는다. 결과는 몇 프레임 뒤 되읽기로 들어온다.
+    rigidBodies->prepare(scene, rigidSteps, rigidStepSeconds);
     // 유체 입자는 오브젝트 인스턴스 뒤에 이어 붙으므로 그만큼 더 잡는다. 내장 구가 없으면 그리지 않는다.
     fluid->setParticleLimit(fluidParticleLimit);
     bool fluidActive = fluid->prepare(scene, &scene != lastScene);
@@ -3908,6 +3911,14 @@ void Renderer::recordCommands(Frame& frame,
 
     // 변형 정점은 그림자·장면·광선 경로가 모두 읽으므로 맨 먼저 만든다.
     recordSkinPass(commandBuffer, frame);
+
+    // 강체 GPU 솔버. 아무 것도 읽지 않으므로 순서는 자유롭지만, 되읽기 복사가 프레임 앞쪽에 있어야
+    // 큐가 비는 동안 옮겨진다.
+    if (rigidBodies->bodyCount() > 0) {
+        uint32_t rigidZone = frameProfiler.begin("강체", commandBuffer);
+        rigidBodies->record(commandBuffer, frameIndex);
+        frameProfiler.end(rigidZone, commandBuffer);
+    }
 
     // 유체 입자 인스턴스도 같은 이유로 그림자보다 앞이다. 광선 기능이 켜져 있고 구의 하위 구조가 있으면
     // 상위 가속 구조 인스턴스도 함께 써 둔다. ensureBottomLevel 은 drawFrame 이 이미 불렀다.

@@ -947,6 +947,37 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         ImGui::EndDisabled();
         ImGui::SliderFloat("반발", &body.restitution, 0.0F, 1.0F, "%.2f");
         ImGui::SliderFloat("마찰", &body.friction, 0.0F, 1.0F, "%.2f");
+
+        constexpr std::array<const char*, 3> RIGID_BACKENDS{"자동", "CPU", "GPU"};
+        // 컴퓨트 파이프라인을 만들지 못한 장치에서는 GPU 를 고를 수 없다.
+        bool rigidGpuUsable = renderer.rigidGpuAvailable();
+        if (ImGui::BeginCombo("백엔드", RIGID_BACKENDS[static_cast<size_t>(body.backend)])) {
+            for (uint32_t i = 0; i < RIGID_BACKENDS.size(); ++i) {
+                bool usable = rigidGpuUsable || i != static_cast<uint32_t>(scene::SimulationBackend::GPU);
+                ImGui::BeginDisabled(!usable);
+                if (ImGui::Selectable(RIGID_BACKENDS[i], static_cast<uint32_t>(body.backend) == i)) {
+                    body.backend = static_cast<scene::SimulationBackend>(i);
+                }
+                ImGui::EndDisabled();
+                if (!usable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    ImGui::SetTooltip("이 장치에서는 강체 컴퓨트 파이프라인을 만들지 못했다");
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("자동은 CPU 다. GPU 는 접촉을 Jacobi 로 풀어 CPU 와 수치가 다르고,\n"
+                              "결과가 몇 프레임 늦게 반영된다.\n"
+                              "두 백엔드는 서로 부딪히지 않으므로 한 장면에서 섞지 않는다");
+        }
+        if (body.backend == scene::SimulationBackend::GPU) {
+            ImGui::TextDisabled("Jacobi %u 회, GPU 강체 %u 개. 쌓인 물체가 CPU 보다 물렁하다",
+                                gfx::RIGID_SOLVER_ITERATIONS,
+                                renderer.rigidGpuBodyCount());
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("CPU 백엔드 강체와는 서로 부딪히지 않는다. 바닥도 GPU 로 맞춰야 한다");
+            }
+        }
         if (active.simulating) {
             ImGui::Text("속도 (%.2f, %.2f, %.2f)", body.velocity.x, body.velocity.y, body.velocity.z);
         }
@@ -2067,11 +2098,14 @@ void Editor::startSimulation(scene::SceneManager& scenes) {
     playSnapshot = active.capture();
     playSceneIndex = scenes.current();
     active.simulating = true;
+    // GPU 솔버는 상태를 제 버퍼에 들고 있다. 지난 재생에서 남은 것을 버리고 장면 값으로 다시 시작한다.
+    renderer.invalidateRigidBodies();
 }
 
 void Editor::stopSimulation(scene::SceneManager& scenes) {
     scene::Scene& active = scenes.active();
     active.simulating = false;
+    renderer.invalidateRigidBodies();
     // 시작할 때 떠 둔 장면으로 되돌린다. 다른 장면으로 옮긴 채 멈췄으면 그 장면은 건드리지 않는다.
     if (playSnapshot && playSceneIndex == scenes.current()) {
         active.restore(*playSnapshot);

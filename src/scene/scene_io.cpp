@@ -181,7 +181,8 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
     // 강체는 설정만 적고 속도는 적지 않는다. 재생을 멈추면 어차피 되돌아가는 상태다.
     json rigidBodies = json::array();
     for (const RigidBody& body : scene.rigidBodies) {
-        rigidBodies.push_back({{"shape", SHAPE_NAMES[static_cast<size_t>(body.shape)]},
+        rigidBodies.push_back({{"backend", BACKEND_NAMES[static_cast<size_t>(body.backend)]},
+                               {"shape", SHAPE_NAMES[static_cast<size_t>(body.shape)]},
                                {"mass", body.mass},
                                {"useGravity", body.useGravity},
                                {"kinematic", body.kinematic},
@@ -340,6 +341,7 @@ SceneFile readScene(const std::string& text) {
 
     for (const json& entry : document.value("rigidBodies", json::array())) {
         RigidBody body;
+        body.backend = toBackend(entry.value("backend", std::string{"auto"}));
         body.shape = toShape(entry.value("shape", std::string{"sphere"}));
         body.mass = entry.value("mass", body.mass);
         body.useGravity = entry.value("useGravity", body.useGravity);
