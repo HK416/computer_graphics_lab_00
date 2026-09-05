@@ -136,15 +136,16 @@ void Context::retireDeferred(std::function<void()> destroy) {
 }
 
 void Context::collectRetired(uint64_t completedFrame) {
-    size_t kept = 0;
+    // 제자리 압축(retired[kept++] = std::move(entry))은 앞에 지운 것이 없으면 자기 자신에게 move 대입이
+    // 되는데, libc++ 의 std::function 은 그때 비워진다. 다음 수거가 빈 함수를 불러 bad_function_call
+    // 로 죽었다. 파괴와 제거를 두 번에 나눠 원소가 스스로에게 옮겨지는 일을 없앤다.
     for (RetiredResource& entry : retiredResources) {
         if (entry.frame <= completedFrame) {
             entry.destroy();
-        } else {
-            retiredResources[kept++] = std::move(entry);
         }
     }
-    retiredResources.resize(kept);
+    std::erase_if(retiredResources,
+                  [completedFrame](const RetiredResource& entry) { return entry.frame <= completedFrame; });
 }
 
 Image createImage(Context& context, const ImageDesc& desc, const char* debugName) {
