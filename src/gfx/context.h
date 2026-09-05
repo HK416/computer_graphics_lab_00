@@ -42,6 +42,10 @@ struct Capabilities {
     bool depthClamp = false;
     // 1 화소보다 굵은 선을 그릴 수 있는지. 콜라이더 표시가 굵게 그리는 데 쓴다.
     bool wideLines = false;
+    // 정점 셰이더가 gl_DrawID 를 읽을 수 있는지. MoltenVK 는 shaderDrawParameters 를 지원한다고
+    // 보고하지만 MSL 에 DrawIndex 가 없어 SPIR-V 변환에서 죽는다. 없으면 meshlet 디버그 뷰가 메쉬
+    // 단위로 뭉개진다.
+    bool shaderDrawIndex = false;
     uint32_t subgroupSize = 0;
 };
 

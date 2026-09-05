@@ -147,6 +147,7 @@ endforeach()
 # 광선 질의 그림자는 SPIR-V 능력을 요구해 런타임 분기가 안 된다. 같은 소스를 정의만 바꿔 한 벌 더
 # 컴파일하고, 하드웨어가 지원할 때만 그 파이프라인을 만든다.
 set(shader_variants
+    "shaders/mesh.vert|mesh_nodrawid.vert.spv|NO_DRAW_ID"
     "shaders/mesh.frag|mesh_rq.frag.spv|RAY_QUERY_SHADOWS"
     "shaders/mesh_oit.frag|mesh_oit_rq.frag.spv|RAY_QUERY_SHADOWS")
 

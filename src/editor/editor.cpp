@@ -1871,10 +1871,12 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         bool rayTracing = caps.rayTracingPipeline;
         bool drawIndirectCount = caps.drawIndirectCount;
         bool minmax = caps.samplerFilterMinmax;
+        bool drawIndex = caps.shaderDrawIndex;
         ImGui::Checkbox("mesh shader", &meshShader);
         ImGui::Checkbox("레이트레이싱 파이프라인", &rayTracing);
         ImGui::Checkbox("drawIndirectCount", &drawIndirectCount);
         ImGui::Checkbox("samplerFilterMinmax", &minmax);
+        ImGui::Checkbox("gl_DrawID (없으면 meshlet 디버그 뷰가 메쉬 단위)", &drawIndex);
         ImGui::EndDisabled();
     }
     ImGui::End();

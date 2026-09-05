@@ -2490,7 +2490,8 @@ void Renderer::createMeshPipelines() {
     layoutInfo.pPushConstantRanges = &pushConstantRange;
     VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &meshPipelineLayout));
 
-    VkShaderModule vertexModule = createShaderModule(context.device, "mesh.vert.spv");
+    VkShaderModule vertexModule =
+        createShaderModule(context.device, context.caps.shaderDrawIndex ? "mesh.vert.spv" : "mesh_nodrawid.vert.spv");
     VkShaderModule opaqueFragment = createShaderModule(context.device, "mesh.frag.spv");
     VkShaderModule oitFragment = createShaderModule(context.device, "mesh_oit.frag.spv");
 

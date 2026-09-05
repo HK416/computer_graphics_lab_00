@@ -265,6 +265,8 @@ Capabilities queryCapabilities(const FeatureChain& f,
     caps.pipelineStatistics = f.features2.features.pipelineStatisticsQuery == VK_TRUE;
     caps.depthClamp = f.features2.features.depthClamp == VK_TRUE;
     caps.wideLines = f.features2.features.wideLines == VK_TRUE;
+    // portability_subset 을 내거는 구현(MoltenVK)은 gl_DrawID 를 MSL 로 옮기지 못한다.
+    caps.shaderDrawIndex = !contains(extensions, "VK_KHR_portability_subset");
     caps.shaderFloat16 = f.v12.shaderFloat16 == VK_TRUE;
     // FSR 셰이더가 SPIR-V Int16 능력을 선언한다. 켜 두지 않으면 셰이더 모듈 생성이 거부된다.
     caps.shaderInt16 = f.features2.features.shaderInt16 == VK_TRUE && f.v11.storageBuffer16BitAccess == VK_TRUE;

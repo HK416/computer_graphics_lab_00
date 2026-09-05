@@ -778,6 +778,11 @@ DamagedHelmet 을 렌더 배율 0.5, 고정 LOD 로 그리고 4배 초표본 기
 소프트웨어 폴백 경로는 제공하지 않는다. 예를 들어 MoltenVK 에는 `VK_EXT_mesh_shader` 와
 `VK_KHR_ray_tracing_pipeline` 이 없으므로 macOS 에서는 고전 파이프라인 경로만 사용할 수 있다.
 
+예외 하나는 `gl_DrawID` 다. MoltenVK 는 `shaderDrawParameters` 를 지원한다고 보고하지만 MSL 에
+`DrawIndex` 가 없어 SPIR-V 변환에서 죽는다. `VK_KHR_portability_subset` 을 내거는 장치에서는 정점
+셰이더를 `gl_DrawID` 없는 변종(`mesh_nodrawid.vert.spv`)으로 바꿔 끼운다. 그 값은 meshlet·LOD
+디버그 뷰에만 쓰이므로 렌더 결과는 같고, 두 디버그 뷰가 메쉬 단위로 뭉개진다.
+
 **시뮬레이션은 예외다.** 그 원칙은 «어떻게 보이는가» 를 정하는 렌더 경로에 대한 것이고, 시뮬레이션은
 어디서 풀든 결과가 같아야 하는 계산이라 사용자가 백엔드를 고른다. 유체는 GPU 컴퓨트와 CPU SPH 를 모두
 갖추고 부품마다 고를 수 있으며, `자동` 은 GPU 를 쓰되 만들지 못하면 CPU 로 내려간다. 강체도 CPU 순차

@@ -30,5 +30,12 @@ void main() {
     outMaterialIndex = mesh.materialIndex;
     // 정점은 meshlet 끼리 공유하므로 정점으로는 meshlet 을 모른다. 명령 하나가 meshlet 하나이니
     // 명령 번호로 찾는다. gl_DrawID 는 호출마다 0 부터라 버킷 구간의 시작을 더한다.
+#ifdef NO_DRAW_ID
+    // MoltenVK 변종. gl_DrawID 가 없어 명령별 meshlet 을 못 찾으니 메쉬의 첫 meshlet 으로 대신한다.
+    // ponytail: meshlet·LOD 디버그 뷰가 메쉬 단위로 뭉개진다. 제대로 하려면 firstInstance 상위
+    // 비트에 명령 번호를 실어 gl_BaseInstance 로 읽어야 한다.
+    outMeshletIndex = mesh.meshletOffset;
+#else
     outMeshletIndex = pushConstants.drawMeshlets.items[pushConstants.meshletGroupBase + gl_DrawID];
+#endif
 }
