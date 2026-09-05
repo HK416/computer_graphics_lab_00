@@ -177,6 +177,8 @@ void Application::registerPlugins() {
 Application::~Application() {
     // 백그라운드 해석이 남아 있으면 워커 큐가 살아 있을 때 먼저 끝낸다. 결과는 버린다.
     pendingLoad.reset();
+    // 플러그인이 든 GPU 자원(강체 솔버 등)은 컨텍스트보다 먼저 놓아야 한다. run() 끝의 waitIdle 뒤다.
+    plugins.clear();
     // 렌더러가 쓰는 서피스는 윈도우보다 먼저 파괴되어야 한다.
     editorUi.reset();
     renderer.reset();

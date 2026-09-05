@@ -201,6 +201,11 @@ public:
     // 기동 시 고른 하드웨어 프로파일과 그 세기. «하드웨어» 패널이 판정 근거를 그대로 보여 준다.
     gfx::HardwareProfile hardwareProfile;
     gfx::AutoTune autoTune = gfx::AutoTune::SAFE;
+    // 강체 GPU 솔버 상태. 물리 플러그인이 프레임마다 채운다. 인스펙터가 «지금 도는 백엔드»를 보여 준다.
+    struct RigidStatus {
+        bool gpuAvailable = false;
+        uint32_t gpuBodies = 0;
+    } rigidStatus;
 };
 
 } // namespace editor

@@ -26,6 +26,7 @@
 #include "gfx/geometry.h"
 #include "gfx/profiler.h"
 #include "gfx/renderer.h"
+#include "gfx/rigid_body_gpu.h"
 #include "gfx/shadow_math.h"
 #include "scene/scene.h"
 
@@ -977,7 +978,7 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
 
         constexpr std::array<const char*, 3> RIGID_BACKENDS{"자동", "CPU", "GPU"};
         // 컴퓨트 파이프라인을 만들지 못한 장치에서는 GPU 를 고를 수 없다.
-        bool rigidGpuUsable = renderer.rigidGpuAvailable();
+        bool rigidGpuUsable = rigidStatus.gpuAvailable;
         if (ImGui::BeginCombo("백엔드", RIGID_BACKENDS[static_cast<size_t>(body.backend)])) {
             for (uint32_t i = 0; i < RIGID_BACKENDS.size(); ++i) {
                 bool usable = rigidGpuUsable || i != static_cast<uint32_t>(scene::SimulationBackend::GPU);
@@ -1000,7 +1001,7 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         if (body.backend == scene::SimulationBackend::GPU) {
             ImGui::TextDisabled("Jacobi %u 회, GPU 강체 %u 개. 쌓인 물체가 CPU 보다 물렁하다",
                                 gfx::RIGID_SOLVER_ITERATIONS,
-                                renderer.rigidGpuBodyCount());
+                                rigidStatus.gpuBodies);
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("CPU 백엔드 강체와는 서로 부딪히지 않는다. 바닥도 GPU 로 맞춰야 한다");
             }
@@ -2159,15 +2160,13 @@ void Editor::startSimulation(scene::SceneManager& scenes) {
     }
     playSnapshot = active.capture();
     playSceneIndex = scenes.current();
+    // GPU 강체 솔버는 다음 프레임 머리에서 이 변화를 보고 제 상태를 버린다(PhysicsPlugin).
     active.simulating = true;
-    // GPU 솔버는 상태를 제 버퍼에 들고 있다. 지난 재생에서 남은 것을 버리고 장면 값으로 다시 시작한다.
-    renderer.invalidateRigidBodies();
 }
 
 void Editor::stopSimulation(scene::SceneManager& scenes) {
     scene::Scene& active = scenes.active();
     active.simulating = false;
-    renderer.invalidateRigidBodies();
     // 시작할 때 떠 둔 장면으로 되돌린다. 다른 장면으로 옮긴 채 멈췄으면 그 장면은 건드리지 않는다.
     if (playSnapshot && playSceneIndex == scenes.current()) {
         active.restore(*playSnapshot);
