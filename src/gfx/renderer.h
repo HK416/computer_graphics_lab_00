@@ -20,6 +20,7 @@
 #include "gfx/lod_network.h"
 #include "gfx/profiler.h"
 #include "gfx/raytracing.h"
+#include "gfx/render_graph.h"
 #include "gfx/resources.h"
 #include "gfx/rigid_body_gpu.h"
 #include "gfx/shadow_math.h"
@@ -575,7 +576,6 @@ private:
     VkExtent2D currentDisplayExtent{};
     VkExtent2D currentRenderExtent{};
     uint64_t generation = 0;
-    bool oitTargetsValid = false;
     std::function<void(VkCommandBuffer)> uiCallback;
 
     // 오브젝트 인덱스 -> 인스턴스 슬롯. 그리지 않는 오브젝트는 INVALID_INSTANCE_SLOT.
@@ -618,6 +618,8 @@ private:
     uint64_t lastShadowSettings = 0;
 
     GpuProfiler frameProfiler;
+    // 프레임의 패스 목록. recordCommands 가 프레임마다 다시 짠다.
+    RenderGraph graph;
 
     std::array<Frame, FRAMES_IN_FLIGHT> frames{};
     // 표시 완료 세마포어는 재사용 충돌을 피하려고 스왑체인 이미지마다 하나씩 둔다.

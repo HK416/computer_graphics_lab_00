@@ -208,6 +208,7 @@ add_executable(cg_lab
     src/gfx/profiler.cpp
     src/gfx/profiler_math.cpp
     src/gfx/raytracing.cpp
+    src/gfx/render_graph.cpp
     src/gfx/renderer.cpp
     src/gfx/rigid_body_gpu.cpp
     src/gfx/shadow_math.cpp
