@@ -1,0 +1,26 @@
+#version 460
+
+#include "rigid_common.glsl"
+
+// 광역 검사용 해시 격자를 짓는다. 물체마다 자기 셀의 버킷에 번호를 원자 카운터로 밀어 넣는다. 평면은
+// 무한이라 격자에 넣지 않고 push.planes 목록으로 따로 돈다. 스텝마다 적분 뒤 한 번 짓는다.
+//
+// ponytail: 버킷 용량(RIGID_CELL_CAPACITY)을 넘는 물체는 이웃 검색에서 빠진다. CPU 는 계수 정렬이라
+// 안 잃는다. 작은 물체 수십 개가 큰 물체 옆 한 셀에 몰리면 갈린다. 그때는 접두합으로 용량을 없앤다.
+layout(local_size_x = 64) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.bodyCount) {
+        return;
+    }
+    RigidBody body = push.bodiesIn.items[i];
+    if (body.shape == RIGID_SHAPE_PLANE) {
+        return;
+    }
+    uint cell = spatialHash(spatialCell(body.position.xyz, push.cellSize), push.cellCount);
+    uint slot = atomicAdd(push.cellCounts.items[cell], 1u);
+    if (slot < RIGID_CELL_CAPACITY) {
+        push.cellBodies.items[cell * RIGID_CELL_CAPACITY + slot] = i;
+    }
+}

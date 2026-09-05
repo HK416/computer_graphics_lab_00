@@ -31,13 +31,13 @@ void main() {
     vec4 selfVelocity = push.velocitiesIn.items[i];
     vec3 velocity = selfVelocity.xyz;
     float pressure = selfVelocity.w;
-    ivec3 cell = fluidCell(position, h);
+    ivec3 cell = spatialCell(position, h);
 
     vec3 force = vec3(0.0);
     for (int dz = -1; dz <= 1; ++dz) {
         for (int dy = -1; dy <= 1; ++dy) {
             for (int dx = -1; dx <= 1; ++dx) {
-                uint bucket = fluidHash(cell + ivec3(dx, dy, dz), params.lattice.w);
+                uint bucket = spatialHash(cell + ivec3(dx, dy, dz), params.lattice.w);
                 uint count = min(push.cellCounts.items[bucket], FLUID_CELL_CAPACITY);
                 for (uint k = 0u; k < count; ++k) {
                     uint j = push.cellParticles.items[bucket * FLUID_CELL_CAPACITY + k];

@@ -34,11 +34,11 @@ void main() {
     float radiusSq = radius * radius;
     float total = 0.0;
 
-    ivec3 base = fluidCell(point, params.smoothingRadius);
+    ivec3 base = spatialCell(point, params.smoothingRadius);
     for (int z = -1; z <= 1; ++z) {
         for (int y = -1; y <= 1; ++y) {
             for (int x = -1; x <= 1; ++x) {
-                uint bucket = fluidHash(base + ivec3(x, y, z), params.lattice.w);
+                uint bucket = spatialHash(base + ivec3(x, y, z), params.lattice.w);
                 uint count = min(push.cellCounts.items[bucket], FLUID_CELL_CAPACITY);
                 for (uint i = 0u; i < count; ++i) {
                     uint other = push.cellParticles.items[bucket * FLUID_CELL_CAPACITY + i];

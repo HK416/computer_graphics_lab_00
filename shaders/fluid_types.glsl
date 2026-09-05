@@ -15,6 +15,7 @@
 #define FLUID_SURFACE_GROUP_SIZE 4
 
 #include "collider_shapes.glsl"
+#include "spatial_hash.glsl"
 
 // scene::ColliderShape 와 같은 번호. collider_shapes.glsl 이 정의를 갖는다.
 #define FLUID_COLLIDER_SPHERE COLLIDER_SHAPE_SPHERE
@@ -116,15 +117,6 @@ layout(buffer_reference, scalar) writeonly buffer TlasInstanceBuffer {
 };
 
 // PI 는 pbr.glsl 의 것을 쓴다. 여기서 매크로로 다시 정의하면 그쪽 상수 선언과 부딪힌다.
-
-ivec3 fluidCell(vec3 position, float h) {
-    return ivec3(floor(position / h));
-}
-
-uint fluidHash(ivec3 cell, uint cellCount) {
-    uint hashed = uint(cell.x) * 73856093u ^ uint(cell.y) * 19349663u ^ uint(cell.z) * 83492791u;
-    return hashed & (cellCount - 1u);
-}
 
 // Müller 2003 커널. poly6 는 밀도, spiky 기울기는 압력, 점성 라플라시안은 점성에 쓴다.
 float poly6(float r2, float h) {

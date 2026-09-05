@@ -13,7 +13,7 @@ void main() {
     }
     FluidParams params = push.params.item;
     vec3 position = push.positionsIn.items[i].xyz;
-    uint cell = fluidHash(fluidCell(position, params.smoothingRadius), params.lattice.w);
+    uint cell = spatialHash(spatialCell(position, params.smoothingRadius), params.lattice.w);
     uint slot = atomicAdd(push.cellCounts.items[cell], 1u);
     if (slot < FLUID_CELL_CAPACITY) {
         push.cellParticles.items[cell * FLUID_CELL_CAPACITY + slot] = i;

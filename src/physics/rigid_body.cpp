@@ -1,7 +1,7 @@
 #include "physics/rigid_body.h"
 
 #include <algorithm>
-#include <atomic>
+#include <bit>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -12,6 +12,7 @@
 
 #include "core/job_system.h"
 #include "physics/collider_shapes.h"
+#include "physics/spatial_hash.h"
 #include "scene/scene.h"
 
 namespace physics {
@@ -686,6 +687,119 @@ void integrate(RigidBodyState& body, float dt) {
 
 } // namespace
 
+void collectPairs(const std::vector<RigidBodyState>& bodies,
+                  core::JobSystem* jobs,
+                  std::vector<std::pair<uint32_t, uint32_t>>& pairs) {
+    pairs.clear();
+    auto count = static_cast<uint32_t>(bodies.size());
+    if (count < 2) {
+        return;
+    }
+
+    // 셀은 가장 큰 물체 둘이 닿는 거리다. 그러면 닿을 수 있는 짝은 반드시 이웃 27 셀 안에 있다.
+    // 평면은 반지름이 뜻이 없어 격자 밖 목록으로 뺀다.
+    float maxRadius = 0.0F;
+    std::vector<uint32_t> planes;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (bodies[i].shape == scene::ColliderShape::PLANE) {
+            planes.push_back(i);
+        } else {
+            maxRadius = std::max(maxRadius, bodies[i].boundingRadius);
+        }
+    }
+    float cellSize = std::max(2.0F * maxRadius, 1.0e-3F);
+    uint32_t cellCount = std::clamp(std::bit_ceil(count * 2U), 64U, 65536U);
+
+    std::vector<glm::ivec3> cellCoord(count);
+    std::vector<uint32_t> cellOf(count);
+    forRange(jobs, count, [&](uint32_t begin, uint32_t end) {
+        for (uint32_t i = begin; i < end; ++i) {
+            cellCoord[i] = spatialCell(bodies[i].position, cellSize);
+            cellOf[i] = spatialHash(cellCoord[i], cellCount);
+        }
+    });
+
+    // 계수 정렬. 용량이 없어 넘칠 일이 없고, 번호 오름차순으로 넣어 순서가 워커 수와 무관하다.
+    std::vector<uint32_t> cellStart(static_cast<size_t>(cellCount) + 1, 0);
+    for (uint32_t i = 0; i < count; ++i) {
+        ++cellStart[cellOf[i] + 1];
+    }
+    for (uint32_t cell = 0; cell < cellCount; ++cell) {
+        cellStart[cell + 1] += cellStart[cell];
+    }
+    std::vector<uint32_t> sorted(count);
+    {
+        std::vector<uint32_t> cursor(cellStart.begin(), cellStart.end() - 1);
+        for (uint32_t i = 0; i < count; ++i) {
+            sorted[cursor[cellOf[i]]++] = i;
+        }
+    }
+
+    // i 의 후보 j 를 순서대로 방문한다. 버킷은 해시 충돌로 다른 셀의 물체도 담으므로 실제 셀을 견줘 자기 셀에서
+    // 만 한 번 잡는다(같은 짝이 두 번 나오면 접촉 풀기의 «같은 짝은 연속» 가정이 깨진다).
+    auto visit = [&](uint32_t i, auto&& emit) {
+        const Body& a = bodies[i];
+        if (a.shape == scene::ColliderShape::PLANE) {
+            return;
+        }
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    glm::ivec3 cell = cellCoord[i] + glm::ivec3{dx, dy, dz};
+                    uint32_t bucket = spatialHash(cell, cellCount);
+                    for (uint32_t k = cellStart[bucket]; k < cellStart[bucket + 1]; ++k) {
+                        uint32_t j = sorted[k];
+                        if (j <= i || cellCoord[j] != cell) {
+                            continue;
+                        }
+                        const Body& b = bodies[j];
+                        if (b.shape == scene::ColliderShape::PLANE || (!isDynamic(a) && !isDynamic(b))) {
+                            continue;
+                        }
+                        float reach = a.boundingRadius + b.boundingRadius;
+                        if (glm::length2(a.position - b.position) > reach * reach) {
+                            continue;
+                        }
+                        emit(j);
+                    }
+                }
+            }
+        }
+    };
+
+    // 두 번 돈다: 개수를 세어 자리를 나눈 뒤 채운다. 원자 카운터 없이도 병렬이고 결과가 결정적이다.
+    std::vector<uint32_t> pairStart(static_cast<size_t>(count) + 1, 0);
+    forRange(jobs, count, [&](uint32_t begin, uint32_t end) {
+        for (uint32_t i = begin; i < end; ++i) {
+            uint32_t found = 0;
+            visit(i, [&](uint32_t) { ++found; });
+            pairStart[i + 1] = found;
+        }
+    });
+    for (uint32_t i = 0; i < count; ++i) {
+        pairStart[i + 1] += pairStart[i];
+    }
+    pairs.resize(pairStart[count]);
+    forRange(jobs, count, [&](uint32_t begin, uint32_t end) {
+        for (uint32_t i = begin; i < end; ++i) {
+            uint32_t cursor = pairStart[i];
+            visit(i, [&](uint32_t j) { pairs[cursor++] = {i, j}; });
+        }
+    });
+
+    // 평면은 동적 물체 전부와 짝이다.
+    for (uint32_t plane : planes) {
+        for (uint32_t j = 0; j < count; ++j) {
+            if (j == plane || !isDynamic(bodies[j])) {
+                continue;
+            }
+            pairs.emplace_back(std::min(plane, j), std::max(plane, j));
+        }
+    }
+    // 순차 임펄스는 순서에 따라 결과가 갈린다. (i, j) 오름차순으로 고정한다.
+    std::sort(pairs.begin(), pairs.end());
+}
+
 void stepRigidBodies(scene::Scene& scene, float dt, core::JobSystem* jobs) {
     if (dt <= 0.0F) {
         return;
@@ -705,31 +819,9 @@ void stepRigidBodies(scene::Scene& scene, float dt, core::JobSystem* jobs) {
         }
     });
 
-    // 3) 광역: 경계 구가 겹치는 짝을 모은다. 미리 잡은 배열에 원자 카운터로 밀어 넣어 잠금이 없다.
-    // ponytail: O(n²) 검사. 수백 개를 넘으면 정렬·스윕으로 바꾼다.
-    auto count = static_cast<uint32_t>(bodies.size());
-    std::vector<std::pair<uint32_t, uint32_t>> pairs(static_cast<size_t>(count) * (count - 1) / 2);
-    std::atomic<uint32_t> pairCount{0};
-    forRange(jobs, count, [&](uint32_t begin, uint32_t end) {
-        for (uint32_t i = begin; i < end; ++i) {
-            const Body& a = bodies[i];
-            for (uint32_t j = i + 1; j < count; ++j) {
-                const Body& b = bodies[j];
-                if (!isDynamic(a) && !isDynamic(b)) {
-                    continue;
-                }
-                bool plane = a.shape == scene::ColliderShape::PLANE || b.shape == scene::ColliderShape::PLANE;
-                if (!plane) {
-                    float reach = a.boundingRadius + b.boundingRadius;
-                    if (glm::length2(a.position - b.position) > reach * reach) {
-                        continue;
-                    }
-                }
-                pairs[pairCount.fetch_add(1, std::memory_order_relaxed)] = {i, j};
-            }
-        }
-    });
-    pairs.resize(pairCount.load(std::memory_order_relaxed));
+    // 3) 광역: 해시 격자로 경계 구가 닿을 수 있는 짝을 모은다.
+    std::vector<std::pair<uint32_t, uint32_t>> pairs;
+    collectPairs(bodies, jobs, pairs);
 
     // 4) 협역: 짝마다 접촉을 만든다. 짝 수가 적어 직렬이다.
     std::vector<Contact> contacts;

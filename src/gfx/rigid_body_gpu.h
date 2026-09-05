@@ -26,6 +26,8 @@ inline constexpr uint32_t RIGID_GROUP_SIZE = 64;
 // 되읽기 버퍼 개수. FRAMES_IN_FLIGHT 보다 하나 많아야 이번 프레임이 덮어쓰기 전에 다 읽은 것을
 // 고를 수 있다. 어긋나면 record 의 static_assert 가 잡는다.
 inline constexpr uint32_t RIGID_READBACK_SLOTS = 3;
+// 광역 격자 버킷 용량. shaders/rigid_common.glsl 의 RIGID_CELL_CAPACITY 와 같아야 한다.
+inline constexpr uint32_t RIGID_CELL_CAPACITY = 64;
 
 // shaders/rigid_common.glsl 의 RigidBody 와 배치가 같아야 한다(scalar).
 struct GpuRigidBody {
@@ -50,14 +52,21 @@ struct RigidPushConstants {
     VkDeviceAddress bodiesIn = 0;
     VkDeviceAddress bodiesOut = 0;
     VkDeviceAddress triangles = 0;
+    // 광역 격자: 버킷 개수·번호 버퍼와 평면 번호 목록.
+    VkDeviceAddress cellCounts = 0;
+    VkDeviceAddress cellBodies = 0;
+    VkDeviceAddress planes = 0;
     uint32_t bodyCount = 0;
     float dt = 0.0F;
     float gravity = -9.81F;
     float positionCorrection = 0.2F;
     float penetrationSlop = 0.005F;
     float restitutionThreshold = 1.0F;
+    uint32_t cellCount = 0;
+    uint32_t planeCount = 0;
+    float cellSize = 1.0F;
 };
-static_assert(sizeof(RigidPushConstants) == 48, "강체 푸시 상수 배치가 셰이더와 어긋난다");
+static_assert(sizeof(RigidPushConstants) == 88, "강체 푸시 상수 배치가 셰이더와 어긋난다");
 
 // 강체 GPU 솔버. CPU 솔버와 같은 함수(physics::collectRigidBodies)로 세계 상태를 펴 컴퓨트로 풀고,
 // 결과를 되읽어 오브젝트 변환에 되쓴다.
@@ -100,6 +109,8 @@ private:
     void createPipelines();
     void reserveBuffers(uint32_t count);
     void reserveTriangles(uint32_t count);
+    // 광역 격자 버퍼. 물체 수로 정한 셀 수가 커질 때만 다시 잡는다.
+    void reserveGrid(uint32_t cellCount);
     // 이번에 모은 상태를 GPU 로 보낼 모습으로 편다.
     void buildUpload();
     // 편집기가 손댄 것이 있는지. 적분이 바꾸는 값(위치·회전·속도)은 오차를 봐주고 나머지는 그대로
@@ -136,6 +147,15 @@ private:
     // 메쉬 콜라이더 삼각형. 장치 버퍼 하나와 프레임마다의 스테이징.
     Buffer triangleBuffer;
     std::array<Buffer, RIGID_READBACK_SLOTS> triangleStagings;
+    // 광역 격자. 셀 크기는 2·최대 경계 반지름(CPU collectPairs 와 같은 규칙), 셀 수는 물체 수의 두 배를 2 의
+    // 거듭제곱으로 올린 것. 평면 번호는 프레임마다 호스트가 쓰는 작은 버퍼로 넘긴다.
+    Buffer cellCountBuffer;
+    Buffer cellBodyBuffer;
+    std::array<Buffer, RIGID_READBACK_SLOTS> planeBuffers;
+    uint32_t gridCellCount = 0;
+    uint32_t gridCapacity = 0;
+    float gridCellSize = 1.0F;
+    std::vector<uint32_t> planeIndices;
     // 슬롯마다 «어느 프레임이 채웠는지»와 «몇 개인지». 프레임이 끝난 슬롯만 읽는다.
     std::array<uint64_t, RIGID_READBACK_SLOTS> readbackFrame{};
     std::array<uint32_t, RIGID_READBACK_SLOTS> readbackCount{};
@@ -147,6 +167,7 @@ private:
     VkPipeline integratePipeline = VK_NULL_HANDLE;
     VkPipeline solvePipeline = VK_NULL_HANDLE;
     VkPipeline finishPipeline = VK_NULL_HANDLE;
+    VkPipeline gridPipeline = VK_NULL_HANDLE;
 };
 
 } // namespace gfx

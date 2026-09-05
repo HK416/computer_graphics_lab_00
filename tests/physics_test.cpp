@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <random>
 #include <vector>
 
 #include <glm/gtc/constants.hpp>
@@ -307,6 +308,85 @@ int main() {
         assert(std::abs(scene.objects[0].transform.position.y - 1.0F) < 1e-6F && "메쉬 콜라이더는 밀리지 않는다");
         assert(std::abs(ballY - 1.25F) < 0.03F && "구는 메쉬 위 반지름 높이에서 멈춘다");
         assert(std::abs(boxY - 1.25F) < 0.03F && "상자는 메쉬 위 반쪽 크기 높이에서 멈춘다");
+    }
+
+    // 광역 격자가 O(n²) 참조와 같은 짝을 내고, 워커 수와 무관하게 같은 순서인지.
+    {
+        std::mt19937 random(1234);
+        std::uniform_real_distribution<float> position(-20.0F, 20.0F);
+        std::uniform_real_distribution<float> radius(0.1F, 1.0F);
+        std::vector<physics::RigidBodyState> bodies;
+        for (int i = 0; i < 300; ++i) {
+            physics::RigidBodyState body;
+            body.shape = i % 3 == 0 ? scene::ColliderShape::SPHERE : scene::ColliderShape::BOX;
+            body.position = glm::vec3{position(random), position(random), position(random)};
+            body.boundingRadius = radius(random);
+            // 열에 하나는 정적이다. 정적끼리는 짝이 아니다.
+            body.inverseMass = i % 10 == 0 ? 0.0F : 1.0F;
+            bodies.push_back(body);
+        }
+        physics::RigidBodyState plane;
+        plane.shape = scene::ColliderShape::PLANE;
+        bodies.push_back(plane);
+
+        std::vector<std::pair<uint32_t, uint32_t>> reference;
+        for (uint32_t i = 0; i < bodies.size(); ++i) {
+            for (uint32_t j = i + 1; j < bodies.size(); ++j) {
+                const physics::RigidBodyState& a = bodies[i];
+                const physics::RigidBodyState& b = bodies[j];
+                if (!physics::isDynamic(a) && !physics::isDynamic(b)) {
+                    continue;
+                }
+                bool planePair = a.shape == scene::ColliderShape::PLANE || b.shape == scene::ColliderShape::PLANE;
+                float reach = a.boundingRadius + b.boundingRadius;
+                if (!planePair && glm::dot(a.position - b.position, a.position - b.position) > reach * reach) {
+                    continue;
+                }
+                reference.emplace_back(i, j);
+            }
+        }
+        std::vector<std::pair<uint32_t, uint32_t>> parallel;
+        std::vector<std::pair<uint32_t, uint32_t>> serial;
+        physics::collectPairs(bodies, &jobs, parallel);
+        physics::collectPairs(bodies, nullptr, serial);
+        assert(!reference.empty());
+        assert(parallel == reference);
+        assert(serial == reference);
+        std::printf("  광역 격자 짝 %zu 개 (참조와 같음)\n", parallel.size());
+    }
+
+    // 상자 더미 192개. 격자가 짝을 놓치면 관통하거나 바닥을 뚫는다.
+    {
+        scene::Scene scene;
+        addFloor(scene);
+        std::vector<uint32_t> boxes;
+        for (int x = 0; x < 8; ++x) {
+            for (int y = 0; y < 3; ++y) {
+                for (int z = 0; z < 8; ++z) {
+                    boxes.push_back(addBody(scene,
+                                            scene::ColliderShape::BOX,
+                                            glm::vec3{static_cast<float>(x) * 1.1F - 3.85F,
+                                                      0.5F + static_cast<float>(y) * 1.05F,
+                                                      static_cast<float>(z) * 1.1F - 3.85F},
+                                            glm::quat{1.0F, 0.0F, 0.0F, 0.0F},
+                                            0.5F,
+                                            glm::vec3{0.5F}));
+                }
+            }
+        }
+        simulate(scene, 2.0F, &jobs);
+        for (uint32_t box : boxes) {
+            assert(scene.objects[box].transform.position.y > 0.4F);
+        }
+        for (size_t a = 0; a < boxes.size(); ++a) {
+            for (size_t b = a + 1; b < boxes.size(); ++b) {
+                glm::vec3 delta =
+                    scene.objects[boxes[a]].transform.position - scene.objects[boxes[b]].transform.position;
+                // 한 변 1 인 상자끼리 중심 거리가 0.9 아래면 서로 깊이 파고든 것이다.
+                assert(glm::dot(delta, delta) > 0.9F * 0.9F);
+            }
+        }
+        std::printf("  상자 192개 더미 2초 뒤 관통 없음\n");
     }
 
     std::printf("강체 물리 자체 점검 통과\n");

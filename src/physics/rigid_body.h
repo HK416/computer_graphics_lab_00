@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include <glm/gtc/quaternion.hpp>
@@ -66,6 +67,13 @@ struct Triangle {
 inline bool isDynamic(const RigidBodyState& body) {
     return body.inverseMass > 0.0F;
 }
+
+// 광역 검사. 경계 구가 닿을 수 있는 짝 (i, j), i < j 를 (i, j) 오름차순으로 낸다. 둘 다 정적인 짝은 빼고,
+// 평면은 무한이라 동적 물체 전부와 짝을 이룬다. 균일 해시 격자(셀 = 2·최대 경계 반지름, 계수 정렬)라
+// O(n) 이고 워커 수와 무관하게 같은 순서다. GPU 는 shaders/rigid_grid.comp 가 같은 격자를 짓는다.
+void collectPairs(const std::vector<RigidBodyState>& bodies,
+                  core::JobSystem* jobs,
+                  std::vector<std::pair<uint32_t, uint32_t>>& pairs);
 
 // backend 가 붙은 강체 부품을 모아 세계 공간 상태로 편다. AUTO 는 하드웨어가 정한 기본값이므로
 // 부르는 쪽이 CPU 또는 GPU 로 풀어 넘긴다. 메쉬 콜라이더의 삼각형은 세계 공간으로 옮겨 triangles 에

@@ -18,18 +18,11 @@ void main() {
     }
 
     vec3 correction = vec3(0.0);
-    for (uint j = 0u; j < push.bodyCount; ++j) {
-        if (j == i) {
-            continue;
-        }
+    uint neighbors[RIGID_MAX_NEIGHBORS];
+    uint neighborCount = rigidGatherNeighbors(i, self.position.xyz, self.angularVelocity.w, neighbors);
+    for (uint n = 0u; n < neighborCount; ++n) {
+        uint j = neighbors[n];
         RigidBody other = push.bodiesIn.items[j];
-        if (other.shape != RIGID_SHAPE_PLANE) {
-            vec3 delta = other.position.xyz - self.position.xyz;
-            float reach = self.angularVelocity.w + other.angularVelocity.w;
-            if (dot(delta, delta) > reach * reach) {
-                continue;
-            }
-        }
         RigidManifold manifold = rigidCollide(self, other);
         float totalInverseMass = self.position.w + other.position.w;
         if (manifold.count == 0 || totalInverseMass <= 0.0) {

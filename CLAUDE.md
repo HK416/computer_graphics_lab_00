@@ -217,6 +217,8 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `collideBoxBox` 등 접촉 생성 (`src/physics/rigid_body.cpp`) | `rigidCollide` (`shaders/rigid_common.glsl`) |
 | 모양 기하 `closestOn*Local` `probePointLocal` `closestOnTriangleSurface` (`src/physics/collider_shapes.h`) | 동명 함수 (`shaders/collider_shapes.glsl`) |
 | `physics::MAX_MANIFOLD_POINTS` (`src/physics/rigid_body.h`) | `RIGID_MAX_MANIFOLD` (`rigid_common.glsl`) |
+| `spatialCell` `spatialHash` (`src/physics/spatial_hash.h`), 강체 광역 셀 규칙 (`collectPairs`·`RigidBodySimulator::buildUpload`) | 동명 함수 (`shaders/spatial_hash.glsl`), `rigid_grid.comp`·`rigidGatherNeighbors` |
+| `gfx::RIGID_CELL_CAPACITY` (`src/gfx/rigid_body_gpu.h`) | `RIGID_CELL_CAPACITY` (`rigid_common.glsl`) |
 | `FluidSurfacePushConstants` (`src/gfx/fluid.h`) | 동명 블록 (`shaders/fluid_surface_common.glsl`) |
 | `GpuFluidSurfaceInfo` `FLUID_FLAG_*` `FLUID_SURFACE_CUSTOM_INDEX` `FLUID_SURFACE_RAY_MASK` (`src/gfx/fluid.h`) | `FluidSurfaceInfo` `FLUID_FLAG_*` `FLUID_SURFACE_*` (`shaders/fluid_types.glsl`) |
 | `PathTracePushConstants` (`src/gfx/raytracing.cpp`) | 동명 블록 (`shaders/pathtrace_common.glsl`) — 128 바이트 한도라 작은 값은 16비트 둘씩 묶는다 |

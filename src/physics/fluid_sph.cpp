@@ -11,6 +11,7 @@
 
 #include "core/job_system.h"
 #include "physics/collider_shapes.h"
+#include "physics/spatial_hash.h"
 
 namespace physics {
 
@@ -19,17 +20,6 @@ namespace {
 constexpr float PI = std::numbers::pi_v<float>;
 // 입자가 이보다 적으면 나누는 값이 더 든다.
 constexpr uint32_t GRANULARITY = 256;
-
-// shaders/fluid_common.glsl 의 같은 이름 함수와 결과가 같아야 한다.
-glm::ivec3 fluidCell(const glm::vec3& position, float h) {
-    return glm::ivec3{glm::floor(position / h)};
-}
-
-uint32_t fluidHash(const glm::ivec3& cell, uint32_t cellCount) {
-    uint32_t hashed = static_cast<uint32_t>(cell.x) * 73856093U ^ static_cast<uint32_t>(cell.y) * 19349663U ^
-                      static_cast<uint32_t>(cell.z) * 83492791U;
-    return hashed & (cellCount - 1U);
-}
 
 float poly6(float squaredDistance, float h) {
     float h2 = h * h;
@@ -169,7 +159,7 @@ void FluidSolver::buildGrid(const FluidParams& params, core::JobSystem* jobs) {
     // 셀 번호는 서로 독립이라 나눠 계산한다.
     forRange(jobs, count, [&](uint32_t begin, uint32_t end) {
         for (uint32_t i = begin; i < end; ++i) {
-            cellOf[i] = fluidHash(fluidCell(glm::vec3{positions[i]}, params.smoothingRadius), params.cellCount);
+            cellOf[i] = spatialHash(spatialCell(glm::vec3{positions[i]}, params.smoothingRadius), params.cellCount);
         }
     });
 
@@ -203,12 +193,12 @@ void FluidSolver::substep(const FluidParams& params, float dt, core::JobSystem* 
     forRange(jobs, count, [&](uint32_t begin, uint32_t end) {
         for (uint32_t i = begin; i < end; ++i) {
             glm::vec3 position{positions[i]};
-            glm::ivec3 cell = fluidCell(position, h);
+            glm::ivec3 cell = spatialCell(position, h);
             float density = 0.0F;
             for (int dz = -1; dz <= 1; ++dz) {
                 for (int dy = -1; dy <= 1; ++dy) {
                     for (int dx = -1; dx <= 1; ++dx) {
-                        uint32_t bucket = fluidHash(cell + glm::ivec3{dx, dy, dz}, params.cellCount);
+                        uint32_t bucket = spatialHash(cell + glm::ivec3{dx, dy, dz}, params.cellCount);
                         uint32_t bucketCount = std::min(cellCounts[bucket], FLUID_CELL_CAPACITY);
                         for (uint32_t k = 0; k < bucketCount; ++k) {
                             uint32_t j = cellParticles[static_cast<size_t>(bucket) * FLUID_CELL_CAPACITY + k];
@@ -231,13 +221,13 @@ void FluidSolver::substep(const FluidParams& params, float dt, core::JobSystem* 
             float density = std::max(positions[i].w, 1e-6F);
             glm::vec3 velocity{velocities[i]};
             float pressure = velocities[i].w;
-            glm::ivec3 cell = fluidCell(position, h);
+            glm::ivec3 cell = spatialCell(position, h);
 
             glm::vec3 force{0.0F};
             for (int dz = -1; dz <= 1; ++dz) {
                 for (int dy = -1; dy <= 1; ++dy) {
                     for (int dx = -1; dx <= 1; ++dx) {
-                        uint32_t bucket = fluidHash(cell + glm::ivec3{dx, dy, dz}, params.cellCount);
+                        uint32_t bucket = spatialHash(cell + glm::ivec3{dx, dy, dz}, params.cellCount);
                         uint32_t bucketCount = std::min(cellCounts[bucket], FLUID_CELL_CAPACITY);
                         for (uint32_t k = 0; k < bucketCount; ++k) {
                             uint32_t j = cellParticles[static_cast<size_t>(bucket) * FLUID_CELL_CAPACITY + k];

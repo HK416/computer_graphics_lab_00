@@ -5,9 +5,11 @@
 #extension GL_EXT_scalar_block_layout : require
 
 #include "collider_shapes.glsl"
+#include "spatial_hash.glsl"
 
 // 강체 GPU 솔버. src/gfx/rigid_body_gpu.h 의 GpuRigidBody / RigidPushConstants 와 배치가 같아야 한다.
-// 접촉 생성은 src/physics/rigid_body.cpp 와 같은 규칙이라 두 백엔드가 같은 접촉을 본다.
+// 접촉 생성은 src/physics/rigid_body.cpp 와 같은 규칙이라 두 백엔드가 같은 접촉을 본다. 광역도 같은 해시
+// 격자(spatial_hash.glsl ↔ physics/spatial_hash.h, physics::collectPairs)라 같은 짝을 본다.
 //
 // CPU 솔버는 접촉을 하나씩 순서대로 푸는 순차 임펄스지만 여기서는 Jacobi 다. 물체마다 다른 물체
 // 전부와의 접촉을 «같은 속도로» 풀어 한 번에 더한다. 순서 의존이 없어 나눠 풀 수 있는 대신 수렴이
@@ -24,6 +26,9 @@
 
 // 한 짝이 낼 수 있는 접촉 점 수. 나란히 놓인 상자의 면 접촉이 네 점이다.
 #define RIGID_MAX_MANIFOLD 4
+// 광역 격자 버킷 용량(gfx::RIGID_CELL_CAPACITY 와 같아야 한다)과 물체 하나가 모을 수 있는 이웃 후보 수.
+#define RIGID_CELL_CAPACITY 64
+#define RIGID_MAX_NEIGHBORS 64
 
 struct RigidBody {
     // xyz 위치, w 질량 역수.
@@ -63,10 +68,18 @@ layout(buffer_reference, scalar) buffer RigidTriangleBuffer {
     RigidTriangle items[];
 };
 
+layout(buffer_reference, scalar) buffer RigidIndexBuffer {
+    uint items[];
+};
+
 layout(push_constant, scalar) uniform RigidPushConstants {
     RigidBodyBuffer bodiesIn;
     RigidBodyBuffer bodiesOut;
     RigidTriangleBuffer triangles;
+    // 광역 격자: 버킷마다의 개수와 번호(cell * RIGID_CELL_CAPACITY + slot), 그리고 평면 번호 목록.
+    RigidIndexBuffer cellCounts;
+    RigidIndexBuffer cellBodies;
+    RigidIndexBuffer planes;
     uint bodyCount;
     float dt;
     float gravity;
@@ -75,7 +88,71 @@ layout(push_constant, scalar) uniform RigidPushConstants {
     float penetrationSlop;
     // 이보다 느리게 닿으면 반발을 주지 않는다.
     float restitutionThreshold;
+    uint cellCount;
+    uint planeCount;
+    float cellSize;
 } push;
+
+// 광역: self 와 경계 구가 겹치는 물체를 모은다. 이웃 27 셀의 버킷을 훑되, 해시 충돌로 두 셀이 같은 버킷에
+// 떨어지면 두 번째는 건너뛴다(한 물체가 두 번 나오지 않게). 버킷에 섞인 먼 셀의 물체는 경계 구 검사(CPU
+// collectPairs 와 같은 식)가 거른다. 격자는 적분 직후 위치로 지었고 위치 보정이 셀 경계를 넘길 수 있으므로
+// 물체의 «지금 셀» 을 버킷 셀과 견주지 않는다. 평면은 무한이라 목록에서 그대로 이어 붙인다. 마지막에 번호
+// 오름차순으로 정렬해야 O(n²) 루프와 같은 순서로 누적되어 부동소수 결과가 그대로다. 상한을 넘는 이웃은
+// 버린다(rigid_grid.comp 의 표식).
+uint rigidGatherNeighbors(uint self, vec3 position, float boundingRadius, out uint neighbors[RIGID_MAX_NEIGHBORS]) {
+    uint count = 0u;
+    ivec3 base = spatialCell(position, push.cellSize);
+    uint visited[27];
+    uint visitedCount = 0u;
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                uint bucket = spatialHash(base + ivec3(dx, dy, dz), push.cellCount);
+                bool seen = false;
+                for (uint v = 0u; v < visitedCount; ++v) {
+                    seen = seen || visited[v] == bucket;
+                }
+                if (seen) {
+                    continue;
+                }
+                visited[visitedCount++] = bucket;
+                uint filled = min(push.cellCounts.items[bucket], uint(RIGID_CELL_CAPACITY));
+                for (uint slot = 0u; slot < filled; ++slot) {
+                    uint j = push.cellBodies.items[bucket * RIGID_CELL_CAPACITY + slot];
+                    if (j == self) {
+                        continue;
+                    }
+                    vec3 otherPosition = push.bodiesIn.items[j].position.xyz;
+                    vec3 delta = otherPosition - position;
+                    float reach = boundingRadius + push.bodiesIn.items[j].angularVelocity.w;
+                    if (dot(delta, delta) > reach * reach) {
+                        continue;
+                    }
+                    if (count < RIGID_MAX_NEIGHBORS) {
+                        neighbors[count++] = j;
+                    }
+                }
+            }
+        }
+    }
+    for (uint p = 0u; p < push.planeCount; ++p) {
+        uint j = push.planes.items[p];
+        if (j != self && count < RIGID_MAX_NEIGHBORS) {
+            neighbors[count++] = j;
+        }
+    }
+    // 삽입 정렬. 후보가 수십 개라 이걸로 충분하다.
+    for (uint a = 1u; a < count; ++a) {
+        uint value = neighbors[a];
+        uint b = a;
+        while (b > 0u && neighbors[b - 1u] > value) {
+            neighbors[b] = neighbors[b - 1u];
+            --b;
+        }
+        neighbors[b] = value;
+    }
+    return count;
+}
 
 vec3 rotateByQuat(vec4 q, vec3 v) {
     vec3 axis = q.xyz;

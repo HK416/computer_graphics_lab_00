@@ -1,6 +1,7 @@
 #include "gfx/rigid_body_gpu.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <initializer_list>
@@ -92,7 +93,12 @@ RigidBodySimulator::~RigidBodySimulator() {
         destroyBuffer(context, buffer);
     }
     destroyBuffer(context, triangleBuffer);
-    for (VkPipeline pipeline : {integratePipeline, solvePipeline, finishPipeline}) {
+    for (Buffer& buffer : planeBuffers) {
+        destroyBuffer(context, buffer);
+    }
+    destroyBuffer(context, cellCountBuffer);
+    destroyBuffer(context, cellBodyBuffer);
+    for (VkPipeline pipeline : {integratePipeline, solvePipeline, finishPipeline, gridPipeline}) {
         vkDestroyPipeline(context.device, pipeline, nullptr);
     }
     vkDestroyPipelineLayout(context.device, pipelineLayout, nullptr);
@@ -113,7 +119,9 @@ void RigidBodySimulator::createPipelines() {
     integratePipeline = createComputePipeline(context, pipelineLayout, "rigid_integrate.comp.spv");
     solvePipeline = createComputePipeline(context, pipelineLayout, "rigid_solve.comp.spv");
     finishPipeline = createComputePipeline(context, pipelineLayout, "rigid_finish.comp.spv");
-    ready = integratePipeline != VK_NULL_HANDLE && solvePipeline != VK_NULL_HANDLE && finishPipeline != VK_NULL_HANDLE;
+    gridPipeline = createComputePipeline(context, pipelineLayout, "rigid_grid.comp.spv");
+    ready = integratePipeline != VK_NULL_HANDLE && solvePipeline != VK_NULL_HANDLE &&
+            finishPipeline != VK_NULL_HANDLE && gridPipeline != VK_NULL_HANDLE;
     if (!ready) {
         spdlog::warn("강체 GPU 솔버를 만들지 못했습니다. CPU 백엔드만 돕니다");
     }
@@ -144,6 +152,13 @@ void RigidBodySimulator::reserveBuffers(uint32_t count) {
         // 옛 버퍼를 버렸으니 담겨 있던 결과도 버린다.
         readbackFrame[slot] = UINT64_MAX;
         readbackCount[slot] = 0;
+        context.retireBuffer(planeBuffers[slot]);
+        planeBuffers[slot] =
+            createBuffer(context,
+                         static_cast<VkDeviceSize>(wanted) * sizeof(uint32_t),
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                         MemoryLocation::HOST_WRITE,
+                         "강체 평면 목록");
     }
     capacity = wanted;
 }
@@ -167,6 +182,26 @@ void RigidBodySimulator::reserveTriangles(uint32_t count) {
             context, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, MemoryLocation::HOST_WRITE, "강체 메쉬 삼각형 업로드");
     }
     triangleCapacity = wanted;
+}
+
+void RigidBodySimulator::reserveGrid(uint32_t cellCount) {
+    if (cellCount <= gridCapacity) {
+        return;
+    }
+    context.retireBuffer(cellCountBuffer);
+    cellCountBuffer = createBuffer(context,
+                                   static_cast<VkDeviceSize>(cellCount) * sizeof(uint32_t),
+                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                       VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                   MemoryLocation::DEVICE,
+                                   "강체 격자 개수");
+    context.retireBuffer(cellBodyBuffer);
+    cellBodyBuffer = createBuffer(context,
+                                  static_cast<VkDeviceSize>(cellCount) * RIGID_CELL_CAPACITY * sizeof(uint32_t),
+                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                  MemoryLocation::DEVICE,
+                                  "강체 격자 번호");
+    gridCapacity = cellCount;
 }
 
 bool RigidBodySimulator::applyReadback(scene::Scene& scene, uint64_t completedFrames) {
@@ -237,8 +272,16 @@ void RigidBodySimulator::invalidate() {
 
 void RigidBodySimulator::buildUpload() {
     upload.resize(bodies.size());
+    // 광역 격자 크기. physics::collectPairs 와 같은 규칙이어야 두 백엔드가 같은 짝을 본다.
+    float maxRadius = 0.0F;
+    planeIndices.clear();
     for (size_t i = 0; i < bodies.size(); ++i) {
         const physics::RigidBodyState& body = bodies[i];
+        if (body.shape == scene::ColliderShape::PLANE) {
+            planeIndices.push_back(static_cast<uint32_t>(i));
+        } else {
+            maxRadius = std::max(maxRadius, body.boundingRadius);
+        }
         GpuRigidBody& target = upload[i];
         target.position = glm::vec4{body.position, body.inverseMass};
         target.rotation = glm::vec4{body.rotation.x, body.rotation.y, body.rotation.z, body.rotation.w};
@@ -253,6 +296,8 @@ void RigidBodySimulator::buildUpload() {
         target.triangleOffset = body.triangleOffset;
         target.triangleCount = body.triangleCount;
     }
+    gridCellSize = std::max(2.0F * maxRadius, 1.0e-3F);
+    gridCellCount = std::clamp(std::bit_ceil(static_cast<uint32_t>(bodies.size()) * 2U), 64U, 65536U);
 }
 
 // 값 하나라도 어긋나면 참이다. **모든 비교에 오차를 둔다.** 위치·회전만이 아니라 콜라이더 반지름과
@@ -371,9 +416,22 @@ void RigidBodySimulator::record(VkCommandBuffer commandBuffer, uint64_t frameInd
     vkCmdBindDescriptorSets(
         commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
 
+    // 광역 격자. 평면 목록은 작아서 프레임 슬롯의 호스트 버퍼에 바로 쓴다.
+    reserveGrid(gridCellCount);
+    if (!planeIndices.empty()) {
+        std::memcpy(planeBuffers[slot].mapped, planeIndices.data(), planeIndices.size() * sizeof(uint32_t));
+        vmaFlushAllocation(context.allocator, planeBuffers[slot].allocation, 0, VK_WHOLE_SIZE);
+    }
+
     // 상수는 CPU 솔버와 같은 것을 쓴다(physics/rigid_body.h). 한쪽만 고치면 거동이 갈린다.
     RigidPushConstants push{};
     push.bodyCount = count;
+    push.cellCounts = cellCountBuffer.address;
+    push.cellBodies = cellBodyBuffer.address;
+    push.planes = planeBuffers[slot].address;
+    push.cellCount = gridCellCount;
+    push.planeCount = static_cast<uint32_t>(planeIndices.size());
+    push.cellSize = gridCellSize;
     push.dt = stepSeconds;
     push.gravity = physics::GRAVITY;
     push.positionCorrection = physics::POSITION_CORRECTION;
@@ -390,12 +448,51 @@ void RigidBodySimulator::record(VkCommandBuffer commandBuffer, uint64_t frameInd
         source ^= 1U;
     };
 
+    // 적분한 위치로 격자를 짓는다. 속도만 고치는 해결 반복 동안은 그대로 맞고, 위치를 고치는 마무리 반복
+    // 사이에는 다시 짓는다. 개수 버퍼는 지우고 시작하는데, 지난 반복의 컴퓨트가 아직 읽고 있을 수 있어
+    // 앞뒤로 막는다.
+    auto buildGrid = [&] {
+        VkMemoryBarrier2 toClear{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        toClear.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        toClear.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        toClear.dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+        toClear.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        VkDependencyInfo clearDependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        clearDependency.memoryBarrierCount = 1;
+        clearDependency.pMemoryBarriers = &toClear;
+        vkCmdPipelineBarrier2(commandBuffer, &clearDependency);
+        vkCmdFillBuffer(commandBuffer, cellCountBuffer.handle, 0, VK_WHOLE_SIZE, 0);
+        VkMemoryBarrier2 toCompute{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        toCompute.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+        toCompute.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        toCompute.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        toCompute.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        VkDependencyInfo computeDependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        computeDependency.memoryBarrierCount = 1;
+        computeDependency.pMemoryBarriers = &toCompute;
+        vkCmdPipelineBarrier2(commandBuffer, &computeDependency);
+        // 격자는 읽기만 하고 bodiesOut 을 쓰지 않으므로 반쪽을 바꾸지 않는다.
+        push.bodiesIn = bodyBuffers[source].address;
+        push.bodiesOut = bodyBuffers[source ^ 1U].address;
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, gridPipeline);
+        vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+        vkCmdDispatch(commandBuffer, (count + RIGID_GROUP_SIZE - 1) / RIGID_GROUP_SIZE, 1, 1);
+        computeBarrier(commandBuffer);
+    };
+
     for (uint32_t step = 0; step < stepCount; ++step) {
         dispatch(integratePipeline);
+        buildGrid();
         for (uint32_t iteration = 0; iteration < RIGID_SOLVER_ITERATIONS; ++iteration) {
             dispatch(solvePipeline);
         }
         for (uint32_t iteration = 0; iteration < RIGID_POSITION_ITERATIONS; ++iteration) {
+            // 위치 보정이 물체를 셀 경계 너머로 옮기면 이웃 27 셀이 어긋나 짝을 놓친다. 보정 사이마다 다시
+            // 지어야 «매 반복 전체를 보던» 옛 O(n²) 루프와 같은 짝을 본다(500 개 상자에서 바이트 동일 확인).
+            // 첫 반복은 적분 직후 지은 격자가 그대로 맞는다.
+            if (iteration > 0) {
+                buildGrid();
+            }
             dispatch(finishPipeline);
         }
     }

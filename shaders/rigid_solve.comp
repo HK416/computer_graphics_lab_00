@@ -2,11 +2,8 @@
 
 #include "rigid_common.glsl"
 
-// Jacobi 한 반복. 물체마다 다른 물체 전부와의 접촉을 지금 속도로 풀어 한 번에 더한다. 읽는 배열과
-// 쓰는 배열이 달라 순서 의존이 없다.
-//
-// 광역 판정은 O(n²) 이다. 물체 수백 개까지는 이쪽이 격자보다 빠르고, 무엇보다 CPU 솔버와 같은 짝을
-// 본다. ponytail: 수천 개를 넘기면 해시 격자로 바꿔야 한다(유체가 쓰는 것과 같은 구조).
+// Jacobi 한 반복. 물체마다 이웃 후보(해시 격자, rigidGatherNeighbors)와의 접촉을 지금 속도로 풀어 한 번에
+// 더한다. 읽는 배열과 쓰는 배열이 달라 순서 의존이 없다.
 layout(local_size_x = 64) in;
 
 void main() {
@@ -25,19 +22,11 @@ void main() {
     vec3 deltaLinear = vec3(0.0);
     vec3 deltaAngular = vec3(0.0);
 
-    for (uint j = 0u; j < push.bodyCount; ++j) {
-        if (j == i) {
-            continue;
-        }
+    uint neighbors[RIGID_MAX_NEIGHBORS];
+    uint neighborCount = rigidGatherNeighbors(i, self.position.xyz, self.angularVelocity.w, neighbors);
+    for (uint n = 0u; n < neighborCount; ++n) {
+        uint j = neighbors[n];
         RigidBody other = push.bodiesIn.items[j];
-        // 광역: 경계 구가 겹치는 짝만 본다. 평면은 무한이라 늘 통과시킨다.
-        if (other.shape != RIGID_SHAPE_PLANE) {
-            vec3 delta = other.position.xyz - self.position.xyz;
-            float reach = self.angularVelocity.w + other.angularVelocity.w;
-            if (dot(delta, delta) > reach * reach) {
-                continue;
-            }
-        }
 
         RigidManifold manifold = rigidCollide(self, other);
         if (manifold.count == 0) {

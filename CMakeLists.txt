@@ -116,6 +116,7 @@ set(shader_sources
     shaders/rigid_integrate.comp
     shaders/rigid_solve.comp
     shaders/rigid_finish.comp
+    shaders/rigid_grid.comp
     shaders/hzb_reduce.comp
     shaders/pathtrace.rgen
     shaders/pathtrace.rmiss
