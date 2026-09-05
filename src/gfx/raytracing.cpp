@@ -380,17 +380,28 @@ void RayTracer::updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
         return;
     }
 
-    std::vector<VkAccelerationStructureGeometryKHR> geometries(skinned.size());
-    std::vector<VkAccelerationStructureBuildGeometryInfoKHR> buildInfos(skinned.size());
-    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges(skinned.size());
-    std::vector<VkDeviceSize> scratchOffsets(skinned.size());
-    VkDeviceSize scratchNeeded = 0;
-
     if (skinnedBottomLevels.size() < skinned.size()) {
         skinnedBottomLevels.resize(skinned.size());
     }
-
+    // 포즈가 바뀐 것과 아직 구조가 없는 것만 세운다. 번호는 skinnedBottomLevels 와 같다.
+    std::vector<size_t> toBuild;
     for (size_t index = 0; index < skinned.size(); ++index) {
+        if (skinned[index].rebuild || skinnedBottomLevels[index].handle == VK_NULL_HANDLE) {
+            toBuild.push_back(index);
+        }
+    }
+    if (toBuild.empty()) {
+        return;
+    }
+
+    std::vector<VkAccelerationStructureGeometryKHR> geometries(toBuild.size());
+    std::vector<VkAccelerationStructureBuildGeometryInfoKHR> buildInfos(toBuild.size());
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges(toBuild.size());
+    std::vector<VkDeviceSize> scratchOffsets(toBuild.size());
+    VkDeviceSize scratchNeeded = 0;
+
+    for (size_t slot = 0; slot < toBuild.size(); ++slot) {
+        size_t index = toBuild[slot];
         const GpuMesh& mesh = geometry.mesh(skinned[index].meshIndex);
         const GpuMeshLod& lod = geometry.lod(mesh.lodOffset);
         uint32_t vertexCount = geometry.meshVertexCount(skinned[index].meshIndex);
@@ -407,25 +418,25 @@ void RayTracer::updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
         triangles.indexData.deviceAddress =
             geometry.indexBuffer.address + static_cast<VkDeviceSize>(lod.indexOffset) * sizeof(uint32_t);
 
-        geometries[index] = VkAccelerationStructureGeometryKHR{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-        geometries[index].geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-        geometries[index].geometry.triangles = triangles;
-        geometries[index].flags = geometryFlagsFor(geometry.material(mesh.materialIndex));
+        geometries[slot] = VkAccelerationStructureGeometryKHR{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+        geometries[slot].geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        geometries[slot].geometry.triangles = triangles;
+        geometries[slot].flags = geometryFlagsFor(geometry.material(mesh.materialIndex));
 
-        buildInfos[index] = VkAccelerationStructureBuildGeometryInfoKHR{
+        buildInfos[slot] = VkAccelerationStructureBuildGeometryInfoKHR{
             VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
-        buildInfos[index].type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-        // 매 프레임 다시 세우므로 추적 속도보다 구축 속도를 고른다.
-        buildInfos[index].flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
-        buildInfos[index].mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-        buildInfos[index].geometryCount = 1;
-        buildInfos[index].pGeometries = &geometries[index];
+        buildInfos[slot].type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        // 포즈가 바뀌는 프레임마다 다시 세우므로 추적 속도보다 구축 속도를 고른다.
+        buildInfos[slot].flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+        buildInfos[slot].mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        buildInfos[slot].geometryCount = 1;
+        buildInfos[slot].pGeometries = &geometries[slot];
 
         uint32_t primitiveCount = lod.indexCount / 3;
         VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
         getBuildSizes(context.device,
                       VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-                      &buildInfos[index],
+                      &buildInfos[slot],
                       &primitiveCount,
                       &sizes);
 
@@ -435,21 +446,21 @@ void RayTracer::updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
             skinnedBottomLevels[index] =
                 createStructure(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, sizes.accelerationStructureSize);
         }
-        buildInfos[index].dstAccelerationStructure = skinnedBottomLevels[index].handle;
+        buildInfos[slot].dstAccelerationStructure = skinnedBottomLevels[index].handle;
 
-        scratchOffsets[index] = scratchNeeded;
+        scratchOffsets[slot] = scratchNeeded;
         scratchNeeded += alignUp(sizes.buildScratchSize, 256);
 
-        ranges[index] = {};
-        ranges[index].primitiveCount = primitiveCount;
+        ranges[slot] = {};
+        ranges[slot].primitiveCount = primitiveCount;
     }
 
     reserveScratch(skinnedScratchBuffer, std::max<VkDeviceSize>(scratchNeeded, 256), "스킨 가속 구조 스크래치");
 
-    std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> rangePointers(skinned.size());
-    for (size_t index = 0; index < skinned.size(); ++index) {
-        buildInfos[index].scratchData.deviceAddress = skinnedScratchBuffer.address + scratchOffsets[index];
-        rangePointers[index] = &ranges[index];
+    std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> rangePointers(toBuild.size());
+    for (size_t slot = 0; slot < toBuild.size(); ++slot) {
+        buildInfos[slot].scratchData.deviceAddress = skinnedScratchBuffer.address + scratchOffsets[slot];
+        rangePointers[slot] = &ranges[slot];
     }
 
     barrierBeforeBuild(commandBuffer);

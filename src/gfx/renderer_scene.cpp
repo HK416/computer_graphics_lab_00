@@ -339,6 +339,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     objectSkinnedBlas.assign(scene.objects.size(), RayTracer::NO_SKINNED_BLAS);
     instanceBounds.assign(scene.objects.size(), glm::vec4{0.0F});
     skinDispatches.clear();
+    skinDispatchChanged.clear();
     skinnedInstances.clear();
 
     // 경로 추적 프레임은 래스터 패스를 건너뛰므로 meshlet 그룹을 아무도 읽지 않는다. 자동 LOD 는
@@ -590,6 +591,9 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                                               mesh.meshletOffset,
                                               mesh.meshletCount,
                                               skinnedMeshletCursor});
+        // 애니메이터가 이번 프레임에 재포즈했으면 바뀐 것. 버퍼·목록이 바뀐 경우는 아래서 전부 바뀐 것으로 덮는다.
+        int32_t animator = scene.objects[index].animator;
+        skinDispatchChanged.push_back(animator >= 0 && scene.animatorPosed(static_cast<uint32_t>(animator)) ? 1 : 0);
         skinnedSlots.emplace_back(slot, objectSkinnedBlas[index]);
         skinnedVertexCursor += vertexCount;
         skinnedMeshletCursor += mesh.meshletCount;
@@ -664,22 +668,30 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                                            MemoryLocation::DEVICE,
                                            "스킨 meshlet 경계");
     }
-    // 반쪽을 번갈아 쓴다. 지난 프레임과 스킨 목록이 같으면 다른 반쪽이 그대로 지난 포즈다.
-    skinnedHalf ^= 1U;
-    uint32_t currentBase = skinnedHalf * skinnedVertexCapacity;
-    uint32_t previousBase = (skinnedHalf ^ 1U) * skinnedVertexCapacity;
-    bool previousPoseValid = !temporalReset && !skinBuffersReset && skinDispatches == previousSkinDispatches;
+    // 반쪽 0 이 현재, 1 이 지난 포즈. 버퍼와 목록이 지난 프레임과 같으면 현재 반쪽 내용이 그대로 유효해,
+    // 재포즈한 오브젝트만 현재를 지난 쪽에 복사한 뒤 다시 스킨한다. 아니면 전부 다시 스킨한다.
+    uint32_t currentBase = 0;
+    uint32_t previousBase = skinnedVertexCapacity;
+    bool skinDataValid = !skinBuffersReset && skinDispatches == previousSkinDispatches;
+    bool previousPoseValid = skinDataValid && !temporalReset;
+    skinCurrentValid = skinDataValid;
+    if (!skinDataValid) {
+        std::fill(skinDispatchChanged.begin(), skinDispatchChanged.end(), 1);
+    }
+    anySkinRebuild = std::find(skinDispatchChanged.begin(), skinDispatchChanged.end(), 1) != skinDispatchChanged.end();
     previousSkinDispatches = skinDispatches;
     // 디스패치 순서가 곧 하위 가속 구조 번호다. objectSkinnedBlas 가 같은 번호를 가리킨다.
     skinnedInstances.resize(skinDispatches.size());
     for (auto [slot, dispatchIndex] : skinnedSlots) {
         const SkinDispatch& dispatch = skinDispatches[dispatchIndex];
+        bool changed = skinDispatchChanged[dispatchIndex] != 0;
         uint32_t offset = currentBase + dispatch.destinationOffset;
         instances[slot].skinnedVertexOffset = offset;
+        // 포즈가 그대로면 지난 위치도 현재와 같다(관절 변위 0). 바뀌었으면 복사해 둔 지난 반쪽을 본다.
         instances[slot].previousSkinnedVertexOffset =
-            (previousPoseValid ? previousBase : currentBase) + dispatch.destinationOffset;
+            (changed && previousPoseValid ? previousBase : currentBase) + dispatch.destinationOffset;
         instances[slot].skinnedMeshletOffset = dispatch.boundsOffset;
-        skinnedInstances[dispatchIndex] = SkinnedInstance{instances[slot].meshIndex, offset};
+        skinnedInstances[dispatchIndex] = SkinnedInstance{instances[slot].meshIndex, offset, changed};
     }
     parallelCopy(
         jobs, instanceData.data(), static_cast<GpuInstance*>(frame.instanceBuffer.mapped), instanceData.size());
@@ -868,14 +880,12 @@ void Renderer::updateLodNetwork(const scene::Scene& scene, Frame& frame, float p
 
 void Renderer::updateAccelerationStructures(VkCommandBuffer commandBuffer, const scene::Scene& scene) {
     // 장면이 그대로면 가속 구조도 그대로다. 포즈가 바뀌면 애니메이터가 장면 리비전을 올리므로
-    // 같은 조건으로 걸러진다. 스킨 인스턴스가 있으면 변형 정점 반쪽이 프레임마다 번갈아 바뀌어
-    // 지난 구조가 가리키던 자리가 덮어써지므로 포즈가 그대로여도 다시 세운다.
-    // ponytail: 포즈가 그대로인 스킨 오브젝트까지 매 프레임 다시 세운다. 반쪽을 번갈지 않고 복사로
-    // 지난 포즈를 남기면 건너뛸 수 있다.
+    // 같은 조건으로 걸러진다. 스킨 하위 구조는 포즈가 바뀐 오브젝트 것만 다시 세운다(현재 반쪽이
+    // 고정이라 그대로인 오브젝트의 구조는 여전히 맞는 자리를 가리킨다).
     if (!ensureBottomLevel()) {
         return;
     }
-    if (!sceneChangedThisFrame && skinnedInstances.empty() && rayTracer->ready()) {
+    if (!sceneChangedThisFrame && !anySkinRebuild && rayTracer->ready()) {
         return;
     }
     rayTracer->updateSkinnedBottomLevel(commandBuffer, skinnedVertexBuffer, skinnedInstances);

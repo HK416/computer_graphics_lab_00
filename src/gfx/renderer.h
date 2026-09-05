@@ -89,7 +89,7 @@ struct ShadowView {
 };
 
 // 스킨 컴퓨트 디스패치 하나. 오브젝트 하나가 자기 구간을 통째로 변형한다. destinationOffset 은
-// 반쪽 안의 상대 위치라, 지난 프레임 목록과 같으면 다른 반쪽이 그대로 지난 포즈다.
+// 반쪽 안의 상대 위치라, 지난 프레임 목록과 같으면 현재 반쪽 내용이 그대로 유효하다.
 struct SkinDispatch {
     uint32_t sourceOffset;
     uint32_t destinationOffset;
@@ -588,18 +588,24 @@ private:
     VkPipeline skinPipeline = VK_NULL_HANDLE;
     VkPipelineLayout skinBoundsPipelineLayout = VK_NULL_HANDLE;
     VkPipeline skinBoundsPipeline = VK_NULL_HANDLE;
-    // 스킨 인스턴스의 변형 정점. 인스턴스마다 메쉬 정점 수만큼 이어 붙인 구간이 반쪽 둘로 있고,
-    // 프레임마다 번갈아 쓴다. 쓰지 않는 반쪽이 지난 포즈다.
+    // 스킨 인스턴스의 변형 정점. 인스턴스마다 메쉬 정점 수만큼 이어 붙인 구간이 반쪽 둘로 있다. 반쪽 0 이
+    // 현재, 1 이 지난 포즈. 포즈가 바뀐 오브젝트만 현재 구간을 지난 쪽에 복사한 뒤 다시 스킨하므로, 포즈가
+    // 그대로인 오브젝트는 스킨·경계·하위 가속 구조 구축을 건너뛴다.
     Buffer skinnedVertexBuffer;
     uint32_t skinnedVertexCapacity = 0;
     // 스킨 인스턴스의 meshlet 경계 구. 변형 정점에서 프레임마다 다시 잰다.
     Buffer skinnedBoundsBuffer;
     uint32_t skinnedBoundsCapacity = 0;
-    // 이번 프레임이 쓰는 반쪽. 정점 버퍼 안의 절대 위치는 이 값에 용량을 곱한 만큼 밀린다.
-    uint32_t skinnedHalf = 0;
     // buildDrawCommands 가 채운다. 스킨 컴퓨트 디스패치와 하위 가속 구조 구축이 함께 읽는다.
     std::vector<SkinDispatch> skinDispatches;
-    // 지난 프레임의 목록. 같으면 다른 반쪽이 그대로 지난 포즈다.
+    // 디스패치마다 이번 프레임에 포즈가 바뀌었는지(애니메이터가 재포즈했거나 버퍼·목록이 바뀜). 바뀐 것만
+    // 스킨·경계·하위 가속 구조를 다시 만든다.
+    std::vector<uint8_t> skinDispatchChanged;
+    // 이번 프레임에 다시 세울 스킨 하위 가속 구조가 하나라도 있는지. 상위 구조도 그때 다시 세운다.
+    bool anySkinRebuild = false;
+    // 현재 반쪽 내용이 지난 프레임 포즈로 유효한지(버퍼·목록이 그대로). 거짓이면 지난 쪽으로 복사할 것이 없다.
+    bool skinCurrentValid = false;
+    // 지난 프레임의 목록. 같으면 현재 반쪽 내용이 그대로 유효하다.
     std::vector<SkinDispatch> previousSkinDispatches;
     std::vector<SkinnedInstance> skinnedInstances;
     // 오브젝트 인덱스 -> skinnedInstances 번호. 스킨이 아니면 RayTracer::NO_SKINNED_BLAS.

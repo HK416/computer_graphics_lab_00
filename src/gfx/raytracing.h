@@ -56,6 +56,8 @@ struct PathGuideTargets {
 struct SkinnedInstance {
     uint32_t meshIndex;
     uint32_t vertexOffset;
+    // 이번 프레임에 포즈가 바뀌어 하위 가속 구조를 다시 세워야 하는지. 구조가 아직 없으면 어차피 세운다.
+    bool rebuild = true;
 
     bool operator==(const SkinnedInstance&) const = default;
 };

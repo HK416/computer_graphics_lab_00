@@ -194,7 +194,8 @@ void Renderer::recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches&
 }
 
 void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame) {
-    if (skinDispatches.empty()) {
+    // 포즈가 바뀐 디스패치만 돈다. 하나도 없으면 배리어도 필요 없다.
+    if (skinDispatches.empty() || !anySkinRebuild) {
         return;
     }
     uint32_t zone = frameProfiler.begin("스킨", commandBuffer);
@@ -220,16 +221,50 @@ void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame)
         VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
         VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
         VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    // 지난 프레임의 읽기가 끝난 뒤 지난 반쪽으로의 복사와 현재 반쪽 스킨이 시작된다.
     memoryBarrier(READER_STAGES,
                   VK_ACCESS_2_SHADER_READ_BIT,
-                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+                  VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT |
+                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
-    uint32_t currentBase = skinnedHalf * skinnedVertexCapacity;
+    // 바뀐 오브젝트의 현재 구간(지난 프레임 포즈)을 지난 반쪽에 남긴다. 모션 벡터가 그것을 읽는다. 현재 반쪽
+    // 내용이 유효하지 않은 프레임(previousSkinnedVertexOffset 이 현재를 가리킴)에는 복사할 것이 없다.
+    uint32_t currentBase = 0;
+    uint32_t previousBase = skinnedVertexCapacity;
+    std::vector<VkBufferCopy> copies;
+    for (size_t i = 0; i < skinDispatches.size(); ++i) {
+        if (skinDispatchChanged[i] == 0 || !skinCurrentValid) {
+            continue;
+        }
+        const SkinDispatch& dispatch = skinDispatches[i];
+        VkBufferCopy copy{};
+        copy.srcOffset = static_cast<VkDeviceSize>(currentBase + dispatch.destinationOffset) * sizeof(asset::Vertex);
+        copy.dstOffset = static_cast<VkDeviceSize>(previousBase + dispatch.destinationOffset) * sizeof(asset::Vertex);
+        copy.size = static_cast<VkDeviceSize>(dispatch.vertexCount) * sizeof(asset::Vertex);
+        copies.push_back(copy);
+    }
+    if (!copies.empty()) {
+        vkCmdCopyBuffer(commandBuffer,
+                        skinnedVertexBuffer.handle,
+                        skinnedVertexBuffer.handle,
+                        static_cast<uint32_t>(copies.size()),
+                        copies.data());
+        // 복사가 현재 구간을 다 읽은 뒤에 스킨이 그 구간을 덮는다.
+        memoryBarrier(VK_PIPELINE_STAGE_2_COPY_BIT,
+                      VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    }
+
     vkCmdBindDescriptorSets(
         commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, skinPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, skinPipeline);
-    for (const SkinDispatch& dispatch : skinDispatches) {
+    for (size_t i = 0; i < skinDispatches.size(); ++i) {
+        if (skinDispatchChanged[i] == 0) {
+            continue;
+        }
+        const SkinDispatch& dispatch = skinDispatches[i];
         SkinPushConstants pushConstants{geometry.vertexBuffer.address,
                                         skinnedVertexBuffer.address,
                                         frame.jointBuffer.address,
@@ -252,7 +287,11 @@ void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame)
     vkCmdBindDescriptorSets(
         commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, skinBoundsPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, skinBoundsPipeline);
-    for (const SkinDispatch& dispatch : skinDispatches) {
+    for (size_t i = 0; i < skinDispatches.size(); ++i) {
+        if (skinDispatchChanged[i] == 0) {
+            continue;
+        }
+        const SkinDispatch& dispatch = skinDispatches[i];
         SkinBoundsPushConstants pushConstants{skinnedVertexBuffer.address,
                                               geometry.meshletBuffer.address,
                                               skinnedBoundsBuffer.address,
@@ -271,9 +310,10 @@ void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame)
         vkCmdDispatch(commandBuffer, dispatch.meshletCount, 1, 1);
     }
 
-    // 정점은 그림자·장면 패스와 가속 구조 구축이, 경계 구는 컬 컴퓨트와 태스크 셰이더가 읽는다.
-    memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+    // 정점은 그림자·장면 패스와 가속 구조 구축이, 경계 구는 컬 컴퓨트와 태스크 셰이더가, 지난 반쪽은 모션
+    // 벡터가 읽는다.
+    memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
                   READER_STAGES,
                   VK_ACCESS_2_SHADER_READ_BIT);
     frameProfiler.end(zone, commandBuffer);
