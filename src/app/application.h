@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 
+#include "app/plugin.h"
 #include "asset/load_progress.h"
 #include "asset/model.h"
 #include "core/job_system.h"
@@ -208,10 +209,14 @@ private:
     // 마지막으로 미사용 모델을 살핀 때의 장면 번호와 그 장면의 구조 리비전.
     size_t collectedScene = SIZE_MAX;
     uint64_t collectedTopology = 0;
-    // 강체 물리의 고정 간격 누적기. 프레임이 길어도 정해진 스텝 수까지만 따라잡는다.
-    float physicsAccumulator = 0.0F;
     float orbitDegreesPerFrame = 0.0F;
     Options options;
+
+    // 기능 플러그인. 등록한 순서대로 build → (프레임마다) update → ui 를 부른다. 생성자 끝에서 등록한다.
+    std::vector<std::unique_ptr<Plugin>> plugins;
+    // 플러그인에 넘기는 참조 묶음. 모든 멤버가 만들어진 뒤에만 부른다.
+    Services services();
+    void registerPlugins();
 };
 
 } // namespace app

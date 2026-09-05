@@ -150,7 +150,7 @@ CPU 백엔드를 부르느라 `physics` 를 하나 본다.
 
 | 경로 | 내용 |
 | --- | --- |
-| `src/app` | 수명 주기, SDL 창, 이벤트 루프, 모델/장면 적재 |
+| `src/app` | 수명 주기, SDL 창, 이벤트 루프, 모델/장면 적재. `plugin.h` 의 `Plugin`/`Services` 와 `plugins/` 의 기능 플러그인(물리 등) |
 | `src/asset` | glTF 적재, meshlet/LOD DAG 구축, 애니메이션 샘플링. CPU 측 표현 |
 | `src/scene` | 장면 그래프, 카메라, 커스텀 JSON 직렬화 |
 | `src/gfx` | Vulkan 컨텍스트, 리소스, 렌더 경로 전부. GPU SPH(`fluid.cpp`)도 여기 |
@@ -161,9 +161,12 @@ CPU 백엔드를 부르느라 `physics` 를 하나 본다.
 
 ### 프레임 흐름
 
-`Application::run` 한 바퀴: 이벤트 → `camera.update` → `scene.update`(애니메이션 진행) → [재생 중이면
-`physics::stepRigidBodies` 고정 간격] → `renderer.prepareFrame`(밀린 크기 변경) → `editor.build` →
-**`scene.refresh`** → [구조가 바뀐 프레임이면 `collectUnusedModels`] → `renderer.drawFrame`.
+`Application::run` 한 바퀴: 이벤트 → `camera.update` → `scene.update`(애니메이션 진행) → **플러그인 `update`**
+(재생 중이면 `PhysicsPlugin` 이 `physics::stepRigidBodies` 를 고정 간격으로) → `renderer.prepareFrame`(밀린 크기
+변경) → `editor.build` → **`scene.refresh`** → [구조가 바뀐 프레임이면 `collectUnusedModels`] → `renderer.drawFrame`.
+
+기능은 `app::Plugin`(`src/app/plugin.h`) 으로 붙인다. `Application::registerPlugins` 의 등록 순서가 프레임 안의 호출
+순서다. 플러그인은 `Services` 참조 묶음으로만 다른 계층을 본다.
 
 `refresh()` 는 편집기가 장면을 만진 **뒤**, 렌더러가 읽기 **전**에 불려야 한다. 훅이 아니라 지난 사본과
 필드를 직접 비교해 더티를 찾고 세계 변환/가시성 캐시를 다시 만든다(이유는 README).
