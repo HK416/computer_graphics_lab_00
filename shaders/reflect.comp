@@ -5,12 +5,14 @@
 #extension GL_EXT_ray_query : require
 
 #include "bindless.glsl"
+#include "fluid_types.glsl"
 #include "fog.glsl"
 #include "lighting.glsl"
 #include "material.glsl"
 #include "ray_query.glsl"
 #include "sampling.glsl"
 #include "scene_types.glsl"
+#include "water_shading.glsl"
 
 // 광선 반사. 불투명 패스가 남긴 깊이·노멀·거칠기에서 픽셀마다 GGX 반사 방향 하나를 뽑아 광선
 // 질의로 추적하고(STAGE 0), 모션 벡터로 지난 프레임 결과를 되짚어 누적한 뒤 스페큘러 가중치를 곱해
@@ -31,6 +33,8 @@ layout(push_constant) uniform ReflectPushConstants {
     MeshLodBuffer lods;
     CameraBuffer camera;
     LightBuffer lights;
+    // 유체마다의 물 표면 정보. 물 표면 인스턴스(FLUID_SURFACE_CUSTOM_INDEX)를 맞히면 여기서 정점과 재질을 읽는다.
+    FluidSurfaceInfoBuffer fluidSurfaces;
     uint normalRoughnessTexture;
     uint weightTexture;
     uint depthTexture;
@@ -44,11 +48,73 @@ layout(push_constant) uniform ReflectPushConstants {
     // 반사를 더할 HDR 색상(rgba16f 스토리지).
     uint colorStorage;
     uint frameIndex;
-    uint maxSamples;
-    // 1 이면 히스토리를 버린다. 여기까지 124 바이트다.
-    uint reset;
-    uint debugMode;
+    // 128 바이트 한도라 셋을 묶는다: 하위 16비트 누적 상한, 비트 16 히스토리 버림, 비트 20 부터 디버그 모드.
+    uint samplesResetDebug;
 } push;
+
+uint reflectMaxSamples() {
+    return push.samplesResetDebug & 0xFFFFu;
+}
+bool reflectReset() {
+    return (push.samplesResetDebug & (1u << 16u)) != 0u;
+}
+uint reflectDebugMode() {
+    return push.samplesResetDebug >> 20u;
+}
+
+// 직접광은 조명 하나를 균등하게 골라 그림자 광선 하나로 판정한다. 경로 추적의 다음 사건 추정과 같은 식이라
+// 시간축 누적이 평균을 맞춘다.
+vec3 sampleDirectLight(Camera camera, Surface surface, inout uint seed) {
+    uint lightCount = camera.shading.x;
+    if (lightCount == 0u) {
+        return vec3(0.0);
+    }
+    uint index = min(uint(randomFloat(seed) * float(lightCount)), lightCount - 1u);
+    Light light = push.lights.items[index];
+    vec3 lightDirection;
+    float distanceToLight;
+    vec3 radiance = sampleLightRadiance(light, surface.position, lightDirection, distanceToLight);
+    if (radiance == vec3(0.0) || dot(surface.normal, lightDirection) <= 0.0) {
+        return vec3(0.0);
+    }
+    float visibility =
+        rayQueryVisibility(topLevel, surface.position, surface.normal, lightDirection, min(distanceToLight - 1e-3, 1e4));
+    return evaluateBrdf(surface, lightDirection, radiance) * visibility * float(lightCount);
+}
+
+// 물 표면 히트. 마칭 큐브 정점을 바로 읽고, 래스터 물 표면과 같은 식(water_shading.glsl)으로 셰이딩한다. 두께
+// 텍스처가 없으니 기본 두께를 쓴다.
+//
+// ponytail: 물 뒤에 있는 것을 굴절로 보지 않는다(재귀 없음). 반사 안의 물은 «반사 + 물빛» 만 있고 그 뒤는
+// 물빛으로 가려진다.
+vec3 shadeWaterHit(Camera camera, vec3 origin, vec3 direction, float hitDistance, uint customIndex, uint primitive, vec2 barycentrics, inout uint seed) {
+    FluidSurfaceInfo info = push.fluidSurfaces.items[customIndex & 0xFFFFu];
+    uint base = primitive * 3u;
+    FluidSurfaceVertex v0 = info.vertices.items[base];
+    FluidSurfaceVertex v1 = info.vertices.items[base + 1u];
+    FluidSurfaceVertex v2 = info.vertices.items[base + 2u];
+    vec3 weights = vec3(1.0 - barycentrics.x - barycentrics.y, barycentrics.x, barycentrics.y);
+    vec3 normal = normalize(decodeUnitVector(v0.normal) * weights.x + decodeUnitVector(v1.normal) * weights.y +
+                            decodeUnitVector(v2.normal) * weights.z);
+    if (dot(normal, direction) > 0.0) {
+        normal = -normal;
+    }
+    Surface surface;
+    surface.position = v0.position * weights.x + v1.position * weights.y + v2.position * weights.z;
+    surface.normal = normal;
+    surface.view = -direction;
+    surface.albedo = vec3(0.0);
+    surface.metallic = 0.0;
+    surface.roughness = clamp(info.waterColor.w, 0.02, 1.0);
+
+    vec3 reflection = environmentLight(camera, surface, 1.0, true) + sampleDirectLight(camera, surface, seed);
+    WaterShade shade = shadeWater(reflection,
+                                  info.waterColor.rgb,
+                                  info.absorption.rgb * info.absorption.w,
+                                  WATER_DEFAULT_THICKNESS,
+                                  dot(normal, surface.view));
+    return applyFog(camera, shade.color, origin, direction, hitDistance);
+}
 
 // 히트 표면을 직접광 한 표본 + 환경광으로 셰이딩한다. 재귀는 없다.
 vec3 shadeHit(Camera camera, vec3 origin, vec3 direction, float hitDistance, uint instanceIndex, uint primitive, vec2 barycentrics, inout uint seed) {
@@ -76,22 +142,7 @@ vec3 shadeHit(Camera camera, vec3 origin, vec3 direction, float hitDistance, uin
     surface.metallic = sampled.metallic;
     surface.roughness = sampled.roughness;
 
-    vec3 color = sampled.emissive;
-    // 직접광은 조명 하나를 균등하게 골라 그림자 광선 하나로 판정한다. 경로 추적의 다음 사건 추정과
-    // 같은 식이라 시간축 누적이 평균을 맞춘다.
-    uint lightCount = camera.shading.x;
-    if (lightCount > 0u) {
-        uint index = min(uint(randomFloat(seed) * float(lightCount)), lightCount - 1u);
-        Light light = push.lights.items[index];
-        vec3 lightDirection;
-        float distanceToLight;
-        vec3 radiance = sampleLightRadiance(light, surface.position, lightDirection, distanceToLight);
-        if (radiance != vec3(0.0) && dot(surface.normal, lightDirection) > 0.0) {
-            float visibility = rayQueryVisibility(
-                topLevel, surface.position, surface.normal, lightDirection, min(distanceToLight - 1e-3, 1e4));
-            color += evaluateBrdf(surface, lightDirection, radiance) * visibility * float(lightCount);
-        }
-    }
+    vec3 color = sampled.emissive + sampleDirectLight(camera, surface, seed);
     color += environmentLight(camera, surface, sampled.occlusion, true);
     return applyFog(camera, color, origin, direction, hitDistance);
 }
@@ -100,10 +151,9 @@ vec3 traceReflection(Camera camera, vec3 origin, vec3 normal, vec3 direction, fl
     rayQueryEXT query;
     // 단면 재질은 후면을 컬링해 래스터와 같은 면만 보이게 한다. 컷오프·반투명 재질은 가속 구조에
     // 불투명으로 올라가지 않아 후보로 온다.
+    // 물 표면 인스턴스(마스크 0x01)도 맞힌다. 불투명으로 올라가 후보로는 오지 않고 확정 히트에서 표식으로 가른다.
     rayQueryInitializeEXT(
-        // 마스크 0xFE: 물 표면 인스턴스(0x01)는 지나간다. 여기는 인스턴스 배열로 재질을 찾는데 물 표면은
-        // 그 배열에 없다. ponytail: 래스터 반사는 물을 투명하게 본다.
-        query, topLevel, gl_RayFlagsCullBackFacingTrianglesEXT, 0xFEu, origin + normal * 1.0e-3, 1.0e-4, direction, 1.0e4);
+        query, topLevel, gl_RayFlagsCullBackFacingTrianglesEXT, 0xFFu, origin + normal * 1.0e-3, 1.0e-4, direction, 1.0e4);
     while (rayQueryProceedEXT(query)) {
         if (rayQueryGetIntersectionTypeEXT(query, false) != gl_RayQueryCandidateIntersectionTriangleEXT) {
             continue;
@@ -136,11 +186,22 @@ vec3 traceReflection(Camera camera, vec3 origin, vec3 normal, vec3 direction, fl
         vec3 sky = sampleBindlessCubeLod(environment.y, direction, roughness * float(environment.w - 1u)).rgb;
         return applyFog(camera, sky, origin, direction, 1.0e30);
     }
+    uint customIndex = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, true));
+    if ((customIndex & FLUID_SURFACE_CUSTOM_INDEX) != 0u) {
+        return shadeWaterHit(camera,
+                             origin,
+                             direction,
+                             rayQueryGetIntersectionTEXT(query, true),
+                             customIndex,
+                             uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, true)),
+                             rayQueryGetIntersectionBarycentricsEXT(query, true),
+                             seed);
+    }
     return shadeHit(camera,
                     origin,
                     direction,
                     rayQueryGetIntersectionTEXT(query, true),
-                    uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, true)),
+                    customIndex,
                     uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, true)),
                     rayQueryGetIntersectionBarycentricsEXT(query, true),
                     seed);
@@ -213,7 +274,7 @@ void resolveStage(ivec2 pixel, ivec2 size) {
 
     vec2 motion = sampleBindless(push.velocityTexture, uv).rg;
     vec2 historyUv = uv + motion;
-    bool hasHistory = push.reset == 0u && all(greaterThanEqual(historyUv, vec2(0.0))) &&
+    bool hasHistory = !reflectReset() && all(greaterThanEqual(historyUv, vec2(0.0))) &&
                       all(lessThanEqual(historyUv, vec2(1.0)));
 
     vec3 result = current;
@@ -225,7 +286,7 @@ void resolveStage(ivec2 pixel, ivec2 size) {
         //
         // ponytail: 히트 거리로 반사의 시차를 되짚지 않는다. 카메라가 옆으로 움직이면 매끈한 면의
         // 반사가 한두 프레임 끌린다. rawStorage 의 알파에 거리를 담아 가상 점을 재투영하면 된다.
-        float limit = mix(4.0, float(push.maxSamples), normalRoughness.w);
+        float limit = mix(4.0, float(reflectMaxSamples()), normalRoughness.w);
         samples = min(history.a + 1.0, limit);
         result = mix(yCoCgToRgb(clamped), current, 1.0 / samples);
     }
@@ -233,9 +294,10 @@ void resolveStage(ivec2 pixel, ivec2 size) {
     imageStore(bindlessStorageImagesRgba16[nonuniformEXT(push.historyStorage)], pixel, vec4(result, samples));
 
     vec4 color = imageLoad(bindlessStorageImagesRgba16[nonuniformEXT(push.colorStorage)], pixel);
-    if (push.debugMode == DEBUG_MODE_REFLECTION_RAW) {
+    uint debugMode = reflectDebugMode();
+    if (debugMode == DEBUG_MODE_REFLECTION_RAW) {
         color.rgb = current;
-    } else if (push.debugMode == DEBUG_MODE_REFLECTION) {
+    } else if (debugMode == DEBUG_MODE_REFLECTION) {
         color.rgb = result;
     } else {
         color.rgb += result * weight * camera.jitter.w;

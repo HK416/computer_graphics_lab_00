@@ -2,6 +2,7 @@
 
 #include "fluid_draw_common.glsl"
 #include "fog.glsl"
+#include "water_shading.glsl"
 
 layout(location = 0) in vec3 inWorldPosition;
 layout(location = 1) in vec3 inNormal;
@@ -44,31 +45,19 @@ void main() {
         reflection += lightContribution(push.lights.items[i], surface, lightDirection);
     }
 
-    // 통과. 두께는 뒷면에서 앞면을 뺀 시야 거리 합이다. 텍스처가 없으면 한 뼘으로 친다.
-    float thickness = 0.25;
-    if (push.thicknessTexture != INVALID_TEXTURE) {
-        thickness = max(sampleBindless(push.thicknessTexture, gl_FragCoord.xy * camera.viewport.zw).r, 0.0);
-    }
-    thickness *= push.absorption.w;
-    // Beer-Lambert. 두꺼울수록 덜 통과한다. 혼합이 알파 «하나» 로만 뒤를 가리므로 파장별 투과율을
-    // 그대로 쓸 수 없다. 평균을 «얼마나 가리는가» 로 쓰고, 물빛은 아래에서 더한다.
+    // 통과. 두께는 뒷면에서 앞면을 뺀 시야 거리 합이다. 텍스처가 없으면 한 뼘으로 친다. 셰이딩 식은
+    // 광선 반사 컴퓨트와 같은 water_shading.glsl 이다.
     //
     // ponytail: 파장마다 다르게 가리려면 이중 소스 혼합(dualSrcBlend)이나 곱하기 패스가 하나 더
     // 필요하다. 지금은 흡수량만 색에 반영한다.
-    vec3 transmittance = exp(-push.absorption.rgb * thickness);
-    float absorbed = clamp(1.0 - dot(transmittance, vec3(1.0 / 3.0)), 0.0, 1.0);
-
-    // 반사를 내는 environmentLight 가 albedo=0, metallic=0 이라 f0 = 0.04 를 쓴다. 여기서 다른 값을
-    // 쓰면 «반사로 막히는 몫» 과 «알파» 가 어긋나 정면에서 에너지가 는다.
-    float nDotV = max(dot(normal, view), 1e-4);
-    float fresnel = fresnelSchlick(nDotV, vec3(0.04)).x;
-
-    // 미리 곱해진 알파. 알파는 «뒤가 얼마나 가려지는가» 다. 반사로 막히는 몫이 프레넬이고, 통과한
-    // 빛 가운데 흡수로 사라지는 몫이 absorbed 다.
-    float opacity = clamp(fresnel + (1.0 - fresnel) * absorbed, 0.0, 1.0);
-    // 흡수로 사라진 자리를 물이 스스로 내보내는 색(산란)으로 채운다. 흡수량에 «물 색» 을 곱하는
-    // 것이지, 흡수 계수를 색으로 쓰는 것이 아니다. 뒤집으면 파란 물이 주황으로 나온다.
-    vec3 color = reflection + push.waterColor.rgb * (1.0 - fresnel) * absorbed;
+    float thickness = WATER_DEFAULT_THICKNESS;
+    if (push.thicknessTexture != INVALID_TEXTURE) {
+        thickness = max(sampleBindless(push.thicknessTexture, gl_FragCoord.xy * camera.viewport.zw).r, 0.0);
+    }
+    WaterShade shade = shadeWater(
+        reflection, push.waterColor.rgb, push.absorption.rgb * push.absorption.w, thickness, dot(normal, view));
+    float opacity = shade.opacity;
+    vec3 color = shade.color;
 
     // 안개. 미리 곱해진 알파라 «들어오는 산란광» 은 물이 덮은 몫만큼만 얹어야 한다. applyFog 를 그대로
     // 쓰면 뒤에 있는 배경이 제 거리로 이미 먹은 안개가 한 번 더 더해진다. 색이 0 인 표면에 같은 함수를

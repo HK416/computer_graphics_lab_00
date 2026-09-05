@@ -257,6 +257,7 @@ struct ReflectPushConstants {
     VkDeviceAddress lods;
     VkDeviceAddress camera;
     VkDeviceAddress lights;
+    VkDeviceAddress fluidSurfaces;
     uint32_t normalRoughnessTexture;
     uint32_t weightTexture;
     uint32_t depthTexture;
@@ -267,9 +268,8 @@ struct ReflectPushConstants {
     uint32_t historyStorage;
     uint32_t colorStorage;
     uint32_t frameIndex;
-    uint32_t maxSamples;
-    uint32_t reset;
-    uint32_t debugMode;
+    // 128 바이트 한도라 셋을 묶는다: 하위 16비트 누적 상한, 비트 16 히스토리 버림, 비트 20 부터 디버그 모드.
+    uint32_t samplesResetDebug;
 };
 static_assert(sizeof(ReflectPushConstants) <= 128, "푸시 상수는 규격이 보장하는 128 바이트 안에 있어야 한다");
 

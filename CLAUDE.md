@@ -216,6 +216,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `FluidSurfacePushConstants` (`src/gfx/fluid.h`) | 동명 블록 (`shaders/fluid_surface_common.glsl`) |
 | `GpuFluidSurfaceInfo` `FLUID_FLAG_*` `FLUID_SURFACE_CUSTOM_INDEX` `FLUID_SURFACE_RAY_MASK` (`src/gfx/fluid.h`) | `FluidSurfaceInfo` `FLUID_FLAG_*` `FLUID_SURFACE_*` (`shaders/fluid_types.glsl`) |
 | `PathTracePushConstants` (`src/gfx/raytracing.cpp`) | 동명 블록 (`shaders/pathtrace_common.glsl`) — 128 바이트 한도라 작은 값은 16비트 둘씩 묶는다 |
+| `ReflectPushConstants` (`src/gfx/renderer_internal.h`) | 동명 블록 (`shaders/reflect.comp`) — `samplesResetDebug` 에 셋을 묶는다 |
 | `FluidDrawPushConstants` (`src/gfx/renderer_internal.h`) | 동명 블록 (`shaders/fluid_draw_common.glsl`) |
 | `physics::SurfaceVertex` (`src/physics/marching_cubes.h`) | `FluidSurfaceVertex` (`shaders/fluid_types.glsl`) |
 | `physics::MC_TABLE` `MC_EDGES` `MC_CORNERS` (`marching_cubes.cpp`) | `MC_TABLE` `MC_EDGE_CORNERS` `MC_CORNER_OFFSET` (`shaders/marching_cubes.glsl`) |

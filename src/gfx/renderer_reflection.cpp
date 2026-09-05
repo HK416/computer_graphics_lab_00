@@ -98,6 +98,7 @@ void Renderer::recordReflectionPass(VkCommandBuffer commandBuffer, const Frame& 
     pushConstants.lods = geometry.lodBuffer.address;
     pushConstants.camera = frame.cameraBuffer.address;
     pushConstants.lights = frame.lightBuffer.address;
+    pushConstants.fluidSurfaces = fluidSurfaceTables[frameIndex % FRAMES_IN_FLIGHT].address;
     pushConstants.normalRoughnessTexture = targets.guideNormalSlot;
     pushConstants.weightTexture = targets.guideSpecularAlbedoSlot;
     pushConstants.depthTexture = targets.depthSlot;
@@ -108,9 +109,9 @@ void Renderer::recordReflectionPass(VkCommandBuffer commandBuffer, const Frame& 
     pushConstants.historyStorage = targets.reflectionHistoryStorageSlots[write];
     pushConstants.colorStorage = targets.colorStorageSlot;
     pushConstants.frameIndex = static_cast<uint32_t>(frameIndex);
-    pushConstants.maxSamples = std::max(reflectionMaxSamples, 1U);
-    pushConstants.reset = reflectionHistoryValid && !temporalResetThisFrame ? 0U : 1U;
-    pushConstants.debugMode = debugMode;
+    bool reset = !(reflectionHistoryValid && !temporalResetThisFrame);
+    pushConstants.samplesResetDebug =
+        (std::min(std::max(reflectionMaxSamples, 1U), 0xFFFFU)) | (reset ? 1U << 16U : 0U) | (debugMode << 20U);
 
     std::array<VkDescriptorSet, 2> sets{bindless.set(), rayTracer->accelerationSet()};
     vkCmdBindDescriptorSets(commandBuffer,
