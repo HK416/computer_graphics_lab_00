@@ -19,6 +19,7 @@ public:
     const char* name() const override { return "물리"; }
     void build(Services& services) override;
     void update(Services& services, float deltaSeconds) override;
+    void ui(Services& services) override;
 
 private:
     std::unique_ptr<gfx::RigidBodySimulator> rigid;

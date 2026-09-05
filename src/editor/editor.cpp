@@ -1419,19 +1419,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     // 설정이 길어 그룹을 접을 수 있게 하고, 검색어가 있으면 이름에 그 말이 든 그룹만 펼친다.
     ImGui::SetNextItemWidth(200.0F);
     ImGui::InputTextWithHint("##settingsFilter", "그룹 검색", settingsFilter.data(), settingsFilter.size());
-    auto section = [this](const char* name) {
-        if (settingsFilter[0] != '\0') {
-            if (std::strstr(name, settingsFilter.data()) == nullptr) {
-                return false;
-            }
-            ImGui::SeparatorText(name);
-            return true;
-        }
-        // 헤더 이름이 안의 체크박스 이름("Ray Traced Reflections", "Path Tracing")과 같으면 ID 가 겹쳐 체크박스가
-        // 눌리지 않는다. 숨은 접미사로 헤더 ID 를 따로 둔다.
-        std::string header = std::string(name) + "##section";
-        return ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
-    };
+    auto section = [this](const char* name) { return settingsSection(name); };
 
     // Path Tracing은 래스터 패스를 통째로 건너뛴다. 거기 딸린 설정은 눌러도 아무 일이 없으므로
     // 디버그 뷰와 같은 이유로 잠근다.
@@ -1456,42 +1444,6 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         // 기동 시의 판정이라 그 뒤에 바뀐 것은 여기 나오지 않는다. 사용자가 고쳤거나, 가속 구조가
         // 예산을 넘어 렌더러가 스스로 광선 기능을 끈 경우가 그렇다.
         ImGui::TextDisabled("기동 시 판정이다. 지금 값은 아래 절들이 보여 준다");
-    }
-
-    if (section("프로파일러")) {
-        gfx::GpuProfiler& profiler = renderer.profiler();
-        ImGui::Checkbox("구간 계측", &profiler.enabled);
-        if (!profiler.gpuAvailable()) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(GPU 타임스탬프 미지원, CPU 만)");
-        }
-        if (profiler.enabled) {
-            ImGui::SliderFloat("평활", &profiler.smoothing, 0.01F, 1.0F, "%.2f");
-            const std::vector<gfx::ProfilerZone>& zones = profiler.zones();
-            if (zones.empty()) {
-                ImGui::TextDisabled("측정 중...");
-            } else if (ImGui::BeginTable("구간", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
-                ImGui::TableSetupColumn("구간");
-                ImGui::TableSetupColumn("CPU");
-                ImGui::TableSetupColumn("GPU");
-                ImGui::TableHeadersRow();
-                for (const gfx::ProfilerZone& zone : zones) {
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn();
-                    // 중첩된 구간은 들여써서 상위 구간과 구분한다.
-                    ImGui::Text("%*s%s", static_cast<int>(zone.depth) * 2, "", zone.name);
-                    ImGui::TableNextColumn();
-                    ImGui::Text("%.3f", static_cast<double>(zone.cpuMilliseconds));
-                    ImGui::TableNextColumn();
-                    if (zone.hasGpu) {
-                        ImGui::Text("%.3f", static_cast<double>(zone.gpuMilliseconds));
-                    } else {
-                        ImGui::TextDisabled("-");
-                    }
-                }
-                ImGui::EndTable();
-            }
-        }
     }
 
     if (section("후처리")) {
@@ -1828,20 +1780,6 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
 
     if (section("파이프라인")) {
         ImGui::Checkbox("Wireframe", &renderer.wireframe);
-        ImGui::Checkbox("콜라이더 표시", &renderer.showColliders);
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("강체 콜라이더는 초록, 유체 용기는 청록, 방출 상자는 노랑으로 덧그린다");
-        }
-        // Path Tracing은 깊이 버퍼를 채우지 않아 가림을 판정할 수 없다. 그 모드에서는 늘 보인다.
-        bool depthAvailable = !renderer.usePathTracing;
-        ImGui::BeginDisabled(!renderer.showColliders || !depthAvailable);
-        ImGui::SameLine();
-        ImGui::Checkbox("가림 판정", &renderer.colliderOcclusion);
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(depthAvailable ? "끄면 물체에 가려도 선이 그대로 보인다"
-                                             : "Path Tracing은 깊이 버퍼를 채우지 않아 늘 보인다");
-        }
-        ImGui::EndDisabled();
         ImGui::BeginDisabled(!renderer.meshShaderAvailable() || rasterOnly);
         ImGui::Checkbox("Mesh Shader 경로", &renderer.useMeshShader);
         ImGui::EndDisabled();
@@ -1903,7 +1841,25 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::Checkbox("gl_DrawID (없으면 meshlet 디버그 뷰가 메쉬 단위)", &drawIndex);
         ImGui::EndDisabled();
     }
+    // 플러그인의 절(물리·유체·프로파일러·콜라이더 표시). 렌더러 필드만 만지는 절은 위에 남아 있다.
+    if (pluginSettings) {
+        pluginSettings();
+    }
     ImGui::End();
+}
+
+bool Editor::settingsSection(const char* name) {
+    if (settingsFilter[0] != '\0') {
+        if (std::strstr(name, settingsFilter.data()) == nullptr) {
+            return false;
+        }
+        ImGui::SeparatorText(name);
+        return true;
+    }
+    // 헤더 이름이 안의 체크박스 이름("Ray Traced Reflections", "Path Tracing")과 같으면 ID 가 겹쳐 체크박스가
+    // 눌리지 않는다. 숨은 접미사로 헤더 ID 를 따로 둔다.
+    std::string header = std::string(name) + "##section";
+    return ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
 }
 
 void Editor::buildConsole() {

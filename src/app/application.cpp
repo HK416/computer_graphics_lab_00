@@ -12,7 +12,10 @@
 #include <SDL3/SDL.h>
 #include <spdlog/spdlog.h>
 
+#include "app/plugins/debug_lines_plugin.h"
+#include "app/plugins/fluid_plugin.h"
 #include "app/plugins/physics_plugin.h"
+#include "app/plugins/profiler_plugin.h"
 #include "asset/model.h"
 #include "asset/primitives.h"
 #include "core/error.h"
@@ -110,14 +113,12 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     renderer->debugMode = options.debugMode;
     renderer->fixedFrameDelta = options.fixedDeltaSeconds;
     renderer->capturePresent = options.capturePresent;
-    renderer->showColliders = options.showColliders;
     if (options.lodLevel != AUTOMATIC_LOD) {
         renderer->automaticLod = false;
         renderer->lodLevel = options.lodLevel;
     }
     renderer->lodErrorThreshold = options.lodErrorThreshold;
     renderer->useNeuralLod = options.neuralLod;
-    renderer->profiler().enabled = options.profile;
     renderer->renderScale = options.renderScale;
     renderer->upscaler = static_cast<gfx::Upscaler>(options.upscaler);
     if (options.pathTracing) {
@@ -168,10 +169,19 @@ Services Application::services() {
 // 등록 순서가 곧 프레임 안의 호출 순서다.
 void Application::registerPlugins() {
     plugins.push_back(std::make_unique<PhysicsPlugin>());
+    plugins.push_back(std::make_unique<FluidPlugin>());
+    plugins.push_back(std::make_unique<DebugLinesPlugin>());
+    plugins.push_back(std::make_unique<ProfilerPlugin>());
     Services shared = services();
     for (std::unique_ptr<Plugin>& plugin : plugins) {
         plugin->build(shared);
     }
+    editorUi->setPluginSettings([this] {
+        Services frame = services();
+        for (std::unique_ptr<Plugin>& plugin : plugins) {
+            plugin->ui(frame);
+        }
+    });
 }
 
 Application::~Application() {
@@ -266,7 +276,6 @@ void Application::applyHardwareProfile() {
     }
     renderer->ssaoSamples = hardwareProfile.ssaoSamples;
     renderer->shadowCascades = hardwareProfile.shadowCascades;
-    renderer->fluidParticleLimit = hardwareProfile.fluidParticleLimit;
     // 반사는 --reflections 로 켠 것을 끄지 않고 --no-reflections 로 끈 것을 켜지 않는다.
     if (!options.reflectionsGiven) {
         renderer->useReflections = hardwareProfile.reflections;
@@ -951,17 +960,6 @@ void Application::run() {
         }
     }
     renderer->waitIdle();
-
-    // 창을 못 보는 실행(스크린샷, CI)에서도 결과를 남긴다.
-    if (renderer->profiler().enabled) {
-        spdlog::info("구간 계측 결과 (CPU / GPU, ms)");
-        for (const gfx::ProfilerZone& zone : renderer->profiler().zones()) {
-            spdlog::info("  {:<28} {:7.3f}  {:>7}",
-                         std::string(zone.depth * 2, ' ') + zone.name,
-                         zone.cpuMilliseconds,
-                         zone.hasGpu ? std::format("{:.3f}", zone.gpuMilliseconds) : std::string{"-"});
-        }
-    }
 }
 
 } // namespace app

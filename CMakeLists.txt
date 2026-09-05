@@ -188,7 +188,10 @@ endif()
 add_executable(cg_lab
     src/main.cpp
     src/app/application.cpp
+    src/app/plugins/debug_lines_plugin.cpp
+    src/app/plugins/fluid_plugin.cpp
     src/app/plugins/physics_plugin.cpp
+    src/app/plugins/profiler_plugin.cpp
     src/asset/animation.cpp
     src/asset/gltf_loader.cpp
     src/asset/ktx2_loader.cpp

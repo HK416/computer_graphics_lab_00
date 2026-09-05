@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include <imgui.h>
+
 #include "gfx/profiler.h"
 #include "gfx/render_graph.h"
 #include "gfx/renderer.h"
@@ -56,6 +58,20 @@ void PhysicsPlugin::update(Services& services, float deltaSeconds) {
     // 인스펙터가 «지금 도는 백엔드»를 보여 주는 데 쓴다. editor 는 app 을 보지 않으므로 값으로 넘긴다.
     services.editor.rigidStatus.gpuAvailable = rigid->available();
     services.editor.rigidStatus.gpuBodies = rigid->bodyCount();
+}
+
+void PhysicsPlugin::ui(Services& services) {
+    if (!services.editor.settingsSection("물리")) {
+        return;
+    }
+    ImGui::Text(
+        "고정 간격 %.2f ms, 프레임당 최대 %u 스텝", static_cast<double>(STEP_SECONDS * 1000.0F), MAX_STEPS_PER_FRAME);
+    ImGui::TextDisabled("GPU 강체 솔버 %s, 지난 프레임 GPU 강체 %u 개",
+                        rigid->available() ? "사용 가능" : "미지원",
+                        rigid->bodyCount());
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("백엔드는 강체 부품마다 고른다. GPU 는 Jacobi 라 CPU 와 수치가 다르고 결과가 몇 프레임 늦다");
+    }
 }
 
 } // namespace app
