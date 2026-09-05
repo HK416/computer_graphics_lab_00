@@ -111,8 +111,8 @@ void Renderer::recordDebugLines(VkCommandBuffer commandBuffer,
                                 const scene::Scene& scene,
                                 VkExtent2D extent) {
     DebugLineOptions options;
-    options.colliders = showColliders;
-    options.fluidBounds = showColliders;
+    options.colliders = settings.showColliders;
+    options.fluidBounds = settings.showColliders;
     options.selected = selectedObject;
     buildDebugLines(scene, options, debugLineVertices);
     if (debugLineVertices.empty()) {
@@ -136,8 +136,8 @@ void Renderer::recordDebugLines(VkCommandBuffer commandBuffer,
     pushConstants.depthTexture = targets.depthSlot;
     // 경로 추적은 깊이 버퍼에 아무것도 쓰지 않는다(레이아웃만 맞춰 둔다). 그 내용으로 가림을
     // 판정하면 미정의 값이나 직전 래스터 프레임의 깊이를 읽으므로 그 모드에서는 늘 그린다.
-    bool depthAvailable = !(usePathTracing && rayTracer != nullptr);
-    pushConstants.occlude = colliderOcclusion && depthAvailable ? 1U : 0U;
+    bool depthAvailable = !(settings.usePathTracing && rayTracer != nullptr);
+    pushConstants.occlude = settings.colliderOcclusion && depthAvailable ? 1U : 0U;
     pushConstants.viewportSize[0] = static_cast<float>(extent.width);
     pushConstants.viewportSize[1] = static_cast<float>(extent.height);
 

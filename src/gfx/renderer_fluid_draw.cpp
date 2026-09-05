@@ -455,10 +455,10 @@ void Renderer::recordFluidPass(VkCommandBuffer commandBuffer,
                                                    fluid->surfaceRangeAddress(slot, f));
             }
             if (surfaceTable != nullptr && f < fluidCount) {
-                const scene::Fluid& settings = scene.fluids[f];
+                const scene::Fluid& fluidSettings = scene.fluids[f];
                 surfaceTable[f].vertices = fluid->surfaceVertexAddress(slot, f);
-                surfaceTable[f].waterColor = glm::vec4{settings.waterColor, settings.surfaceRoughness};
-                surfaceTable[f].absorption = glm::vec4{settings.absorption, settings.thicknessScale};
+                surfaceTable[f].waterColor = glm::vec4{fluidSettings.waterColor, fluidSettings.surfaceRoughness};
+                surfaceTable[f].absorption = glm::vec4{fluidSettings.absorption, fluidSettings.thicknessScale};
             }
         }
         base += count;

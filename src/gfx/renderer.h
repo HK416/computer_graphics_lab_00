@@ -21,6 +21,7 @@
 #include "gfx/profiler.h"
 #include "gfx/raytracing.h"
 #include "gfx/render_graph.h"
+#include "gfx/render_settings.h"
 #include "gfx/resources.h"
 #include "gfx/shadow_math.h"
 #include "gfx/upscaler.h"
@@ -228,15 +229,20 @@ struct RenderTargets {
 
 class Renderer {
 public:
-    // jobs 는 프레임마다 인스턴스 채우기와 그림자 시점별 컬링을 워커에 나누는 데 쓴다.
+    // jobs 는 프레임마다 인스턴스 채우기와 그림자 시점별 컬링을 워커에 나누는 데 쓴다. settings 는
+    // 애플리케이션이 소유하고 렌더러보다 오래 산다.
     Renderer(Context& context,
              GeometryStore& geometry,
              BindlessTextures& bindless,
              SDL_Window* window,
-             core::JobSystem& jobs);
+             core::JobSystem& jobs,
+             RenderSettings& settings);
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
+
+    // 사용자 렌더 설정. 편집기·플러그인이 여기로 고치고, 장치가 못 하는 항목은 렌더러가 여기서 끈다.
+    RenderSettings& settings;
 
     // 프레임을 시작하기 전에 밀린 크기 변경을 처리한다. UI 가 렌더 타겟을 참조하기 전에
     // 재생성이 끝나야 파괴된 이미지 뷰를 가리키는 디스크립터가 남지 않는다.
@@ -253,10 +259,6 @@ public:
     VkExtent2D displayExtent() const { return currentDisplayExtent; }
     VkExtent2D renderExtent() const { return currentRenderExtent; }
 
-    // 업스케일 설정. 배율을 낮추면 장면을 작게 그린 뒤 확대한다.
-    float renderScale = 1.0F;
-    Upscaler upscaler = Upscaler::SPATIAL;
-    float upscaleSharpness = 0.25F;
     std::vector<UpscalerInfo> upscalers() const;
     // 스왑체인에 UI 를 기록할 콜백. 편집기가 채운다.
     void setUiCallback(std::function<void(VkCommandBuffer)> callback) { uiCallback = std::move(callback); }
@@ -287,79 +289,21 @@ public:
     bool capturePresent = false;
     void waitIdle();
 
-    float exposure = 1.0F;
-    bool wireframe = false;
-    // 강체 콜라이더와 유체 경계를 선으로 덧그린다. Unity 의 기즈모처럼 물체 뒤로 숨는다.
-    bool showColliders = true;
-    bool colliderOcclusion = true;
     // 밝게 그릴 오브젝트. 편집기가 고른 것을 넣는다.
     int32_t selectedObject = -1;
-    // shaders/scene_data.glsl 의 DEBUG_MODE_* 값.
-    uint32_t debugMode = 0;
-    // 자동 LOD 선정을 끄면 이 단계를 강제한다.
-    bool automaticLod = true;
-    uint32_t lodLevel = 0;
-    // 허용할 화면 공간 오차(픽셀). 클수록 낮은 단계를 고른다.
-    float lodErrorThreshold = 1.0F;
-
-    // 그림자. 방향광과 스폿광은 시점 하나, 점광은 여섯 면을 아틀라스 타일에 담는다.
-    bool shadowsEnabled = true;
-    // 시점별 절두체 컬링과, 그림자가 화면에 닿을 수 없는 캐스터를 버리는 스윕 컬링.
-    bool shadowViewCulling = true;
-    bool shadowCasterCulling = true;
-    // 방향광 캐스케이드. 층이 모자라면 자동으로 줄어든다.
-    uint32_t shadowCascades = 4;
-    float shadowSplitLambda = 0.85F;
-    // 0 이면 장면 크기에서 자동으로 정한다.
-    float shadowDistance = 0.0F;
-    // 광원과 캐스터가 그대로인 시점은 다시 그리지 않는다.
-    bool shadowCaching = true;
     uint32_t shadowLayersDrawn() const { return shadowLayersRedrawn; }
     uint32_t shadowDrawCount() const { return shadowDrawsIssued; }
     uint32_t shadowDrawCandidates() const { return shadowDrawsTotal; }
 
-    // 화면 공간 주변광 차폐.
-    bool useSsao = true;
-    // 환경광을 IBL 로 계산한다. 끄면 균일 환경광만 남는다.
-    bool useIbl = true;
-    // 하이브리드 그림자: 카메라에서 이 거리 안쪽은 광선으로 가시성을 판정하고 나머지는 그림자 맵을
-    // 그대로 쓴다. 광선 질의를 지원하는 장치에서만 켤 수 있다.
-    bool useRayQueryShadows = false;
-    float rayShadowDistance = 12.0F;
     bool rayQueryShadowsAvailable() const;
     // 이 장치·모드에서 디버그 뷰가 값을 만들지 못하면 그 사유, 만들면 nullptr. 편집기가 콤보를 잠근다.
     const char* debugModeBlockedReason(uint32_t mode) const;
     // 광선 기능이 처음 필요할 때 하위 가속 구조를 세운다. 예산을 넘으면 사유를 남기고 광선 기능을 끈다.
     bool ensureBottomLevel();
-    // 광선 반사: 거칠기가 상한 이하인 불투명 표면의 스페큘러 IBL 을 추적한 반사로 바꾼다. 광선
-    // 질의와 IBL 이 있어야 하고, 경로 추적 중에는 그쪽이 반사를 직접 계산하므로 꺼진다.
-    bool useReflections = false;
-    float reflectionRoughnessCutoff = 0.6F;
-    float reflectionIntensity = 1.0F;
-    uint32_t reflectionMaxSamples = 16;
     bool reflectionsActive() const;
-    // 장면 반지름에 대한 비율. 장면 크기가 제각각이라 절대 길이로 두지 않는다.
-    float ssaoRadius = 0.04F;
-    float ssaoIntensity = 1.0F;
-    float ssaoBias = 0.002F;
-    uint32_t ssaoSamples = 16;
-
-    // GPU 컴퓨트가 meshlet 단위로 컬링하고 간접 그리기 명령을 만든다.
-    bool useComputeCulling = true;
-    bool frustumCulling = true;
-    bool coneCulling = true;
-    bool occlusionCulling = true;
-
-    // 신경망이 LOD 임계값을 보정해 삼각형 예산을 맞춘다.
-    bool useNeuralLod = false;
-    bool trainLodNetwork = true;
-    float triangleBudget = 60000.0F;
     LodNetwork lodNetwork;
     uint32_t lastSelectedTriangles = 0;
 
-    // 경로 추적. 하드웨어가 지원하고 가속 구조가 예산에 들어갈 때만 켤 수 있다.
-    bool usePathTracing = false;
-    PathTraceOptions pathTrace;
     bool pathTracingAvailable() const { return rayTracer != nullptr && rayTracingBlockedReason.empty(); }
     // 하위 가속 구조를 세우지 못한 사유. 비어 있으면 광선 기능을 쓸 수 있다. 편집기가 보여 준다.
     const std::string& rayTracingBlocked() const { return rayTracingBlockedReason; }
@@ -373,8 +317,6 @@ public:
     void resetPathAccumulation() { pathSampleCount = 0; }
     // 유체 입자를 그릴 내장 구 메쉬. 애플리케이션이 등록한 번호를 넣는다. 없으면 유체를 그리지 않는다.
     uint32_t fluidSphereMesh = 0xFFFFFFFFU;
-    // 유체 부품이 요청해도 이보다 많은 입자는 뿌리지 않는다. 하드웨어 프로파일이 정한다.
-    uint32_t fluidParticleLimit = FLUID_MAX_PARTICLES;
     // 유체 부품 index 가 지금 CPU 에서 도는지. 편집기가 «자동» 이 무엇을 골랐는지 보여 주는 데 쓴다.
     bool fluidOnCpu(uint32_t index) const { return fluid != nullptr && fluid->onCpu(index); }
     // 이 장치에서 유체 GPU 백엔드를 쓸 수 있는지. 편집기가 못 고르게 막는 데 쓴다.
@@ -394,11 +336,9 @@ public:
     // drawFrame 이 frameIndex - FRAMES_IN_FLIGHT + 1 값을 기다리므로 그 다음 프레임 머리에서는
     // frameIndex - FRAMES_IN_FLIGHT 까지가 끝나 있다.
     uint64_t completedFrames() const { return frameIndex >= FRAMES_IN_FLIGHT ? frameIndex - FRAMES_IN_FLIGHT : 0; }
-    // mesh shader 미지원 장치에서는 켤 수 없다.
-    bool useMeshShader = false;
     bool meshShaderAvailable() const { return meshShaderPipelines[0] != VK_NULL_HANDLE; }
     // 와이어프레임 디버그 뷰는 고전 경로에만 있으므로 그때는 mesh shader 경로를 쓰지 않는다.
-    bool useMeshPath() const { return useMeshShader && meshShaderAvailable() && !wireframe; }
+    bool useMeshPath() const { return settings.useMeshShader && meshShaderAvailable() && !settings.wireframe; }
 
     // GPU/CPU 구간 계측. 편집기가 켜고 끄며, 꺼져 있으면 기록 자체를 하지 않는다.
     GpuProfiler& profiler() { return frameProfiler; }
@@ -453,12 +393,13 @@ private:
     // RR 은 경로 추적 전용이다. 경로 추적이 꺼져 있으면 같은 DLSS 의 초해상으로 돌린다. 이렇게
     // 두지 않으면 RR 이 안내 버퍼가 없어 아무것도 쓰지 않고 돌아가, 표시 이미지가 비어 버린다.
     Upscaler effectiveUpscaler() const {
-        return upscaler == Upscaler::DLSS_RR && !usePathTracing ? Upscaler::DLSS : upscaler;
+        return settings.upscaler == Upscaler::DLSS_RR && !settings.usePathTracing ? Upscaler::DLSS : settings.upscaler;
     }
     // Ray Reconstruction 이 도는 프레임인지. 이때만 경로 추적이 누적하지 않고 1표본과 안내
     // 버퍼를 내놓으며, 지터도 들어간다.
     bool rayReconstructionActive() const {
-        return usePathTracing && rayTracer != nullptr && upscaler == Upscaler::DLSS_RR && temporalReady();
+        return settings.usePathTracing && rayTracer != nullptr && settings.upscaler == Upscaler::DLSS_RR &&
+               temporalReady();
     }
     void createMeshPipelines();
     void createPostPipelines();

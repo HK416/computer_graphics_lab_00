@@ -36,9 +36,14 @@
 
 namespace gfx {
 
-Renderer::Renderer(
-    Context& context, GeometryStore& geometry, BindlessTextures& bindless, SDL_Window* window, core::JobSystem& jobs)
-    : context(context), geometry(geometry), bindless(bindless), jobs(jobs), frameProfiler(context, FRAMES_IN_FLIGHT) {
+Renderer::Renderer(Context& context,
+                   GeometryStore& geometry,
+                   BindlessTextures& bindless,
+                   SDL_Window* window,
+                   core::JobSystem& jobs,
+                   RenderSettings& settings)
+    : context(context), geometry(geometry), bindless(bindless), jobs(jobs), settings(settings),
+      frameProfiler(context, FRAMES_IN_FLIGHT) {
     swapchain = std::make_unique<Swapchain>(context, window, vsync);
     currentDisplayExtent = swapchain->extent;
     currentRenderExtent = swapchain->extent;
@@ -341,7 +346,7 @@ void Renderer::recordCommands(Frame& frame,
     graph.clear();
 
     bool hasTranslucent = batches.draws[TRANSLUCENT_MODE][0].count + batches.draws[TRANSLUCENT_MODE][1].count > 0;
-    bool pathTracing = usePathTracing && rayTracer != nullptr;
+    bool pathTracing = settings.usePathTracing && rayTracer != nullptr;
     rayQueryPass = false;
     VkDescriptorSet bindlessSet = bindless.set();
 
@@ -504,9 +509,9 @@ void Renderer::recordCommands(Frame& frame,
                {},
                {},
                [&](VkCommandBuffer cmd) {
-                   bool wantsTlas =
-                       rayTracer != nullptr && rayTracer->bottomLevelReady() &&
-                       (pathTracing || ((useRayQueryShadows || reflectionsActive()) && rayQueryShadowsAvailable()));
+                   bool wantsTlas = rayTracer != nullptr && rayTracer->bottomLevelReady() &&
+                                    (pathTracing || ((settings.useRayQueryShadows || reflectionsActive()) &&
+                                                     rayQueryShadowsAvailable()));
                    recordFluidPass(cmd, frame, batches, scene, wantsTlas);
                }});
 
@@ -532,8 +537,8 @@ void Renderer::recordCommands(Frame& frame,
 
     // ---- 래스터 경로. 오클루전 컬링은 두 패스로 돈다. 1차는 지난 프레임 가시 집합, HZB 구축, 2차는 나머지.
     // 고전 경로는 GPU 컬링이 없어 한 패스다.
-    bool computeCullPath = useComputeCulling && !useMeshPath();
-    bool twoPhase = occlusionCulling && (useMeshPath() || computeCullPath);
+    bool computeCullPath = settings.useComputeCulling && !useMeshPath();
+    bool twoPhase = settings.occlusionCulling && (useMeshPath() || computeCullPath);
     uint32_t firstPhase = twoPhase ? CULL_PHASE_FIRST : CULL_PHASE_NONE;
     auto raster = [&] { return !pathTracing; };
     auto rasterTwoPhase = [&] { return !pathTracing && twoPhase; };
@@ -648,7 +653,7 @@ void Renderer::recordCommands(Frame& frame,
                    // 광선 질의 그림자나 반사를 쓰면 TLAS 를 집합 1 로 함께 묶고, 장면이 바뀌었으면 먼저 다시
                    // 만든다. 반사만 켜도 광선 질의 변종 프래그먼트가 돌지만, ambient.w 가 0 이라 그림자는
                    // 그림자 맵을 그대로 쓴다.
-                   rayQueryPass = (useRayQueryShadows || reflectionsActive()) && rayQueryShadowsAvailable();
+                   rayQueryPass = (settings.useRayQueryShadows || reflectionsActive()) && rayQueryShadowsAvailable();
                    if (rayQueryPass) {
                        updateAccelerationStructures(cmd, scene);
                        rayQueryPass = rayTracer->ready();
@@ -703,7 +708,7 @@ void Renderer::recordCommands(Frame& frame,
     graph.add(
         {"하늘",
          "하늘",
-         [&] { return !pathTracing && useIbl && environment->ready(); },
+         [&] { return !pathTracing && settings.useIbl && environment->ready(); },
          {depthTest},
          {colorWrite(targets.color, false), colorWrite(targets.velocity, false)},
          {},
@@ -852,7 +857,7 @@ void Renderer::recordCommands(Frame& frame,
                [](VkCommandBuffer) {}});
     graph.add({"SSAO",
                "SSAO",
-               [&] { return !pathTracing && useSsao; },
+               [&] { return !pathTracing && settings.useSsao; },
                {},
                {},
                {},
@@ -881,7 +886,7 @@ void Renderer::recordCommands(Frame& frame,
 
     TonemapPushConstants tonemapPushConstants{};
     tonemapPushConstants.colorTexture = pathTracing ? targets.pathAccumulationSampledSlot : targets.colorSlot;
-    tonemapPushConstants.exposure = exposure;
+    tonemapPushConstants.exposure = settings.exposure;
     tonemapPushConstants.camera = frame.cameraBuffer.address;
 
     // 지난 프레임 톤 매핑이 아직 읽고 있을 수 있다. 덮어쓰기 전에 그 읽기를 끝낸다(그래프가 상태를 안다).
@@ -994,13 +999,13 @@ void Renderer::recordCommands(Frame& frame,
 
                    UpscalePushConstants upscalePushConstants{};
                    upscalePushConstants.sourceTexture = targets.tonemappedSlot;
-                   upscalePushConstants.sharpness = upscaleSharpness;
+                   upscalePushConstants.sharpness = settings.upscaleSharpness;
                    upscalePushConstants.sourceSize[0] = static_cast<float>(currentRenderExtent.width);
                    upscalePushConstants.sourceSize[1] = static_cast<float>(currentRenderExtent.height);
                    upscalePushConstants.destinationSize[0] = static_cast<float>(currentDisplayExtent.width);
                    upscalePushConstants.destinationSize[1] = static_cast<float>(currentDisplayExtent.height);
 
-                   size_t upscaleVariant = upscaler == Upscaler::SPATIAL ? 1 : 0;
+                   size_t upscaleVariant = settings.upscaler == Upscaler::SPATIAL ? 1 : 0;
 
                    vkCmdBeginRendering(cmd, &upscalePass);
                    setFullViewport(cmd, currentDisplayExtent);
@@ -1021,7 +1026,7 @@ void Renderer::recordCommands(Frame& frame,
     // 업스케일이 색을 흔들지 않고, 깊이 버퍼를 텍스처로 읽어 물체 뒤로 숨을 수 있다.
     graph.add({"디버그 선",
                nullptr,
-               [&] { return showColliders; },
+               [&] { return settings.showColliders; },
                {},
                {},
                {},
@@ -1200,9 +1205,9 @@ bool Renderer::ensureBottomLevel() {
     }
     // 폴백은 두지 않는다. 광선 기능을 끄고 편집기에 사유를 보인다.
     rayTracingBlockedReason = reason;
-    usePathTracing = false;
-    useRayQueryShadows = false;
-    useReflections = false;
+    settings.usePathTracing = false;
+    settings.useRayQueryShadows = false;
+    settings.useReflections = false;
     spdlog::warn("광선 기능을 끕니다: {}", reason);
     return false;
 }
@@ -1269,7 +1274,7 @@ void Renderer::drawFrame(const scene::Scene& scene) {
     uint32_t buildZone = frameProfiler.begin("그리기 명령 구성");
     // 광선 기능을 쓸 프레임이면 하위 가속 구조를 먼저 확보한다. 예산을 넘겨 못 세우면 여기서 광선
     // 기능이 꺼지므로 뒤의 모드 판정이 래스터로 떨어져 검은 프레임이 나오지 않는다.
-    if (usePathTracing || useRayQueryShadows || useReflections) {
+    if (settings.usePathTracing || settings.useRayQueryShadows || settings.useReflections) {
         ensureBottomLevel();
     }
     FrameBatches batches = buildDrawCommands(frame, scene);

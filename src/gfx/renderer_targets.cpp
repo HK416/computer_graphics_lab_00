@@ -6,9 +6,9 @@
 namespace gfx {
 
 void Renderer::updateRenderExtent() {
-    float scale = std::clamp(renderScale, 0.25F, 2.0F);
+    float scale = std::clamp(settings.renderScale, 0.25F, 2.0F);
     // DLSS 는 렌더가 표시보다 크면 기능 생성이 InvalidParameter 로 거부된다. 배율을 1 로 자른다.
-    if (upscaler == Upscaler::DLSS || upscaler == Upscaler::DLSS_RR) {
+    if (settings.upscaler == Upscaler::DLSS || settings.upscaler == Upscaler::DLSS_RR) {
         scale = std::min(scale, 1.0F);
     }
     VkExtent2D scaled{std::max(static_cast<uint32_t>(static_cast<float>(currentDisplayExtent.width) * scale), 1U),
@@ -60,8 +60,8 @@ void Renderer::updateUpscaler() {
         // 편집기는 쓸 수 없는 방식을 고르지 못하게 하지만 실행 인자로는 들어올 수 있다.
         UpscalerInfo info = upscalerInfo(wanted, context);
         spdlog::warn("{} 을(를) 쓸 수 없어 내장 공간 업스케일로 돌아갑니다: {}", info.name, info.reason);
-        upscaler = Upscaler::SPATIAL;
-        activeUpscaler = upscaler;
+        settings.upscaler = Upscaler::SPATIAL;
+        activeUpscaler = settings.upscaler;
         return;
     }
     temporalUpscaler->resize(currentRenderExtent, currentDisplayExtent);
@@ -73,10 +73,10 @@ std::vector<Renderer::TargetView> Renderer::targetViews() const {
     VkExtent2D render = currentRenderExtent;
     // 어느 대상이 이번 프레임에 채워지는지는 recordCommands 의 분기와 같아야 한다. 경로 추적은
     // 래스터 패스를 통째로 건너뛰어 깊이·모션 벡터·HZB 가 낡거나 다른 레이아웃에 남는다.
-    bool pathTracing = usePathTracing && rayTracer != nullptr;
+    bool pathTracing = settings.usePathTracing && rayTracer != nullptr;
     bool temporal = temporalReady() && (!pathTracing || rayReconstructionActive());
     bool raster = !pathTracing;
-    bool occlusion = raster && occlusionCulling && (useMeshPath() || useComputeCulling);
+    bool occlusion = raster && settings.occlusionCulling && (useMeshPath() || settings.useComputeCulling);
     std::vector<TargetView> views{
         {"표시 (Upscaling)", {targets.present.view}, READ_ONLY, currentDisplayExtent},
         {"색상 (HDR)", {targets.color.view}, READ_ONLY, render, nullptr, raster},
@@ -90,8 +90,8 @@ std::vector<Renderer::TargetView> Renderer::targetViews() const {
          READ_ONLY,
          {SHADOW_MAP_SIZE, SHADOW_MAP_SIZE},
          "층",
-         raster && shadowsEnabled && !shadowViews.empty()},
-        {"SSAO", {targets.ssao.view}, GENERAL, targets.ssaoExtent, nullptr, raster && useSsao},
+         raster && settings.shadowsEnabled && !shadowViews.empty()},
+        {"SSAO", {targets.ssao.view}, GENERAL, targets.ssaoExtent, nullptr, raster && settings.useSsao},
         // HZB 와 Bloom 은 컴퓨트가 쓰고 읽으므로 계속 GENERAL 이고, 밉을 골라 본다.
         {"HZB", targets.hzbMipViews, GENERAL, targets.hzbExtent, "밉", occlusion},
         {"Bloom", targets.bloomMipViews, GENERAL, targets.bloomExtent, "밉", bloomActive},
@@ -432,8 +432,8 @@ void Renderer::createRenderTargets() {
 // ponytail: 광선 질의는 있는데 경로 추적 파이프라인이 없는 장치도 규격상 가능하다. 그런 장치까지
 // 받으려면 가속 구조 관리만 RayTracer 에서 떼어내야 한다.
 bool Renderer::reflectionsActive() const {
-    return useReflections && rayQueryShadowsAvailable() && useIbl && environment != nullptr && environment->ready() &&
-           !(usePathTracing && rayTracer != nullptr);
+    return settings.useReflections && rayQueryShadowsAvailable() && settings.useIbl && environment != nullptr &&
+           environment->ready() && !(settings.usePathTracing && rayTracer != nullptr);
 }
 
 bool Renderer::rayQueryShadowsAvailable() const {
@@ -441,7 +441,7 @@ bool Renderer::rayQueryShadowsAvailable() const {
 }
 
 const char* Renderer::debugModeBlockedReason(uint32_t mode) const {
-    if (usePathTracing && rayTracer != nullptr && !pathTraceSupportsDebugMode(mode)) {
+    if (settings.usePathTracing && rayTracer != nullptr && !pathTraceSupportsDebugMode(mode)) {
         return "경로 추적에는 이 값이 없어 셰이딩으로 그린다";
     }
     if ((mode == DEBUG_MODE_REFLECTION_RAW || mode == DEBUG_MODE_REFLECTION) && !rayQueryShadowsAvailable()) {

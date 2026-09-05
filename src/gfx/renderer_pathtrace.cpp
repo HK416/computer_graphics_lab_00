@@ -22,7 +22,7 @@ void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, 
                  VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
     // 표본 상한에 닿으면 더 쏘지 않고 쌓아 둔 결과를 그대로 보여준다.
-    if (pathTrace.maxSamples == 0 || pathSampleCount < pathTrace.maxSamples) {
+    if (settings.pathTrace.maxSamples == 0 || pathSampleCount < settings.pathTrace.maxSamples) {
         // 광선 생성 셰이더가 모든 화소를 덮어쓰므로 지난 내용은 버려도 된다.
         imageBarrier(commandBuffer,
                      targets.velocity.handle,
@@ -71,7 +71,7 @@ void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, 
                          targets.velocityStorageSlot,
                          static_cast<uint32_t>(frameIndex),
                          guides ? 0U : pathSampleCount,
-                         pathTrace,
+                         settings.pathTrace,
                          guideTargets);
         if (guides) {
             for (const Image* image : {&targets.guideDiffuseAlbedo,

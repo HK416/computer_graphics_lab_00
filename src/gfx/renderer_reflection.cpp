@@ -110,8 +110,8 @@ void Renderer::recordReflectionPass(VkCommandBuffer commandBuffer, const Frame& 
     pushConstants.colorStorage = targets.colorStorageSlot;
     pushConstants.frameIndex = static_cast<uint32_t>(frameIndex);
     bool reset = !(reflectionHistoryValid && !temporalResetThisFrame);
-    pushConstants.samplesResetDebug =
-        (std::min(std::max(reflectionMaxSamples, 1U), 0xFFFFU)) | (reset ? 1U << 16U : 0U) | (debugMode << 20U);
+    pushConstants.samplesResetDebug = (std::min(std::max(settings.reflectionMaxSamples, 1U), 0xFFFFU)) |
+                                      (reset ? 1U << 16U : 0U) | (settings.debugMode << 20U);
 
     std::array<VkDescriptorSet, 2> sets{bindless.set(), rayTracer->accelerationSet()};
     vkCmdBindDescriptorSets(commandBuffer,

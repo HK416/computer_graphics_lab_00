@@ -1045,9 +1045,9 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
             fluid.particleCount = static_cast<uint32_t>(particles);
         }
         // 하드웨어 프로파일이 상한을 낮췄으면 슬라이더 값보다 적게 뿌린다. 그 사실을 여기서 말한다.
-        if (fluid.particleCount > renderer.fluidParticleLimit) {
+        if (fluid.particleCount > renderer.settings.fluidParticleLimit) {
             ImGui::SameLine();
-            ImGui::TextDisabled("(상한 %u)", renderer.fluidParticleLimit);
+            ImGui::TextDisabled("(상한 %u)", renderer.settings.fluidParticleLimit);
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("자동 튜닝이 이 기기의 상한을 정했다. --auto-tune off 로 풀 수 있다");
             }
@@ -1424,7 +1424,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
 
     // Path Tracing은 래스터 패스를 통째로 건너뛴다. 거기 딸린 설정은 눌러도 아무 일이 없으므로
     // 디버그 뷰와 같은 이유로 잠근다.
-    bool rasterOnly = renderer.usePathTracing;
+    bool rasterOnly = renderer.settings.usePathTracing;
     // 광선 그림자와 반사는 래스터 안에서 도는 것이라 Path Tracing과는 무관하다.
     bool rayQueryReady = renderer.rayQueryShadowsAvailable() && !rasterOnly;
     scene::PostProcess& post = active.post;
@@ -1448,7 +1448,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     }
 
     if (section("후처리")) {
-        ImGui::SliderFloat("노출", &renderer.exposure, 0.05F, 8.0F, "%.2f");
+        ImGui::SliderFloat("노출", &renderer.settings.exposure, 0.05F, 8.0F, "%.2f");
         ImGui::SliderFloat("Bloom 세기", &post.bloomIntensity, 0.0F, 2.0F, "%.2f");
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("임계값을 넘은 부분을 흐려서 «더할» 세기");
@@ -1488,18 +1488,18 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::ColorEdit3("환경광", glm::value_ptr(active.ambientColor));
         ImGui::SliderFloat("환경광 세기", &active.ambientIntensity, 0.0F, 4.0F, "%.2f");
         ImGui::BeginDisabled(rasterOnly);
-        ImGui::Checkbox("그림자", &renderer.shadowsEnabled);
-        ImGui::BeginDisabled(!renderer.shadowsEnabled);
-        ImGui::Checkbox("시점 Frustum Culling", &renderer.shadowViewCulling);
+        ImGui::Checkbox("그림자", &renderer.settings.shadowsEnabled);
+        ImGui::BeginDisabled(!renderer.settings.shadowsEnabled);
+        ImGui::Checkbox("시점 Frustum Culling", &renderer.settings.shadowViewCulling);
         ImGui::SameLine();
-        ImGui::Checkbox("Caster Culling", &renderer.shadowCasterCulling);
-        ImGui::Checkbox("시점 캐싱", &renderer.shadowCaching);
-        int cascades = static_cast<int>(renderer.shadowCascades);
+        ImGui::Checkbox("Caster Culling", &renderer.settings.shadowCasterCulling);
+        ImGui::Checkbox("시점 캐싱", &renderer.settings.shadowCaching);
+        int cascades = static_cast<int>(renderer.settings.shadowCascades);
         if (ImGui::SliderInt("캐스케이드", &cascades, 1, static_cast<int>(gfx::MAX_SHADOW_CASCADES))) {
-            renderer.shadowCascades = static_cast<uint32_t>(cascades);
+            renderer.settings.shadowCascades = static_cast<uint32_t>(cascades);
         }
-        ImGui::SliderFloat("분할 혼합", &renderer.shadowSplitLambda, 0.0F, 1.0F, "%.2f");
-        ImGui::DragFloat("그림자 거리", &renderer.shadowDistance, 1.0F, 0.0F, 10000.0F, "%.0f (0 이면 자동)");
+        ImGui::SliderFloat("분할 혼합", &renderer.settings.shadowSplitLambda, 0.0F, 1.0F, "%.2f");
+        ImGui::DragFloat("그림자 거리", &renderer.settings.shadowDistance, 1.0F, 0.0F, 10000.0F, "%.0f (0 이면 자동)");
         ImGui::Text("드로우 %u / %u, 다시 그린 층 %u",
                     renderer.shadowDrawCount(),
                     renderer.shadowDrawCandidates(),
@@ -1509,9 +1509,9 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::TextDisabled("그림자 시점 %u개까지 (방향광/스폿광 1, 점광 6)", gfx::MAX_SHADOW_VIEWS);
 
         ImGui::BeginDisabled(!rayQueryReady);
-        ImGui::Checkbox("Ray Traced Shadows (하이브리드)", &renderer.useRayQueryShadows);
-        ImGui::BeginDisabled(!renderer.useRayQueryShadows);
-        ImGui::SliderFloat("광선 거리", &renderer.rayShadowDistance, 1.0F, 200.0F, "%.0f");
+        ImGui::Checkbox("Ray Traced Shadows (하이브리드)", &renderer.settings.useRayQueryShadows);
+        ImGui::BeginDisabled(!renderer.settings.useRayQueryShadows);
+        ImGui::SliderFloat("광선 거리", &renderer.settings.rayShadowDistance, 1.0F, 200.0F, "%.0f");
         ImGui::EndDisabled();
         ImGui::EndDisabled();
         if (rasterOnly) {
@@ -1528,15 +1528,15 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     }
 
     if (section("Ray Traced Reflections")) {
-        bool reflectionReady = rayQueryReady && renderer.useIbl;
+        bool reflectionReady = rayQueryReady && renderer.settings.useIbl;
         ImGui::BeginDisabled(!reflectionReady);
-        ImGui::Checkbox("Ray Traced Reflections", &renderer.useReflections);
-        ImGui::BeginDisabled(!renderer.useReflections);
-        ImGui::SliderFloat("거칠기 상한", &renderer.reflectionRoughnessCutoff, 0.03F, 1.0F, "%.2f");
-        ImGui::SliderFloat("반사 세기", &renderer.reflectionIntensity, 0.0F, 2.0F, "%.2f");
-        int reflectionSamples = static_cast<int>(renderer.reflectionMaxSamples);
+        ImGui::Checkbox("Ray Traced Reflections", &renderer.settings.useReflections);
+        ImGui::BeginDisabled(!renderer.settings.useReflections);
+        ImGui::SliderFloat("거칠기 상한", &renderer.settings.reflectionRoughnessCutoff, 0.03F, 1.0F, "%.2f");
+        ImGui::SliderFloat("반사 세기", &renderer.settings.reflectionIntensity, 0.0F, 2.0F, "%.2f");
+        int reflectionSamples = static_cast<int>(renderer.settings.reflectionMaxSamples);
         if (ImGui::SliderInt("누적 상한", &reflectionSamples, 1, 64)) {
-            renderer.reflectionMaxSamples = static_cast<uint32_t>(reflectionSamples);
+            renderer.settings.reflectionMaxSamples = static_cast<uint32_t>(reflectionSamples);
         }
         ImGui::EndDisabled();
         ImGui::EndDisabled();
@@ -1544,7 +1544,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
             ImGui::TextDisabled("Path Tracing이 반사를 직접 계산한다");
         } else if (!rayQueryReady) {
             ImGui::TextDisabled("이 장치는 Ray Query를 지원하지 않는다");
-        } else if (!renderer.useIbl) {
+        } else if (!renderer.settings.useIbl) {
             ImGui::TextDisabled("IBL 이 꺼져 있으면 스페큘러 항이 없어 반사도 쉰다");
         } else {
             ImGui::TextDisabled("거칠기 상한 이하의 불투명 표면만 추적한다. 픽셀당 광선 하나, Temporal 누적");
@@ -1553,7 +1553,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
 
     if (section("환경 (IBL)")) {
         scene::Environment& env = active.environment;
-        ImGui::Checkbox("IBL 사용", &renderer.useIbl);
+        ImGui::Checkbox("IBL 사용", &renderer.settings.useIbl);
         int skySource = env.useHdr ? 1 : 0;
         if (ImGui::Combo("하늘", &skySource, "절차적\0HDR 파일\0")) {
             env.useHdr = skySource == 1;
@@ -1607,14 +1607,14 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
 
     if (section("SSAO")) {
         ImGui::BeginDisabled(rasterOnly);
-        ImGui::Checkbox("사용", &renderer.useSsao);
-        ImGui::BeginDisabled(!renderer.useSsao);
-        ImGui::SliderFloat("반지름", &renderer.ssaoRadius, 0.005F, 0.3F, "장면의 %.3f배");
-        ImGui::SliderFloat("세기", &renderer.ssaoIntensity, 0.0F, 3.0F, "%.2f");
-        ImGui::SliderFloat("편향", &renderer.ssaoBias, 0.0F, 0.02F, "%.4f");
-        int samples = static_cast<int>(renderer.ssaoSamples);
+        ImGui::Checkbox("사용", &renderer.settings.useSsao);
+        ImGui::BeginDisabled(!renderer.settings.useSsao);
+        ImGui::SliderFloat("반지름", &renderer.settings.ssaoRadius, 0.005F, 0.3F, "장면의 %.3f배");
+        ImGui::SliderFloat("세기", &renderer.settings.ssaoIntensity, 0.0F, 3.0F, "%.2f");
+        ImGui::SliderFloat("편향", &renderer.settings.ssaoBias, 0.0F, 0.02F, "%.4f");
+        int samples = static_cast<int>(renderer.settings.ssaoSamples);
         if (ImGui::SliderInt("표본", &samples, 4, 64)) {
-            renderer.ssaoSamples = static_cast<uint32_t>(samples);
+            renderer.settings.ssaoSamples = static_cast<uint32_t>(samples);
         }
         ImGui::EndDisabled();
         ImGui::EndDisabled();
@@ -1628,28 +1628,32 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
 
     if (section("컬링과 LOD")) {
         ImGui::BeginDisabled(rasterOnly);
-        ImGui::Checkbox("Compute Culling", &renderer.useComputeCulling);
+        ImGui::Checkbox("Compute Culling", &renderer.settings.useComputeCulling);
         // 오클루전은 Mesh Shader 경로의 태스크 셰이더에도 적용되므로 Compute Culling 잠금 밖에 둔다.
-        ImGui::Checkbox("HZB Occlusion Culling (두 패스)", &renderer.occlusionCulling);
-        ImGui::BeginDisabled(!renderer.useComputeCulling);
-        ImGui::Checkbox("Frustum Culling", &renderer.frustumCulling);
+        ImGui::Checkbox("HZB Occlusion Culling (두 패스)", &renderer.settings.occlusionCulling);
+        ImGui::BeginDisabled(!renderer.settings.useComputeCulling);
+        ImGui::Checkbox("Frustum Culling", &renderer.settings.frustumCulling);
         ImGui::SameLine();
-        ImGui::Checkbox("Normal Cone Culling", &renderer.coneCulling);
+        ImGui::Checkbox("Normal Cone Culling", &renderer.settings.coneCulling);
         ImGui::EndDisabled();
 
-        ImGui::Checkbox("자동 LOD 선정", &renderer.automaticLod);
-        if (renderer.automaticLod) {
-            ImGui::SliderFloat("허용 화면 오차", &renderer.lodErrorThreshold, 0.1F, 32.0F, "%.2f px");
+        ImGui::Checkbox("자동 LOD 선정", &renderer.settings.automaticLod);
+        if (renderer.settings.automaticLod) {
+            ImGui::SliderFloat("허용 화면 오차", &renderer.settings.lodErrorThreshold, 0.1F, 32.0F, "%.2f px");
 
-            ImGui::Checkbox("Neural LOD", &renderer.useNeuralLod);
-            if (renderer.useNeuralLod) {
-                ImGui::Checkbox("학습", &renderer.trainLodNetwork);
+            ImGui::Checkbox("Neural LOD", &renderer.settings.useNeuralLod);
+            if (renderer.settings.useNeuralLod) {
+                ImGui::Checkbox("학습", &renderer.settings.trainLodNetwork);
                 ImGui::SameLine();
                 if (ImGui::Button("가중치 초기화")) {
                     renderer.lodNetwork.reset();
                 }
-                ImGui::SliderFloat(
-                    "삼각형 예산", &renderer.triangleBudget, 1000.0F, 500000.0F, "%.0f", ImGuiSliderFlags_Logarithmic);
+                ImGui::SliderFloat("삼각형 예산",
+                                   &renderer.settings.triangleBudget,
+                                   1000.0F,
+                                   500000.0F,
+                                   "%.0f",
+                                   ImGuiSliderFlags_Logarithmic);
                 ImGui::SliderFloat(
                     "학습률", &renderer.lodNetwork.learningRate, 0.001F, 0.5F, "%.3f", ImGuiSliderFlags_Logarithmic);
                 ImGui::Text("손실 %.5f, 기대 삼각형 %.0f",
@@ -1657,10 +1661,10 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
                             static_cast<double>(renderer.lodNetwork.lastSoftTriangleCount()));
             }
         } else {
-            int lodLevel = static_cast<int>(renderer.lodLevel);
+            int lodLevel = static_cast<int>(renderer.settings.lodLevel);
             int maxLod = std::max(static_cast<int>(geometryStore != nullptr ? geometryStore->maxLodCount() : 1) - 1, 0);
             if (ImGui::SliderInt("LOD 단계", &lodLevel, 0, std::max(maxLod, 0))) {
-                renderer.lodLevel = static_cast<uint32_t>(lodLevel);
+                renderer.settings.lodLevel = static_cast<uint32_t>(lodLevel);
             }
         }
 
@@ -1671,7 +1675,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     }
 
     if (section("해상도와 Upscaling")) {
-        if (ImGui::SliderFloat("렌더 배율", &renderer.renderScale, 0.25F, 2.0F, "%.2f")) {
+        if (ImGui::SliderFloat("렌더 배율", &renderer.settings.renderScale, 0.25F, 2.0F, "%.2f")) {
             // 배율은 다음 프레임의 표시 크기 갱신에서 반영된다.
         }
         ImGui::Text("장면 %ux%u -> 표시 %ux%u",
@@ -1681,17 +1685,18 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
                     renderer.displayExtent().height);
 
         std::vector<gfx::UpscalerInfo> upscalers = renderer.upscalers();
-        bool dlssSelected = renderer.upscaler == gfx::Upscaler::DLSS || renderer.upscaler == gfx::Upscaler::DLSS_RR;
+        bool dlssSelected =
+            renderer.settings.upscaler == gfx::Upscaler::DLSS || renderer.settings.upscaler == gfx::Upscaler::DLSS_RR;
         for (const gfx::UpscalerInfo& info : upscalers) {
             // Ray Reconstruction 은 DLSS 의 한 모드다. 목록에 따로 두면 초해상과 무관한 별개 기법처럼
             // 보이고, Path Tracing을 켜야 한다는 조건도 드러나지 않는다. 아래에서 체크박스로 다룬다.
             if (info.kind == gfx::Upscaler::DLSS_RR) {
                 continue;
             }
-            bool selected = info.kind == gfx::Upscaler::DLSS ? dlssSelected : renderer.upscaler == info.kind;
+            bool selected = info.kind == gfx::Upscaler::DLSS ? dlssSelected : renderer.settings.upscaler == info.kind;
             ImGui::BeginDisabled(!info.available);
             if (ImGui::RadioButton(info.name, selected)) {
-                renderer.upscaler = info.kind;
+                renderer.settings.upscaler = info.kind;
             }
             ImGui::EndDisabled();
             if (!info.available) {
@@ -1699,19 +1704,19 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
                 ImGui::TextDisabled("(%s)", info.reason);
             }
         }
-        if (renderer.upscaler == gfx::Upscaler::SPATIAL) {
-            ImGui::SliderFloat("Sharpening", &renderer.upscaleSharpness, 0.0F, 1.0F, "%.2f");
+        if (renderer.settings.upscaler == gfx::Upscaler::SPATIAL) {
+            ImGui::SliderFloat("Sharpening", &renderer.settings.upscaleSharpness, 0.0F, 1.0F, "%.2f");
         }
         if (dlssSelected) {
             ImGui::Indent();
 
             // 사전 설정은 곧 렌더 배율이다. NGX 에 넘기는 값도 배율에서 되돌리므로 둘이 어긋날 수 없다.
-            gfx::DlssQuality quality = gfx::dlssQualityForScale(renderer.renderScale);
+            gfx::DlssQuality quality = gfx::dlssQualityForScale(renderer.settings.renderScale);
             if (ImGui::BeginCombo("품질", gfx::dlssQualityName(quality))) {
                 for (uint32_t index = 0; index < gfx::DLSS_QUALITY_COUNT; ++index) {
                     auto candidate = static_cast<gfx::DlssQuality>(index);
                     if (ImGui::Selectable(gfx::dlssQualityName(candidate), candidate == quality)) {
-                        renderer.renderScale = gfx::dlssQualityScale(candidate);
+                        renderer.settings.renderScale = gfx::dlssQualityScale(candidate);
                     }
                 }
                 ImGui::EndCombo();
@@ -1723,16 +1728,16 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
                     reconstruction = info;
                 }
             }
-            bool useReconstruction = renderer.upscaler == gfx::Upscaler::DLSS_RR;
+            bool useReconstruction = renderer.settings.upscaler == gfx::Upscaler::DLSS_RR;
             ImGui::BeginDisabled(!reconstruction.available);
             if (ImGui::Checkbox("Ray Reconstruction", &useReconstruction)) {
-                renderer.upscaler = useReconstruction ? gfx::Upscaler::DLSS_RR : gfx::Upscaler::DLSS;
+                renderer.settings.upscaler = useReconstruction ? gfx::Upscaler::DLSS_RR : gfx::Upscaler::DLSS;
             }
             ImGui::EndDisabled();
             if (!reconstruction.available) {
                 ImGui::SameLine();
                 ImGui::TextDisabled("(%s)", reconstruction.reason);
-            } else if (useReconstruction && !renderer.usePathTracing) {
+            } else if (useReconstruction && !renderer.settings.usePathTracing) {
                 ImGui::TextDisabled("Path Tracing을 켜야 동작한다. 그전까지는 Super Resolution 으로 돌아간다");
             } else if (useReconstruction) {
                 ImGui::TextDisabled("Path Tracing 1표본을 Denoise 하면서 확대한다");
@@ -1744,7 +1749,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
 
     if (section("Path Tracing")) {
         ImGui::BeginDisabled(!renderer.pathTracingAvailable());
-        ImGui::Checkbox("Path Tracing", &renderer.usePathTracing);
+        ImGui::Checkbox("Path Tracing", &renderer.settings.usePathTracing);
         ImGui::EndDisabled();
         if (!renderer.pathTracingAvailable()) {
             ImGui::SameLine();
@@ -1752,8 +1757,8 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
             if (!renderer.rayTracingBlocked().empty()) {
                 ImGui::TextWrapped("%s", renderer.rayTracingBlocked().c_str());
             }
-        } else if (renderer.usePathTracing) {
-            gfx::PathTraceOptions& options = renderer.pathTrace;
+        } else if (renderer.settings.usePathTracing) {
+            gfx::PathTraceOptions& options = renderer.settings.pathTrace;
             int bounces = static_cast<int>(options.maxBounces);
             if (ImGui::SliderInt("반사 횟수", &bounces, 1, 16)) {
                 options.maxBounces = static_cast<uint32_t>(bounces);
@@ -1780,9 +1785,9 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     }
 
     if (section("파이프라인")) {
-        ImGui::Checkbox("Wireframe", &renderer.wireframe);
+        ImGui::Checkbox("Wireframe", &renderer.settings.wireframe);
         ImGui::BeginDisabled(!renderer.meshShaderAvailable() || rasterOnly);
-        ImGui::Checkbox("Mesh Shader 경로", &renderer.useMeshShader);
+        ImGui::Checkbox("Mesh Shader 경로", &renderer.settings.useMeshShader);
         ImGui::EndDisabled();
         if (!renderer.meshShaderAvailable()) {
             ImGui::SameLine();
@@ -1805,12 +1810,12 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
                                                            "Reflection Raw",
                                                            "Reflection Accumulated"};
         // Path Tracing이나 이 장치가 못 만드는 값은 개별로 잠그고 사유를 보인다.
-        if (ImGui::BeginCombo("디버그 뷰", DEBUG_MODE_NAMES[renderer.debugMode])) {
+        if (ImGui::BeginCombo("디버그 뷰", DEBUG_MODE_NAMES[renderer.settings.debugMode])) {
             for (uint32_t mode = 0; mode < IM_ARRAYSIZE(DEBUG_MODE_NAMES); ++mode) {
                 const char* blocked = renderer.debugModeBlockedReason(mode);
                 ImGui::BeginDisabled(blocked != nullptr);
-                if (ImGui::Selectable(DEBUG_MODE_NAMES[mode], renderer.debugMode == mode)) {
-                    renderer.debugMode = mode;
+                if (ImGui::Selectable(DEBUG_MODE_NAMES[mode], renderer.settings.debugMode == mode)) {
+                    renderer.settings.debugMode = mode;
                 }
                 ImGui::EndDisabled();
                 if (blocked != nullptr && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
@@ -1819,7 +1824,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
             }
             ImGui::EndCombo();
         }
-        if (const char* blocked = renderer.debugModeBlockedReason(renderer.debugMode); blocked != nullptr) {
+        if (const char* blocked = renderer.debugModeBlockedReason(renderer.settings.debugMode); blocked != nullptr) {
             ImGui::TextDisabled("%s", blocked);
         }
 

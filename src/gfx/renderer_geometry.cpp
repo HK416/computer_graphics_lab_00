@@ -240,7 +240,7 @@ void Renderer::createMeshPipelines() {
         if (drawMeshTasksIndirect == nullptr) {
             core::fatal("vkCmdDrawMeshTasksIndirectEXT 를 찾을 수 없습니다");
         }
-        useMeshShader = true;
+        settings.useMeshShader = true;
         spdlog::info("mesh shader 경로 사용 가능");
     }
 
@@ -260,7 +260,7 @@ void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer,
 
     Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];
     bool meshPath = useMeshPath();
-    bool cullPath = useComputeCulling && !meshPath;
+    bool cullPath = settings.useComputeCulling && !meshPath;
 
     size_t firstMode = translucentPass ? TRANSLUCENT_MODE : 0;
     size_t lastMode = translucentPass ? TRANSLUCENT_MODE + 1 : TRANSLUCENT_MODE;
@@ -286,9 +286,9 @@ void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer,
             if (!bound) {
                 VkPipeline pipeline = rayQueryPass ? meshShaderRayQueryPipelines[mode] : meshShaderPipelines[mode];
                 if (!meshPath) {
-                    pipeline = wireframe && !translucentPass ? wireframePipeline
-                               : rayQueryPass                ? meshRayQueryPipelines[mode]
-                                                             : meshPipelines[mode];
+                    pipeline = settings.wireframe && !translucentPass ? wireframePipeline
+                               : rayQueryPass                         ? meshRayQueryPipelines[mode]
+                                                                      : meshPipelines[mode];
                 }
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
                 bound = true;
@@ -342,9 +342,9 @@ void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer,
     // 1차에만 그린다(오클루전 컬링 대상이 아니다).
     // ponytail: 입자 단위 오클루전 컬링은 없다. 필요하면 입자마다 meshlet 그룹을 두되 디스패치 한도를 본다.
     if (!translucentPass && cullPhase != CULL_PHASE_SECOND && batches.fluidDraws.count > 0) {
-        VkPipeline pipeline = wireframe      ? wireframePipeline
-                              : rayQueryPass ? meshRayQueryPipelines[0]
-                                             : meshPipelines[0];
+        VkPipeline pipeline = settings.wireframe ? wireframePipeline
+                              : rayQueryPass     ? meshRayQueryPipelines[0]
+                                                 : meshPipelines[0];
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         vkCmdSetCullMode(commandBuffer, VK_CULL_MODE_BACK_BIT);
         vkCmdPushConstants(commandBuffer,

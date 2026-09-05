@@ -104,38 +104,38 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     geometry = std::make_unique<gfx::GeometryStore>(*context);
     registerBuiltinModels();
     loadScenes();
-    renderer = std::make_unique<gfx::Renderer>(*context, *geometry, *bindless, window, jobs);
+    renderer = std::make_unique<gfx::Renderer>(*context, *geometry, *bindless, window, jobs, settings);
     // 입자는 수만 개가 그려지므로 극에 삼각형이 몰리지 않는 정이십면체 구를 쓴다.
     renderer->fluidSphereMesh = primitiveMeshes[static_cast<size_t>(asset::Primitive::ICO_SPHERE)];
     editorUi = std::make_unique<editor::Editor>(*context, *renderer, window);
     editorUi->workerCount = jobs.workerCount();
     editorUi->primitiveMeshes = primitiveMeshes;
-    renderer->debugMode = options.debugMode;
+    settings.debugMode = options.debugMode;
     renderer->fixedFrameDelta = options.fixedDeltaSeconds;
     renderer->capturePresent = options.capturePresent;
     if (options.lodLevel != AUTOMATIC_LOD) {
-        renderer->automaticLod = false;
-        renderer->lodLevel = options.lodLevel;
+        settings.automaticLod = false;
+        settings.lodLevel = options.lodLevel;
     }
-    renderer->lodErrorThreshold = options.lodErrorThreshold;
-    renderer->useNeuralLod = options.neuralLod;
-    renderer->renderScale = options.renderScale;
-    renderer->upscaler = static_cast<gfx::Upscaler>(options.upscaler);
+    settings.lodErrorThreshold = options.lodErrorThreshold;
+    settings.useNeuralLod = options.neuralLod;
+    settings.renderScale = options.renderScale;
+    settings.upscaler = static_cast<gfx::Upscaler>(options.upscaler);
     if (options.pathTracing) {
         // 편집기 체크박스와 같은 게이트를 탄다.
         if (renderer->pathTracingAvailable()) {
-            renderer->usePathTracing = true;
+            settings.usePathTracing = true;
         } else {
             spdlog::warn("이 장치는 경로 추적을 지원하지 않아 --pathtrace 를 무시한다");
         }
     }
     if (options.triangleBudget > 0.0F) {
-        renderer->triangleBudget = options.triangleBudget;
+        settings.triangleBudget = options.triangleBudget;
     }
-    renderer->occlusionCulling = options.occlusionCulling;
-    renderer->useReflections = options.reflections;
+    settings.occlusionCulling = options.occlusionCulling;
+    settings.useReflections = options.reflections;
     if (!options.meshShader) {
-        renderer->useMeshShader = false;
+        settings.useMeshShader = false;
     }
     applyHardwareProfile();
     orbitDegreesPerFrame = options.orbitDegreesPerFrame;
@@ -163,7 +163,8 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
 }
 
 Services Application::services() {
-    return Services{scenes, jobs, options, hardwareProfile, *context, *bindless, *geometry, *renderer, *editorUi};
+    return Services{
+        scenes, jobs, options, hardwareProfile, settings, *context, *bindless, *geometry, *renderer, *editorUi};
 }
 
 // 등록 순서가 곧 프레임 안의 호출 순서다.
@@ -269,18 +270,18 @@ void Application::applyHardwareProfile() {
 
     // 명령줄이 정한 것은 자동 튜닝보다 세다. 스크린샷 비교가 인자대로 도는 것이 중요하다.
     if (!options.renderScaleGiven) {
-        renderer->renderScale = hardwareProfile.renderScale;
+        settings.renderScale = hardwareProfile.renderScale;
     }
     if (!options.upscalerGiven) {
-        renderer->upscaler = static_cast<gfx::Upscaler>(hardwareProfile.upscaler);
+        settings.upscaler = static_cast<gfx::Upscaler>(hardwareProfile.upscaler);
     }
-    renderer->ssaoSamples = hardwareProfile.ssaoSamples;
-    renderer->shadowCascades = hardwareProfile.shadowCascades;
+    settings.ssaoSamples = hardwareProfile.ssaoSamples;
+    settings.shadowCascades = hardwareProfile.shadowCascades;
     // 반사는 --reflections 로 켠 것을 끄지 않고 --no-reflections 로 끈 것을 켜지 않는다.
     if (!options.reflectionsGiven) {
-        renderer->useReflections = hardwareProfile.reflections;
+        settings.useReflections = hardwareProfile.reflections;
     }
-    renderer->useRayQueryShadows = hardwareProfile.rayQueryShadows;
+    settings.useRayQueryShadows = hardwareProfile.rayQueryShadows;
 
     spdlog::info("자동 튜닝({}): 등급 {}", gfx::autoTuneName(options.autoTune), gfx::tierName(hardwareProfile.tier));
     for (const std::string& reason : hardwareProfile.reasons) {

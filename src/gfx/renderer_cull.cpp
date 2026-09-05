@@ -162,13 +162,14 @@ void Renderer::recordCullPass(VkCommandBuffer commandBuffer, const FrameBatches&
     pushConstants.drawCommands = frame.meshletDrawBuffer.address;
     pushConstants.drawCounts = frame.drawCountBuffer.address;
     pushConstants.instanceCount = batches.instanceCount;
-    pushConstants.flags = (frustumCulling ? CULL_FLAG_FRUSTUM : 0U) | (coneCulling ? CULL_FLAG_CONE : 0U);
+    pushConstants.flags =
+        (settings.frustumCulling ? CULL_FLAG_FRUSTUM : 0U) | (settings.coneCulling ? CULL_FLAG_CONE : 0U);
     pushConstants.phase = phase;
     pushConstants.network = frame.lodNetworkBuffer.address;
     pushConstants.skinnedBounds = skinnedBoundsBuffer.address;
     pushConstants.visibility = meshletVisibilityBuffer.address;
     pushConstants.drawMeshlets = frame.meshletDrawMeshletBuffer.address;
-    if (useNeuralLod) {
+    if (settings.useNeuralLod) {
         pushConstants.flags |= CULL_FLAG_NEURAL_LOD;
     }
 

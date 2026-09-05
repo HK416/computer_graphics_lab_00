@@ -233,7 +233,7 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
 
         // 영역광은 반구 전체로 빛을 내보내 시점 하나로 담을 수 없어 그림자를 만들지 않는다.
         uint32_t viewsNeeded = 0;
-        if (shadowsEnabled && source.castsShadow) {
+        if (settings.shadowsEnabled && source.castsShadow) {
             switch (source.type) {
             case scene::LightType::DIRECTIONAL:
             case scene::LightType::SPOT:
@@ -248,7 +248,7 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
         }
         // 방향광은 캐스케이드 수만큼 층을 쓴다. 층이 모자라면 버리지 말고 캐스케이드를 줄인다.
         if (source.type == scene::LightType::DIRECTIONAL && viewsNeeded > 0) {
-            viewsNeeded = std::min(std::clamp(shadowCascades, 1U, MAX_SHADOW_CASCADES),
+            viewsNeeded = std::min(std::clamp(settings.shadowCascades, 1U, MAX_SHADOW_CASCADES),
                                    static_cast<uint32_t>(MAX_SHADOW_VIEWS - shadowViews.size()));
         }
 
@@ -267,9 +267,10 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
                 float depthNear = -(sceneInLight.z + sceneRadius);
                 float depthFar = -(sceneInLight.z - sceneRadius);
 
-                float farDistance = shadowDistance > 0.0F ? shadowDistance : std::min(4.0F * sceneRadius, 500.0F);
+                float farDistance =
+                    settings.shadowDistance > 0.0F ? settings.shadowDistance : std::min(4.0F * sceneRadius, 500.0F);
                 std::array<float, MAX_SHADOW_CASCADES> splits{};
-                cascadeSplits(scene.camera.nearPlane, farDistance, viewsNeeded, shadowSplitLambda, splits);
+                cascadeSplits(scene.camera.nearPlane, farDistance, viewsNeeded, settings.shadowSplitLambda, splits);
 
                 float aspect =
                     static_cast<float>(currentRenderExtent.width) / static_cast<float>(currentRenderExtent.height);
@@ -316,7 +317,7 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
 
 FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene) {
     // 유체 입자는 오브젝트 인스턴스 뒤에 이어 붙으므로 그만큼 더 잡는다. 내장 구가 없으면 그리지 않는다.
-    fluid->setParticleLimit(fluidParticleLimit);
+    fluid->setParticleLimit(settings.fluidParticleLimit);
     bool fluidActive = fluid->prepare(scene, &scene != lastScene);
     uint32_t particleTotal = geometry.meshLive(fluidSphereMesh) ? fluid->totalParticles() : 0;
     reserveInstances(frame, static_cast<uint32_t>(scene.objects.size()) + particleTotal);
@@ -343,7 +344,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     // 경로 추적 프레임은 래스터 패스를 건너뛰므로 meshlet 그룹을 아무도 읽지 않는다. 자동 LOD 는
     // 메쉬의 모든 단계를 후보로 올리기 때문에 그냥 두면 헛일이 적지 않다. 인스턴스는 상위 가속
     // 구조가 쓰므로 그대로 채운다.
-    bool needMeshletGroups = !(usePathTracing && rayTracer != nullptr);
+    bool needMeshletGroups = !(settings.usePathTracing && rayTracer != nullptr);
     uint32_t skinnedVertexCursor = 0;
     uint32_t skinnedMeshletCursor = 0;
     uint32_t visibilityCursor = 0;
@@ -358,7 +359,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     };
     auto lodFor = [this, &scene](uint32_t index) -> const GpuMeshLod& {
         const GpuMesh& mesh = geometry.mesh(scene.meshOf(index));
-        return geometry.lod(mesh.lodOffset + std::min(lodLevel, mesh.lodCount - 1));
+        return geometry.lod(mesh.lodOffset + std::min(settings.lodLevel, mesh.lodCount - 1));
     };
     // 자동 선정은 GPU 가 DAG 전체에서 고르므로 모든 단계의 meshlet 을 후보로 올려야 한다. 한
     // 단계만 올리면 오차가 "부모를 그려라"로 판정될 때 그 부모가 후보에 없어 아무것도 그려지지
@@ -366,10 +367,10 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     // 고정 단계일 때는 GPU 가 그 단계만 통과시키므로 그 범위만 올린다.
     auto meshletRangeFor = [this, &scene](uint32_t index) {
         const GpuMesh& mesh = geometry.mesh(scene.meshOf(index));
-        if (automaticLod) {
+        if (settings.automaticLod) {
             return std::pair<uint32_t, uint32_t>{mesh.meshletOffset, mesh.meshletCount};
         }
-        const GpuMeshLod& fixed = geometry.lod(mesh.lodOffset + std::min(lodLevel, mesh.lodCount - 1));
+        const GpuMeshLod& fixed = geometry.lod(mesh.lodOffset + std::min(settings.lodLevel, mesh.lodCount - 1));
         return std::pair<uint32_t, uint32_t>{fixed.meshletOffset, fixed.meshletCount};
     };
     auto groupsFor = [&meshletRangeFor](uint32_t index) {
@@ -707,7 +708,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     // 다만 Ray Reconstruction 은 누적 자체를 하지 않고 지터를 요구하므로 그때는 넣는다.
     glm::vec2 jitterNdc{0.0F};
     currentJitter = glm::vec2{0.0F};
-    if (temporalReady() && (!(usePathTracing && rayTracer != nullptr) || rayReconstructionActive())) {
+    if (temporalReady() && (!(settings.usePathTracing && rayTracer != nullptr) || rayReconstructionActive())) {
         uint32_t phases = jitterPhaseCount(currentRenderExtent.width, currentDisplayExtent.width);
         currentJitter = haltonJitter(jitterIndex % phases + 1);
         ++jitterIndex;
@@ -721,7 +722,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     uint32_t lightZone = frameProfiler.begin("조명 구성");
     buildLights(frame, scene);
     frameProfiler.end(lightZone);
-    if (usePathTracing && rayTracer != nullptr) {
+    if (settings.usePathTracing && rayTracer != nullptr) {
         // 경로 추적은 그림자 아틀라스를 읽지 않는다. 시점마다 캐스터를 걸러 명령을 짜는 CPU 비용을
         // 통째로 아끼고, 편집기 표시도 실제로 그리는 양과 어긋나지 않게 0 으로 둔다.
         shadowBatches.clear();
@@ -742,19 +743,20 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                             (2.0F * std::tan(glm::radians(scene.camera.fovYDegrees) * 0.5F));
     camera->parameters = glm::vec4{scene.camera.nearPlane,
                                    projectionScale,
-                                   lodErrorThreshold,
-                                   automaticLod ? -1.0F : static_cast<float>(lodLevel)};
+                                   settings.lodErrorThreshold,
+                                   settings.automaticLod ? -1.0F : static_cast<float>(settings.lodLevel)};
     camera->shading = glm::uvec4{static_cast<uint32_t>(frameLights.size()),
                                  shadowViews.empty() ? asset::INVALID_TEXTURE : targets.shadowAtlasSlot,
-                                 useSsao ? targets.ssaoSlot : asset::INVALID_TEXTURE,
+                                 settings.useSsao ? targets.ssaoSlot : asset::INVALID_TEXTURE,
                                  environment->environmentSlot()};
-    bool iblReady = useIbl && environment->ready();
+    bool iblReady = settings.useIbl && environment->ready();
     camera->environment = glm::uvec4{environment->irradianceSlot(),
                                      environment->prefilterSlot(),
                                      environment->brdfSlot(),
                                      iblReady ? environment->prefilterMipCount() : 0U};
-    bool rayShadows = useRayQueryShadows && rayQueryShadowsAvailable();
-    camera->ambient = glm::vec4{scene.ambientColor * scene.ambientIntensity, rayShadows ? rayShadowDistance : 0.0F};
+    bool rayShadows = settings.useRayQueryShadows && rayQueryShadowsAvailable();
+    camera->ambient =
+        glm::vec4{scene.ambientColor * scene.ambientIntensity, rayShadows ? settings.rayShadowDistance : 0.0F};
     camera->viewport = glm::vec4{static_cast<float>(currentRenderExtent.width),
                                  static_cast<float>(currentRenderExtent.height),
                                  1.0F / static_cast<float>(currentRenderExtent.width),
@@ -765,10 +767,11 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                              static_cast<uint32_t>(targets.hzbStorageSlots.size() - 1),
                              targets.hzbExtent.width,
                              targets.hzbExtent.height};
-    camera->jitter = glm::vec4{jitterNdc, reflectionsActive() ? reflectionRoughnessCutoff : 0.0F, reflectionIntensity};
+    camera->jitter = glm::vec4{
+        jitterNdc, reflectionsActive() ? settings.reflectionRoughnessCutoff : 0.0F, settings.reflectionIntensity};
     camera->fog = glm::vec4{scene.post.fogColor, scene.post.fogDensity};
     camera->fogParameters = glm::vec4{scene.post.fogHeight, scene.post.fogFalloff, 0.0F, 0.0F};
-    camera->flags = glm::uvec4{debugMode, 0U, 0U, 0U};
+    camera->flags = glm::uvec4{settings.debugMode, 0U, 0U, 0U};
     previousViewProjection = unjitteredViewProjection;
     temporalResetThisFrame = temporalReset;
 
@@ -776,11 +779,11 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     // 수백 표본이 쌓인 뒤에는 새 표본이 1/N 밖에 못 섞여 화면이 멈춘 것처럼 보인다.
     // 경로 추적이 그릴 수 있는 디버그 뷰만 넘긴다. 편집기가 고른 값은 그대로 두어 래스터로
     // 돌아갔을 때 이어지게 한다. 이 대입이 traceInputsChanged 를 통해 누적을 초기화한다.
-    pathTrace.debugMode = pathTraceSupportsDebugMode(debugMode) ? debugMode : 0U;
-    bool traceInputsChanged = pathTrace != lastPathTrace || useIbl != lastUseIbl || camera->fog != lastFog ||
-                              camera->fogParameters != lastFogParameters;
-    lastPathTrace = pathTrace;
-    lastUseIbl = useIbl;
+    settings.pathTrace.debugMode = pathTraceSupportsDebugMode(settings.debugMode) ? settings.debugMode : 0U;
+    bool traceInputsChanged = settings.pathTrace != lastPathTrace || settings.useIbl != lastUseIbl ||
+                              camera->fog != lastFog || camera->fogParameters != lastFogParameters;
+    lastPathTrace = settings.pathTrace;
+    lastUseIbl = settings.useIbl;
     lastFog = camera->fog;
     lastFogParameters = camera->fogParameters;
     if (camera->viewProjection != lastViewProjection || sceneChangedThisFrame || traceInputsChanged) {
@@ -798,7 +801,7 @@ void Renderer::updateLodNetwork(const scene::Scene& scene, Frame& frame, float p
     auto uploadWeights = [&frame, this]() {
         std::memcpy(frame.lodNetworkBuffer.mapped, &lodNetwork.weights(), sizeof(GpuLodNetwork));
     };
-    if (!useNeuralLod || !trainLodNetwork) {
+    if (!settings.useNeuralLod || !settings.trainLodNetwork) {
         uploadWeights();
         return;
     }
@@ -859,7 +862,7 @@ void Renderer::updateLodNetwork(const scene::Scene& scene, Frame& frame, float p
 
     // 표본은 전체의 일부이므로 예산도 같은 비율로 줄인다.
     float sampleRatio = static_cast<float>(samples.size() * stride) / static_cast<float>(candidateCount);
-    lodNetwork.train(samples, lodErrorThreshold, triangleBudget * std::max(sampleRatio, 1e-3F));
+    lodNetwork.train(samples, settings.lodErrorThreshold, settings.triangleBudget * std::max(sampleRatio, 1e-3F));
     uploadWeights();
 }
 

@@ -56,10 +56,10 @@ void Renderer::recordSsaoPass(VkCommandBuffer commandBuffer, const Frame& frame)
     pushConstants.size[0] = static_cast<int32_t>(targets.ssaoExtent.width);
     pushConstants.size[1] = static_cast<int32_t>(targets.ssaoExtent.height);
     // 반지름은 장면 크기에 대한 비율이라 여우든 헬멧이든 비슷하게 보인다.
-    pushConstants.radius = ssaoRadius * sceneRadius;
-    pushConstants.intensity = ssaoIntensity;
-    pushConstants.bias = ssaoBias;
-    pushConstants.sampleCount = ssaoSamples;
+    pushConstants.radius = settings.ssaoRadius * sceneRadius;
+    pushConstants.intensity = settings.ssaoIntensity;
+    pushConstants.bias = settings.ssaoBias;
+    pushConstants.sampleCount = settings.ssaoSamples;
     vkCmdPushConstants(
         commandBuffer, ssaoPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
     vkCmdDispatch(commandBuffer, (targets.ssaoExtent.width + 7) / 8, (targets.ssaoExtent.height + 7) / 8, 1);

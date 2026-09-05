@@ -24,17 +24,18 @@ void Renderer::buildShadowDraws(Frame& frame, const FrameBatches& batches, const
     }
 
     // 어떤 층을 다시 그릴지 먼저 정한다. 설정이 바뀌면 그리는 집합 자체가 달라지므로 전부 무효화한다.
-    uint64_t settings = static_cast<uint64_t>(lodLevel) | (static_cast<uint64_t>(automaticLod) << 8U) |
-                        (static_cast<uint64_t>(shadowViews.size()) << 16U) |
-                        (static_cast<uint64_t>(shadowViewCulling) << 24U) |
-                        (static_cast<uint64_t>(shadowCasterCulling) << 25U) |
-                        (static_cast<uint64_t>(std::bit_cast<uint32_t>(lodErrorThreshold)) << 32U);
+    uint64_t shadowKey = static_cast<uint64_t>(settings.lodLevel) |
+                         (static_cast<uint64_t>(settings.automaticLod) << 8U) |
+                         (static_cast<uint64_t>(shadowViews.size()) << 16U) |
+                         (static_cast<uint64_t>(settings.shadowViewCulling) << 24U) |
+                         (static_cast<uint64_t>(settings.shadowCasterCulling) << 25U) |
+                         (static_cast<uint64_t>(std::bit_cast<uint32_t>(settings.lodErrorThreshold)) << 32U);
     //
     // ponytail: 장면이 조금이라도 바뀌면 층을 전부 다시 그린다. 움직인 캐스터의 이전/현재 경계구를
     // 시점 절두체와 비교해 걸린 층만 무효화하면 더 아낄 수 있지만, 지금은 카메라만 움직이는 경우가
     // 대부분이고 그때는 이 조건이 걸리지 않아 이득이 이미 나온다.
-    bool invalidateAll = !shadowCaching || settings != lastShadowSettings || sceneChangedThisFrame;
-    lastShadowSettings = settings;
+    bool invalidateAll = !settings.shadowCaching || shadowKey != lastShadowSettings || sceneChangedThisFrame;
+    lastShadowSettings = shadowKey;
     for (uint32_t layer = 0; layer < shadowViews.size(); ++layer) {
         // 캐스케이드 텍셀 스냅 덕에 카메라가 텍셀 안에서 움직이는 동안에는 행렬이 그대로다.
         bool changed = invalidateAll || !shadowLayers[layer].valid ||
@@ -88,12 +89,12 @@ void Renderer::buildShadowDraws(Frame& frame, const FrameBatches& batches, const
                 for (uint32_t view = 0; view < viewCount; ++view) {
                     const ShadowView& shadowView = shadowViews[view];
                     // 광원 절두체 밖이면 이 시점에 아무것도 남기지 않는다.
-                    if (shadowViewCulling &&
+                    if (settings.shadowViewCulling &&
                         !sphereInFrustum(viewPlanes[view], viewPlaneCounts[view], glm::vec3(sphere), sphere.w)) {
                         continue;
                     }
                     // 그림자가 뻗어 나갈 범위까지 부풀려도 카메라에 닿지 않으면 화면에 나올 수 없다.
-                    if (shadowCasterCulling) {
+                    if (settings.shadowCasterCulling) {
                         glm::vec3 direction = shadowView.directional
                                                   ? shadowView.sweepDirection
                                                   : glm::normalize(glm::vec3(sphere) - shadowView.origin);
@@ -132,7 +133,8 @@ void Renderer::buildShadowDraws(Frame& frame, const FrameBatches& batches, const
             if (mode == 0) {
                 for (uint32_t f = 0; f < batches.fluidDraws.count; ++f) {
                     const glm::vec4& sphere = fluidBounds[f];
-                    if (shadowViewCulling && !sphereInFrustum(planes, planeCount, glm::vec3(sphere), sphere.w)) {
+                    if (settings.shadowViewCulling &&
+                        !sphereInFrustum(planes, planeCount, glm::vec3(sphere), sphere.w)) {
                         continue;
                     }
                     destination[cursor++] = source[batches.fluidDraws.first + f];

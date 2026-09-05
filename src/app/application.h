@@ -167,6 +167,8 @@ private:
     std::unique_ptr<gfx::BindlessTextures> bindless;
     std::unique_ptr<gfx::TextureCache> textures;
     std::unique_ptr<gfx::GeometryStore> geometry;
+    // 렌더 설정. 렌더러·편집기·플러그인이 참조로 공유하므로 렌더러보다 먼저 선언한다.
+    gfx::RenderSettings settings;
     std::unique_ptr<gfx::Renderer> renderer;
     std::unique_ptr<editor::Editor> editorUi;
     core::JobSystem jobs;
