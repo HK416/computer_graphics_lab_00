@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <future>
 #include <vector>
 
 #include <glm/mat4x4.hpp>
@@ -155,13 +156,9 @@ public:
     bool surfaceAvailable() const { return surfaceReady; }
     // CPU 백엔드가 인스턴스를 직접 쓴다. 명령 기록 전에, 프레임 버퍼가 매핑된 채로 부른다.
     // instances 와 tlasInstances 는 매핑 포인터이며 tlasInstances 가 널이면 쓰지 않는다.
-    //
-    // ponytail: 시뮬레이션이 여기서 동기로 돌아 주 스레드를 막는다. 기본 입자 수(8192)에 12 스레드로
-    // 프레임당 9 ms 쯤이고 그동안 GPU 는 논다. 겹치려면 지난 프레임 결과를 그리고 이번 프레임 계산을
-    // 백그라운드로 돌려야 한다(한 프레임 늦은 물이 된다).
+    // 지난 프레임이 beginCpuStep 으로 띄운 스텝을 먼저 거두고 그 결과를 쓴다.
     void writeCpuInstances(uint32_t index,
                            const scene::Scene& scene,
-                           float deltaSeconds,
                            void* instances,
                            uint32_t instanceBase,
                            void* tlasInstances,
@@ -170,6 +167,13 @@ public:
                            uint32_t sphereMesh,
                            VkDeviceAddress surfaceBlas,
                            bool resetHistory);
+    // 다음 프레임의 물을 백그라운드에서 계산한다. 이번 프레임이 solver 를 다 읽은 뒤(인스턴스·표면 기록 뒤)에
+    // 부른다. 그래서 물은 한 프레임 늦게 보이고 콜라이더도 띄운 시점의 것을 본다. 스텝 자체는 그대로라
+    // --fixed-dt 면 실행마다 같은 결과다.
+    //
+    // ponytail: 프레임마다 std::async 로 스레드를 하나 띄운다. JobSystem 에 비동기 작업 API 가 없어서다.
+    // 워커 안에서 parallelFor 를 부르는 것은 백그라운드 모델 적재와 같은 방식이다.
+    void beginCpuStep(uint32_t index, const scene::Scene& scene, float deltaSeconds);
     // 유체 index 를 표면으로 그리는지. 부품 설정이 표면이고 정점 버퍼가 서 있어야 참이다.
     bool surfaceActive(uint32_t index) const;
     // 표면 정점 버퍼의 주소와 간접 그리기 인자 버퍼. surfaceActive 가 참일 때만 의미가 있다.
@@ -244,7 +248,10 @@ private:
         // CPU 백엔드면 참이다. GPU 버퍼는 만들지 않고 solver 가 상태를 든다.
         bool cpu = false;
         physics::FluidSolver solver;
+        // 지난 프레임이 띄운 CPU 스텝. solver 를 읽거나 버리기 전에 waitCpuStep 으로 거둔다.
+        std::future<void> pendingStep;
     };
+    void waitCpuStep(State& state);
 
     void createPipelines();
     void destroyState(State& state);

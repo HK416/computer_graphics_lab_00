@@ -415,7 +415,6 @@ void Renderer::recordFluidPass(VkCommandBuffer commandBuffer,
         if (fluid->onCpu(f)) {
             fluid->writeCpuInstances(f,
                                      scene,
-                                     frameDeltaSeconds,
                                      frame.instanceBuffer.mapped,
                                      batches.fluidInstanceBase + base,
                                      tlasMapped,
@@ -460,6 +459,10 @@ void Renderer::recordFluidPass(VkCommandBuffer commandBuffer,
                 surfaceTable[f].waterColor = glm::vec4{fluidSettings.waterColor, fluidSettings.surfaceRoughness};
                 surfaceTable[f].absorption = glm::vec4{fluidSettings.absorption, fluidSettings.thicknessScale};
             }
+        }
+        // CPU 백엔드는 이번 프레임이 solver 를 다 읽은 지금 다음 프레임 물을 백그라운드로 계산한다.
+        if (fluid->onCpu(f)) {
+            fluid->beginCpuStep(f, scene, frameDeltaSeconds);
         }
         base += count;
     }

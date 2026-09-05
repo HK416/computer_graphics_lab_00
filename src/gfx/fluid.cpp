@@ -140,7 +140,15 @@ void FluidSimulator::createPipelines() {
     }
 }
 
+void FluidSimulator::waitCpuStep(State& state) {
+    if (state.pendingStep.valid()) {
+        state.pendingStep.get();
+    }
+}
+
 void FluidSimulator::destroyState(State& state) {
+    // 백그라운드 스텝이 solver 를 쓰는 중이면 끝날 때까지 기다린다.
+    waitCpuStep(state);
     // 진행 중인 프레임의 명령 버퍼에 이 버퍼들의 주소가 이미 실려 있을 수 있다. 바로 지우면 GPU 가
     // 사라진 메모리를 읽는다. 맡겨 두고 그 프레임이 끝난 뒤에 지운다.
     for (Buffer& buffer : state.positions) {
@@ -310,6 +318,12 @@ bool FluidSimulator::prepare(const scene::Scene& scene, bool sceneSwitched) {
             destroyState(states[i]);
         }
     }
+    if (states.size() != scene.fluids.size()) {
+        // resize 가 재할당하면 State 가 옮겨져 백그라운드 스텝이 잡은 solver 포인터가 매달린다. 먼저 거둔다.
+        for (State& state : states) {
+            waitCpuStep(state);
+        }
+    }
     states.resize(scene.fluids.size());
 
     // 부품 배열이 압축되면 첨자가 밀려 states[k] 가 다른 유체를 맡게 된다. 설정과 변환이 우연히
@@ -385,7 +399,6 @@ bool FluidSimulator::onCpu(uint32_t index) const {
 
 void FluidSimulator::writeCpuInstances(uint32_t index,
                                        const scene::Scene& scene,
-                                       float deltaSeconds,
                                        void* instances,
                                        uint32_t instanceBase,
                                        void* tlasInstances,
@@ -398,6 +411,8 @@ void FluidSimulator::writeCpuInstances(uint32_t index,
     if (!state.cpu || state.count == 0 || instances == nullptr) {
         return;
     }
+    // 지난 프레임이 띄운 스텝의 결과가 이번 프레임의 물이다.
+    waitCpuStep(state);
 
     physics::FluidParams params = deriveParams(state, scene);
     bool emitted = false;
@@ -405,9 +420,6 @@ void FluidSimulator::writeCpuInstances(uint32_t index,
         state.solver.emit(params, state.count);
         state.needsEmit = false;
         emitted = true;
-    }
-    if (scene.simulating) {
-        state.solver.step(params, deltaSeconds, &jobs);
     }
 
     // 인스턴스 배치는 shaders/fluid_instances.comp 와 같아야 한다. 래스터와 광선 경로가 오브젝트
@@ -477,6 +489,20 @@ void FluidSimulator::writeCpuInstances(uint32_t index,
     });
 
     state.solver.keepRendered();
+}
+
+void FluidSimulator::beginCpuStep(uint32_t index, const scene::Scene& scene, float deltaSeconds) {
+    State& state = states[index];
+    if (!state.cpu || state.count == 0 || !scene.simulating || state.solver.particleCount() != state.count) {
+        return;
+    }
+    waitCpuStep(state);
+    // 매개변수는 값으로 잡는다. 장면은 다음 프레임에 바뀌지만 이 스텝은 지금 것을 본다.
+    physics::FluidParams params = deriveParams(state, scene);
+    physics::FluidSolver* solver = &state.solver;
+    core::JobSystem* workers = &jobs;
+    state.pendingStep = std::async(
+        std::launch::async, [solver, params, deltaSeconds, workers] { solver->step(params, deltaSeconds, workers); });
 }
 
 uint32_t FluidSimulator::particleCount(uint32_t index) const {
