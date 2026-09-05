@@ -104,22 +104,19 @@ struct Context {
 
     // 진행 중인 프레임이 아직 읽고 있을 수 있는 자원을 바로 지우지 않고 모아 둔다. 편집기가 유체
     // 부품을 떼는 것처럼 자원이 사라지는 일은 프레임 한가운데 일어나는데, 그때마다 장치를 세우면
-    // 편집할 때마다 화면이 끊긴다. 대신 그 프레임이 끝난 뒤에 지운다.
+    // 편집할 때마다 화면이 끊긴다. 대신 다음 프레임 첫머리에서 지운다.
     void retireBuffer(Buffer& buffer);
     // 파괴 함수가 여기 없는 자원(가속 구조 등)을 같은 규칙으로 맡긴다. 맡긴 순서대로 지우므로,
     // 다른 자원을 붙들고 있는 것을 먼저 맡기면 수명 순서도 지켜진다.
     void retireDeferred(std::function<void()> destroy);
-    // completedFrame 까지의 제출이 모두 끝났을 때 부른다. 그 전에 맡긴 것을 실제로 지운다.
-    void collectRetired(uint64_t completedFrame);
-    // 지금 기록 중인 프레임 번호. 렌더러가 프레임마다 채운다.
-    uint64_t retireFrame = 0;
+    bool hasRetired() const { return !retiredResources.empty(); }
+    // 제출이 하나도 남아 있지 않을 때 부른다. 맡긴 것을 전부 지운다. «FRAMES_IN_FLIGHT 뒤» 같은
+    // 프레임 번호 판정으로는 모자란다. MoltenVK 는 장치 주소 버퍼를 제출마다 전부 상주시키므로,
+    // 살아 있던 동안 제출된 명령이 하나라도 돌고 있으면 지우는 순간 장치가 죽는다.
+    void collectRetired();
 
 private:
-    struct RetiredResource {
-        std::function<void()> destroy;
-        uint64_t frame = 0;
-    };
-    std::vector<RetiredResource> retiredResources;
+    std::vector<std::function<void()>> retiredResources;
 };
 
 } // namespace gfx

@@ -584,7 +584,7 @@ void Renderer::waitIdle() {
     VK_CHECK(vkDeviceWaitIdle(context.device));
     // 어느 제출도 남아 있지 않으니 맡아 둔 자원을 여기서 전부 돌려준다. 장면을 열거나 스왑체인을
     // 다시 만드는 자리가 모두 이 함수를 거친다.
-    context.collectRetired(UINT64_MAX);
+    context.collectRetired();
 }
 
 void Renderer::setVsync(bool enabled) {
@@ -5206,19 +5206,22 @@ void Renderer::drawFrame(const scene::Scene& scene) {
 
     Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];
 
-    // 이 프레임이 맡기는 버퍼에 붙일 번호. buildDrawCommands 안에서 유체 상태가 사라질 수 있다.
-    context.retireFrame = frameIndex;
-
-    // 같은 프레임 자원을 다시 쓰기 전에 FRAMES_IN_FLIGHT 이전 프레임의 완료를 기다린다.
-    if (frameIndex >= FRAMES_IN_FLIGHT) {
-        uint64_t waitValue = frameIndex - FRAMES_IN_FLIGHT + 1;
-        VkSemaphoreWaitInfo waitInfo{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
-        waitInfo.semaphoreCount = 1;
-        waitInfo.pSemaphores = &frameTimeline;
-        waitInfo.pValues = &waitValue;
-        VK_CHECK(vkWaitSemaphores(context.device, &waitInfo, UINT64_MAX));
-        // 그 프레임까지의 제출이 끝났으므로 그때 맡긴 자원은 이제 아무도 읽지 않는다.
-        context.collectRetired(frameIndex - FRAMES_IN_FLIGHT);
+    // 같은 프레임 자원을 다시 쓰기 전에 FRAMES_IN_FLIGHT 이전 프레임의 완료를 기다린다. 지난 프레임에
+    // 맡긴 자원이 있으면(buildDrawCommands 에서 유체 상태가 사라지는 때) 바로 앞 프레임까지 기다려
+    // 제출이 하나도 남지 않게 한 뒤 지운다. 자원이 사라지는 프레임은 드물어 그때만 한 프레임 값을 낸다.
+    if (frameIndex > 0) {
+        bool drain = context.hasRetired();
+        if (drain || frameIndex >= FRAMES_IN_FLIGHT) {
+            uint64_t waitValue = drain ? frameIndex : frameIndex - FRAMES_IN_FLIGHT + 1;
+            VkSemaphoreWaitInfo waitInfo{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+            waitInfo.semaphoreCount = 1;
+            waitInfo.pSemaphores = &frameTimeline;
+            waitInfo.pValues = &waitValue;
+            VK_CHECK(vkWaitSemaphores(context.device, &waitInfo, UINT64_MAX));
+        }
+        if (drain) {
+            context.collectRetired();
+        }
     }
 
     // 타임라인 대기를 통과했으므로 이 슬롯의 지난 쿼리 결과를 대기 없이 읽을 수 있다.
