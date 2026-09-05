@@ -389,6 +389,39 @@ int main() {
         std::printf("  상자 192개 더미 2초 뒤 관통 없음\n");
     }
 
+    // 모서리끼리 비스듬히 걸친 상자. 면 축만 보면 침투를 과대 평가해 튀거나 가라앉는다. 능선(운동학, Z 축 45°)
+    // 위에 X 축 45° 로 돌린 상자를 놓으면 두 모서리가 십자로 걸쳐 쉬어야 한다.
+    {
+        scene::Scene scene;
+        scene::Object ridgeObject;
+        ridgeObject.name = "능선";
+        ridgeObject.transform.position = glm::vec3{0.0F, 0.5F, 0.0F};
+        ridgeObject.transform.rotation = glm::angleAxis(glm::quarter_pi<float>(), glm::vec3{0.0F, 0.0F, 1.0F});
+        scene.objects.push_back(std::move(ridgeObject));
+        scene::RigidBody ridge;
+        ridge.shape = scene::ColliderShape::BOX;
+        ridge.kinematic = true;
+        ridge.halfExtents = glm::vec3{0.25F};
+        scene.attachRigidBody(0, ridge);
+        float ridgeTop = 0.5F + 0.25F * glm::root_two<float>();
+        float expected = ridgeTop + 0.25F * glm::root_two<float>();
+        uint32_t box = addBody(scene,
+                               scene::ColliderShape::BOX,
+                               glm::vec3{0.0F, expected + 0.04F, 0.0F},
+                               glm::angleAxis(glm::quarter_pi<float>(), glm::vec3{1.0F, 0.0F, 0.0F}),
+                               0.25F,
+                               glm::vec3{0.25F});
+        simulate(scene, 1.0F, &jobs);
+        float y = scene.objects[box].transform.position.y;
+        float verticalSpeed = scene.rigidBodies[static_cast<size_t>(scene.objects[box].rigidBody)].velocity.y;
+        std::printf("  모서리 걸침: y=%.4f (기대 %.4f), vy=%.4f\n",
+                    static_cast<double>(y),
+                    static_cast<double>(expected),
+                    static_cast<double>(verticalSpeed));
+        assert(std::abs(y - expected) < 0.03F && "걸친 상자는 능선 위에서 쉬어야 한다");
+        assert(std::abs(verticalSpeed) < 0.05F && "걸친 상자는 떨지 않아야 한다");
+    }
+
     std::printf("강체 물리 자체 점검 통과\n");
     return 0;
 }

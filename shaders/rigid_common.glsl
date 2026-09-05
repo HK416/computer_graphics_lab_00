@@ -291,11 +291,13 @@ float boxProjection(mat3 rotation, vec3 extent, vec3 axis) {
            abs(dot(rotation[2], axis)) * extent.z;
 }
 
-// 상자 대 상자. 여섯 면 축의 분리축 검사로 가장 얕게 겹치는 축을 찾고, 그 축에서 겨루는 면 안에 든
-// 상대 꼭짓점을 접촉으로 낸다. 꼭짓점 포함 검사만 하면 크기가 같은 상자가 딱 맞게 겹칠 때 겨루는
-// 축이 옆면으로 잘못 잡혀 서로를 그대로 통과한다.
+// 상자 대 상자. 면 축 여섯과 모서리 축 아홉(두 상자 축의 외적)의 분리축 검사로 가장 얕게 겹치는 축을 찾는다.
+// 면 축이면 그 축에서 겨루는 면 안에 든 상대 꼭짓점을 접촉으로 내고, 모서리 축이면 두 지지 모서리의 최근접점
+// 중점 하나를 낸다. src/physics/rigid_body.cpp 의 collideBoxBox 와 축 순서·규칙이 같아야 한다. 꼭짓점 포함
+// 검사만 하면 크기가 같은 상자가 딱 맞게 겹칠 때 겨루는 축이 옆면으로 잘못 잡혀 서로를 그대로 통과한다.
 //
-// ponytail: 면 축 여섯 개만 본다. 모서리끼리 비스듬히 걸치는 경우(축 아홉 개)를 놓친다.
+// ponytail: 면·모서리 겹침이 거의 같을 때 프레임마다 축이 갈려 떨리면 면 쪽 5 % 편향을 넣는다(상수는
+// rigid_body.h 에 두고 푸시 상수로 받는다).
 RigidManifold collideBoxBox(RigidBody a, RigidBody b) {
     RigidManifold manifold = noContact();
     mat3 rotationA = quatMatrix(a.rotation);
@@ -306,9 +308,20 @@ RigidManifold collideBoxBox(RigidBody a, RigidBody b) {
     vec3 bestNormal = vec3(0.0, 1.0, 0.0);
     bool referenceIsA = true;
     int bestAxis = 1;
-    for (int i = 0; i < 6; ++i) {
-        bool fromA = i < 3;
-        vec3 axis = fromA ? rotationA[i] : rotationB[i - 3];
+    // 0~2 A 의 면, 3~5 B 의 면, 6~14 모서리 (6 + i*3 + j = cross(A_i, B_j)).
+    int bestIndex = 1;
+    for (int index = 0; index < 15; ++index) {
+        vec3 axis;
+        if (index < 6) {
+            axis = index < 3 ? rotationA[index] : rotationB[index - 3];
+        } else {
+            axis = cross(rotationA[(index - 6) / 3], rotationB[(index - 6) % 3]);
+            // 거의 평행한 축의 외적은 방향이 뜻이 없다. 그 경우 면 축이 이미 가른다.
+            if (dot(axis, axis) < 1.0e-6) {
+                continue;
+            }
+            axis = normalize(axis);
+        }
         float distance = dot(center, axis);
         float overlap = boxProjection(rotationA, a.halfExtents.xyz, axis) +
                         boxProjection(rotationB, b.halfExtents.xyz, axis) - abs(distance);
@@ -319,11 +332,41 @@ RigidManifold collideBoxBox(RigidBody a, RigidBody b) {
             bestOverlap = overlap;
             // 법선은 a 에서 b 를 향해야 한다.
             bestNormal = distance < 0.0 ? -axis : axis;
-            referenceIsA = fromA;
-            bestAxis = fromA ? i : i - 3;
+            bestIndex = index;
+            if (index < 6) {
+                referenceIsA = index < 3;
+                bestAxis = index < 3 ? index : index - 3;
+            }
         }
     }
     manifold.normal = bestNormal;
+
+    if (bestIndex >= 6) {
+        // 모서리끼리 걸침. 법선 쪽으로 가장 나간 A 의 모서리와 반대쪽으로 가장 나간 B 의 모서리의 최근접점 중점.
+        int edgeA = (bestIndex - 6) / 3;
+        int edgeB = (bestIndex - 6) % 3;
+        vec3 pointA = a.position.xyz;
+        vec3 pointB = b.position.xyz;
+        for (int k = 0; k < 3; ++k) {
+            if (k != edgeA) {
+                pointA += rotationA[k] * (dot(rotationA[k], bestNormal) >= 0.0 ? a.halfExtents[k] : -a.halfExtents[k]);
+            }
+            if (k != edgeB) {
+                pointB += rotationB[k] * (dot(rotationB[k], -bestNormal) >= 0.0 ? b.halfExtents[k] : -b.halfExtents[k]);
+            }
+        }
+        vec3 directionA = rotationA[edgeA];
+        vec3 directionB = rotationB[edgeB];
+        vec3 offset = pointA - pointB;
+        float along = dot(directionA, directionB);
+        float alongA = dot(directionA, offset);
+        float alongB = dot(directionB, offset);
+        float denominator = 1.0 - along * along;
+        float s = clamp((along * alongB - alongA) / denominator, -a.halfExtents[edgeA], a.halfExtents[edgeA]);
+        float t = clamp((alongB - along * alongA) / denominator, -b.halfExtents[edgeB], b.halfExtents[edgeB]);
+        addPoint(manifold, ((pointA + directionA * s) + (pointB + directionB * t)) * 0.5, bestOverlap);
+        return manifold;
+    }
 
     // 겨루는 면을 가진 쪽이 기준, 반대쪽이 입사다. 나란히 놓인 상자면 네 점이 나와 넘어지지 않는다.
     RigidBody reference = referenceIsA ? a : b;
