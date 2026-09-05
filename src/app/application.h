@@ -73,6 +73,11 @@ struct Options {
     float weldAngleDegrees = 30.0F;
     // 시작하자마자 재생(물리 시뮬레이션)한다. 스크린샷으로 물리를 확인할 때 쓴다.
     bool play = false;
+    // 0 이 아니면 벽시계 대신 이 값을 프레임 간격으로 쓴다. 물리·애니메이션·시간축 누적이 실행마다 같아져
+    // 스크린샷을 바이트로 견줄 수 있다.
+    float fixedDeltaSeconds = 0.0F;
+    // 스크린샷을 스왑체인(편집기 UI 포함) 대신 표시 대상(렌더 결과만)에서 뜬다. 바이트 비교용.
+    bool capturePresent = false;
 };
 
 class Application {

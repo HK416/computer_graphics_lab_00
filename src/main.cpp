@@ -44,6 +44,14 @@ int main(int argc, char* argv[]) {
             options.pathTracing = true;
         } else if (argument == "--play") {
             options.play = true;
+        } else if (argument == "--fixed-dt" && i + 1 < argc) {
+            options.fixedDeltaSeconds = static_cast<float>(std::atof(argv[++i]));
+        } else if (argument == "--capture" && i + 1 < argc) {
+            std::string_view target = argv[++i];
+            options.capturePresent = target == "present";
+            if (!options.capturePresent && target != "swapchain") {
+                spdlog::warn("모르는 --capture 값입니다: {} (swapchain|present)", target);
+            }
         } else if (argument == "--reflections") {
             options.reflections = true;
             options.reflectionsGiven = true;

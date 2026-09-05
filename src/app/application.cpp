@@ -107,6 +107,8 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     editorUi->workerCount = jobs.workerCount();
     editorUi->primitiveMeshes = primitiveMeshes;
     renderer->debugMode = options.debugMode;
+    renderer->fixedFrameDelta = options.fixedDeltaSeconds;
+    renderer->capturePresent = options.capturePresent;
     renderer->showColliders = options.showColliders;
     if (options.lodLevel != AUTOMATIC_LOD) {
         renderer->automaticLod = false;
@@ -869,6 +871,9 @@ void Application::run() {
         uint64_t currentTicks = SDL_GetTicksNS();
         float deltaSeconds = static_cast<float>(currentTicks - previousTicks) / NANOSECONDS_PER_SECOND;
         previousTicks = currentTicks;
+        if (options.fixedDeltaSeconds > 0.0F) {
+            deltaSeconds = options.fixedDeltaSeconds;
+        }
 
         if (orbitDegreesPerFrame != 0.0F) {
             scenes.active().camera.yawDegrees += orbitDegreesPerFrame;

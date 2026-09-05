@@ -779,6 +779,8 @@ void Renderer::createRenderTargets() {
 
     ImageDesc presentDesc = tonemappedDesc;
     presentDesc.extent = {currentDisplayExtent.width, currentDisplayExtent.height, 1};
+    // --capture present 가 이 이미지를 버퍼로 복사한다.
+    presentDesc.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     targets.present = createImage(context, presentDesc, "표시");
 
     // 시간축 업스케일 결과. 아직 톤 매핑 전이라 선형 HDR 이고, 컴퓨트가 쓰므로 스토리지다.
@@ -5079,11 +5081,44 @@ void Renderer::recordCommands(Frame& frame,
                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
 
+    // 표시 대상 캡처. UI 가 없는 렌더 결과만 떠서 실행 간 바이트 비교가 된다. present 는 위에서 읽기 전용이 되었다.
+    if (!capturePath.empty() && capturePresent) {
+        imageBarrier(commandBuffer,
+                     targets.present.handle,
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                     VK_PIPELINE_STAGE_2_COPY_BIT,
+                     VK_ACCESS_2_TRANSFER_READ_BIT);
+        VkBufferImageCopy2 region{VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = {currentDisplayExtent.width, currentDisplayExtent.height, 1};
+        VkCopyImageToBufferInfo2 copyInfo{VK_STRUCTURE_TYPE_COPY_IMAGE_TO_BUFFER_INFO_2};
+        copyInfo.srcImage = targets.present.handle;
+        copyInfo.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        copyInfo.dstBuffer = captureBuffer.handle;
+        copyInfo.regionCount = 1;
+        copyInfo.pRegions = &region;
+        vkCmdCopyImageToBuffer2(commandBuffer, &copyInfo);
+        imageBarrier(commandBuffer,
+                     targets.present.handle,
+                     VK_IMAGE_ASPECT_COLOR_BIT,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_COPY_BIT,
+                     VK_ACCESS_2_TRANSFER_READ_BIT,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    }
+
     uint32_t uiZone = frameProfiler.begin("UI", commandBuffer);
     recordUiPass(commandBuffer, imageIndex);
     frameProfiler.end(uiZone, commandBuffer);
 
-    if (!capturePath.empty()) {
+    if (!capturePath.empty() && !capturePresent) {
         imageBarrier(commandBuffer,
                      swapchain->images[imageIndex],
                      VK_IMAGE_ASPECT_COLOR_BIT,
@@ -5132,12 +5167,14 @@ void Renderer::recordCommands(Frame& frame,
 }
 
 void Renderer::writeCapture() {
-    uint32_t width = swapchain->extent.width;
-    uint32_t height = swapchain->extent.height;
+    VkExtent2D extent = capturePresent ? currentDisplayExtent : swapchain->extent;
+    VkFormat format = capturePresent ? targets.present.format : swapchain->format;
+    uint32_t width = extent.width;
+    uint32_t height = extent.height;
     std::vector<uint8_t> pixels(static_cast<size_t>(width) * height * 4);
     std::memcpy(pixels.data(), captureBuffer.mapped, pixels.size());
 
-    bool isBgra = swapchain->format == VK_FORMAT_B8G8R8A8_SRGB || swapchain->format == VK_FORMAT_B8G8R8A8_UNORM;
+    bool isBgra = format == VK_FORMAT_B8G8R8A8_SRGB || format == VK_FORMAT_B8G8R8A8_UNORM;
     if (isBgra) {
         for (size_t i = 0; i < pixels.size(); i += 4) {
             std::swap(pixels[i], pixels[i + 2]);
@@ -5202,6 +5239,9 @@ void Renderer::drawFrame(const scene::Scene& scene) {
         // 않도록 한 자리에서 막아 둔다.
         frameDeltaSeconds = std::clamp(std::chrono::duration<float>(now - lastFrameTime).count(), 1e-4F, 0.1F);
     }
+    if (fixedFrameDelta > 0.0F) {
+        frameDeltaSeconds = fixedFrameDelta;
+    }
     lastFrameTime = now;
 
     Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];
@@ -5248,7 +5288,8 @@ void Renderer::drawFrame(const scene::Scene& scene) {
     frameProfiler.end(buildZone);
 
     if (!capturePath.empty()) {
-        VkDeviceSize required = static_cast<VkDeviceSize>(swapchain->extent.width) * swapchain->extent.height * 4;
+        VkExtent2D captureExtent = capturePresent ? currentDisplayExtent : swapchain->extent;
+        VkDeviceSize required = static_cast<VkDeviceSize>(captureExtent.width) * captureExtent.height * 4;
         if (captureBuffer.size < required) {
             destroyBuffer(context, captureBuffer);
             captureBuffer = createBuffer(

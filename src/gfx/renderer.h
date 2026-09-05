@@ -281,6 +281,10 @@ public:
     uint32_t swapchainImageCount() const;
     // 다음 프레임의 색상 버퍼를 PNG 로 저장한다. 렌더 결과 검증에 쓴다.
     void requestCapture(std::filesystem::path path) { capturePath = std::move(path); }
+    // 0 이 아니면 벽시계 대신 이 값을 프레임 간격으로 쓴다(노출 적응·시간축 업스케일). 바이트 비교용.
+    float fixedFrameDelta = 0.0F;
+    // 캡처를 스왑체인 대신 표시 대상(targets.present, UI 없음)에서 뜬다.
+    bool capturePresent = false;
     void waitIdle();
 
     float exposure = 1.0F;
