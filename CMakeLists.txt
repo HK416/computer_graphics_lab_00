@@ -213,6 +213,17 @@ add_executable(cg_lab
     src/gfx/raytracing.cpp
     src/gfx/render_graph.cpp
     src/gfx/renderer.cpp
+    src/gfx/renderer_cull.cpp
+    src/gfx/renderer_debug_lines.cpp
+    src/gfx/renderer_fluid_draw.cpp
+    src/gfx/renderer_geometry.cpp
+    src/gfx/renderer_pathtrace.cpp
+    src/gfx/renderer_post.cpp
+    src/gfx/renderer_reflection.cpp
+    src/gfx/renderer_scene.cpp
+    src/gfx/renderer_shadow.cpp
+    src/gfx/renderer_ssao.cpp
+    src/gfx/renderer_targets.cpp
     src/gfx/rigid_body_gpu.cpp
     src/gfx/shadow_math.cpp
     src/gfx/resources.cpp
