@@ -902,6 +902,8 @@ void Renderer::createRenderTargets() {
     }
 
     ++generation;
+    // 대상을 전부 새로 만들었으니 그래프가 기억하는 레이아웃도 버린다.
+    graph.resetStates();
 
     if (!targets.slotsAllocated) {
         targets.colorSlot = bindless.add(targets.color.view, postSampler);
@@ -4279,6 +4281,9 @@ void Renderer::recordCommands(Frame& frame,
     uint32_t frameZone = frameProfiler.begin("프레임 전체", commandBuffer);
 
     // 프레임의 패스를 그래프 노드로 짠다. 노드는 조건과 무관하게 늘 등록하고 enabled 가 실행을 정한다.
+    // 이미지 레이아웃 전이는 노드의 reads/writes 선언에서 그래프가 만든다. 패스 안에서 스스로 전이하는
+    // 것(층·밉 단위, 컴퓨트가 도로 돌려 놓는 것)은 leaves 로 남긴 상태를 알린다.
+    //
     // 아래 지역 변수들은 노드가 참조로 잡으므로 execute 가 이 함수 안에서 끝나야 한다. 앞 노드가 정하고
     // 뒤 노드가 읽는 값(rayQueryPass, sceneLayout, 톤 매핑 푸시 상수 등)도 같은 이유로 지역 변수다.
     graph.clear();
@@ -4286,25 +4291,61 @@ void Renderer::recordCommands(Frame& frame,
     bool hasTranslucent = batches.draws[TRANSLUCENT_MODE][0].count + batches.draws[TRANSLUCENT_MODE][1].count > 0;
     bool pathTracing = usePathTracing && rayTracer != nullptr;
     rayQueryPass = false;
-    bool velocityReadable = false;
     VkDescriptorSet bindlessSet = bindless.set();
 
+    // 자주 쓰는 이미지 사용 꼴. 깊이 첨부물은 이른·늦은 조각 검사 둘 다에서 쓰이므로 두 단계를 함께 적는다.
+    constexpr VkPipelineStageFlags2 DEPTH_STAGES =
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+    auto colorWrite = [](const Image& image, bool discard) {
+        return ImageUse{image.handle,
+                        VK_IMAGE_ASPECT_COLOR_BIT,
+                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        discard ? VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
+                                : VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                        discard};
+    };
+    auto sampled = [](const Image& image, VkPipelineStageFlags2 stages) {
+        return ImageUse{image.handle,
+                        VK_IMAGE_ASPECT_COLOR_BIT,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        stages,
+                        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
+    };
+    auto storage = [](const Image& image, VkPipelineStageFlags2 stages, VkAccessFlags2 access) {
+        return ImageUse{image.handle, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL, stages, access};
+    };
+    auto depthWrite = [&](bool discard) {
+        return ImageUse{targets.depth.handle,
+                        VK_IMAGE_ASPECT_DEPTH_BIT,
+                        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                        DEPTH_STAGES,
+                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                        discard};
+    };
+    // 깊이를 첨부물로 묶되 검사만 하는 패스(하늘, OIT).
+    ImageUse depthTest{targets.depth.handle,
+                       VK_IMAGE_ASPECT_DEPTH_BIT,
+                       VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                       DEPTH_STAGES,
+                       VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT};
+    auto depthSampled = [&](VkPipelineStageFlags2 stages) {
+        return ImageUse{targets.depth.handle,
+                        VK_IMAGE_ASPECT_DEPTH_BIT,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        stages,
+                        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
+    };
+
     // ---- 첫 프레임 초기화. 한 번 돌고 표식을 내린다.
+    // 첫 프레임에는 이전 깊이가 없으므로 아무것도 가리지 않도록 가장 먼 값으로 채운다.
     graph.add({"HZB 초기화",
                nullptr,
                [&] { return hzbNeedsClear; },
+               {},
+               {storage(targets.hzb, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT)},
+               {},
                [&](VkCommandBuffer cmd) {
-                   // 첫 프레임에는 이전 깊이가 없으므로 아무것도 가리지 않도록 가장 먼 값으로 채운다.
-                   imageBarrier(cmd,
-                                targets.hzb.handle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_UNDEFINED,
-                                VK_IMAGE_LAYOUT_GENERAL,
-                                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                0,
-                                VK_PIPELINE_STAGE_2_CLEAR_BIT,
-                                VK_ACCESS_2_TRANSFER_WRITE_BIT);
-
                    VkClearColorValue clear{};
                    VkImageSubresourceRange range{};
                    range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -4324,40 +4365,30 @@ void Renderer::recordCommands(Frame& frame,
                    hzbNeedsClear = false;
                }});
 
+    // 층 전체를 한 번 읽기 좋은 레이아웃으로 옮긴다. 이후 프레임은 층마다 따로 전이하므로 여기서 맞춰
+    // 두지 않으면 한 번도 안 그린 층이 잘못된 레이아웃으로 남는다.
     graph.add({"그림자 초기화",
                nullptr,
                [&] { return shadowNeedsInit; },
-               [&](VkCommandBuffer cmd) {
-                   // 층 전체를 한 번 읽기 좋은 레이아웃으로 옮긴다. 이후 프레임은 층마다 따로 전이하므로
-                   // 여기서 맞춰 두지 않으면 한 번도 안 그린 층이 잘못된 레이아웃으로 남는다.
-                   imageBarrier(cmd,
-                                targets.shadowAtlas.handle,
-                                VK_IMAGE_ASPECT_DEPTH_BIT,
-                                VK_IMAGE_LAYOUT_UNDEFINED,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                0,
-                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-                   shadowNeedsInit = false;
-               }});
+               {ImageUse{targets.shadowAtlas.handle,
+                         VK_IMAGE_ASPECT_DEPTH_BIT,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT}},
+               {},
+               {},
+               [&](VkCommandBuffer) { shadowNeedsInit = false; }});
 
+    // 첫 프레임에는 이전 깊이가 없으므로 차폐 없음(1)으로 채운다.
     graph.add({"SSAO 초기화",
                nullptr,
                [&] { return ssaoNeedsClear; },
+               {},
+               {storage(targets.ssaoRaw, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT),
+                storage(targets.ssao, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT)},
+               {},
                [&](VkCommandBuffer cmd) {
-                   // 첫 프레임에는 이전 깊이가 없으므로 차폐 없음(1)으로 채운다.
                    for (const Image* image : {&targets.ssaoRaw, &targets.ssao}) {
-                       imageBarrier(cmd,
-                                    image->handle,
-                                    VK_IMAGE_ASPECT_COLOR_BIT,
-                                    VK_IMAGE_LAYOUT_UNDEFINED,
-                                    VK_IMAGE_LAYOUT_GENERAL,
-                                    VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                    0,
-                                    VK_PIPELINE_STAGE_2_CLEAR_BIT,
-                                    VK_ACCESS_2_TRANSFER_WRITE_BIT);
-
                        VkClearColorValue clear{};
                        clear.float32[0] = 1.0F;
                        VkImageSubresourceRange range{};
@@ -4380,50 +4411,28 @@ void Renderer::recordCommands(Frame& frame,
                    ssaoNeedsClear = false;
                }});
 
-    graph.add({"후처리 초기화",
-               nullptr,
-               [&] { return postTargetsNeedInit; },
-               [&](VkCommandBuffer cmd) {
-                   // 톤 매핑 대상과 시간축 업스케일 대상은 고른 방식에 따라 한쪽만 쓰인다. 쓰이지 않는 쪽도
-                   // 디버그 뷰어가 읽으므로 처음 한 번 레이아웃을 맞춰 둔다.
-                   imageBarrier(cmd,
-                                targets.tonemapped.handle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_UNDEFINED,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                0,
-                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-                   imageBarrier(cmd,
-                                targets.upscaledColor.handle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_UNDEFINED,
-                                VK_IMAGE_LAYOUT_GENERAL,
-                                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                0,
-                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-                   for (const Image* image : {&targets.bloom,
-                                              &targets.reflectionRaw,
-                                              &targets.reflectionHistory[0],
-                                              &targets.reflectionHistory[1]}) {
-                       imageBarrier(cmd,
-                                    image->handle,
-                                    VK_IMAGE_ASPECT_COLOR_BIT,
-                                    VK_IMAGE_LAYOUT_UNDEFINED,
-                                    VK_IMAGE_LAYOUT_GENERAL,
-                                    VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                    0,
-                                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-                   }
-                   postTargetsNeedInit = false;
-               }});
+    // 톤 매핑 대상과 시간축 업스케일 대상은 고른 방식에 따라 한쪽만 쓰인다. 쓰이지 않는 쪽도 디버그 뷰어가
+    // 읽으므로 처음 한 번 레이아웃을 맞춰 둔다.
+    graph.add(
+        {"후처리 초기화",
+         nullptr,
+         [&] { return postTargetsNeedInit; },
+         {sampled(targets.tonemapped, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT),
+          storage(targets.upscaledColor, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT)},
+         {storage(targets.bloom, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT),
+          storage(targets.reflectionRaw, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT),
+          storage(targets.reflectionHistory[0],
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT),
+          storage(targets.reflectionHistory[1],
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)},
+         {},
+         [&](VkCommandBuffer) { postTargetsNeedInit = false; }});
 
     // ---- 프레임 공통 준비.
     // 환경 맵은 설정이 바뀔 때만 다시 굽는다. 래스터와 경로 추적이 같은 환경을 본다.
-    graph.add({"환경", "환경", {}, [&](VkCommandBuffer cmd) {
+    graph.add({"환경", "환경", {}, {}, {}, {}, [&](VkCommandBuffer cmd) {
                    if (environment->update(cmd, scene.environment, sunDirection)) {
                        // 하늘이 바뀌었으면 쌓아 둔 경로 추적 표본은 옛 환경의 것이다.
                        pathSampleCount = 0;
@@ -4431,13 +4440,16 @@ void Renderer::recordCommands(Frame& frame,
                }});
 
     // 변형 정점은 그림자·장면·광선 경로가 모두 읽으므로 맨 먼저 만든다.
-    graph.add({"스킨", nullptr, {}, [&](VkCommandBuffer cmd) { recordSkinPass(cmd, frame); }});
+    graph.add({"스킨", nullptr, {}, {}, {}, {}, [&](VkCommandBuffer cmd) { recordSkinPass(cmd, frame); }});
 
     // 강체 GPU 솔버. 아무 것도 읽지 않으므로 순서는 자유롭지만, 되읽기 복사가 프레임 앞쪽에 있어야
     // 큐가 비는 동안 옮겨진다.
     graph.add({"강체",
                "강체",
                [&] { return rigidBodies->bodyCount() > 0; },
+               {},
+               {},
+               {},
                [&](VkCommandBuffer cmd) { rigidBodies->record(cmd, frameIndex); }});
 
     // 유체 입자 인스턴스도 같은 이유로 그림자보다 앞이다. 광선 기능이 켜져 있고 구의 하위 구조가 있으면
@@ -4446,6 +4458,9 @@ void Renderer::recordCommands(Frame& frame,
     graph.add({"유체",
                "유체",
                [&] { return batches.fluidDraws.count > 0; },
+               {},
+               {},
+               {},
                [&](VkCommandBuffer cmd) {
                    bool wantsTlas =
                        rayTracer != nullptr && rayTracer->bottomLevelReady() &&
@@ -4454,45 +4469,23 @@ void Renderer::recordCommands(Frame& frame,
                }});
 
     // 그림자 아틀라스는 장면 패스보다 먼저 채워야 한다. 경로 추적은 아틀라스를 읽지 않으므로 건너뛴다.
+    // 층 단위 전이는 패스 안에 있고 아틀라스는 읽기 전용으로 돌아온다.
     graph.add({"그림자",
                "그림자",
                [&] { return !pathTracing && !shadowViews.empty(); },
+               {},
+               {},
+               {},
                [&](VkCommandBuffer cmd) { recordShadowPass(cmd); }});
 
-    graph.add({"장면 대상 준비", nullptr, {}, [&](VkCommandBuffer cmd) {
-                   imageBarrier(cmd,
-                                targets.color.handle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_UNDEFINED,
-                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                0,
-                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-                   imageBarrier(cmd,
-                                targets.velocity.handle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_UNDEFINED,
-                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                0,
-                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-                   imageBarrier(cmd,
-                                targets.depth.handle,
-                                VK_IMAGE_ASPECT_DEPTH_BIT,
-                                VK_IMAGE_LAYOUT_UNDEFINED,
-                                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                0,
-                                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-                                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-               }});
-
-    // ---- 경로 추적 경로.
+    // ---- 경로 추적 경로. 모션 벡터와 깊이는 광선 생성 셰이더가 직접 쓰고 읽기 전용으로 남긴다.
     graph.add({"경로 추적",
                "경로 추적",
                [&] { return pathTracing; },
+               {},
+               {},
+               {sampled(targets.velocity, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT),
+                depthSampled(VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT)},
                [&](VkCommandBuffer cmd) { recordPathTracePass(cmd, frame, scene); }});
 
     // ---- 래스터 경로. 오클루전 컬링은 두 패스로 돈다. 1차는 지난 프레임 가시 집합, HZB 구축, 2차는 나머지.
@@ -4505,7 +4498,7 @@ void Renderer::recordCommands(Frame& frame,
 
     // 가시성 비트는 프레임을 넘어 살아남는다. 지난 프레임 2차 패스의 쓰기가 이번 읽기에 앞서고,
     // 새로 잡은 버퍼는 0 으로 채운다.
-    graph.add({"가시성 비트", nullptr, raster, [&](VkCommandBuffer cmd) {
+    graph.add({"가시성 비트", nullptr, raster, {}, {}, {}, [&](VkCommandBuffer cmd) {
                    VkMemoryBarrier2 bitsBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
                    bitsBarrier.srcStageMask =
                        VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
@@ -4532,6 +4525,9 @@ void Renderer::recordCommands(Frame& frame,
     graph.add({"컬링",
                "컬링",
                [&] { return !pathTracing && computeCullPath; },
+               {},
+               {},
+               {},
                [&](VkCommandBuffer cmd) { recordCullPass(cmd, batches, firstPhase); }});
 
     // 고전 경로의 명령별 meshlet 은 컴퓨트 컬링이면 컬 셰이더가, 아니면 CPU 가 채운 것을 쓴다.
@@ -4595,8 +4591,18 @@ void Renderer::recordCommands(Frame& frame,
 
     // 1) 불투명과 컷오프 경로를 HDR 색상 대상에 그린다. 두 패스 컬링이면 1차 뒤에 HZB 를 만들고
     //    2차가 같은 첨부물에 이어 그린다. 아무것도 그리지 않은 화소는 변위 0 이다. 하늘 패스가 나중에
-    //    그 자리를 채운다.
-    graph.add({"불투명", "불투명", raster, [&](VkCommandBuffer cmd) {
+    //    그 자리를 채운다. 색상·모션 벡터·깊이·노멀·반사 가중치는 프레임마다 처음부터 채운다(discard).
+    graph.add({"불투명",
+               "불투명",
+               raster,
+               {},
+               {colorWrite(targets.color, true),
+                colorWrite(targets.velocity, true),
+                colorWrite(targets.guideNormal, true),
+                colorWrite(targets.guideSpecularAlbedo, true),
+                depthWrite(true)},
+               {},
+               [&](VkCommandBuffer cmd) {
                    // 광선 질의 그림자나 반사를 쓰면 TLAS 를 집합 1 로 함께 묶고, 장면이 바뀌었으면 먼저 다시
                    // 만든다. 반사만 켜도 광선 질의 변종 프래그먼트가 돌지만, ambient.w 가 0 이라 그림자는
                    // 그림자 맵을 그대로 쓴다.
@@ -4608,82 +4614,47 @@ void Renderer::recordCommands(Frame& frame,
                    sceneLayout = rayQueryPass ? meshRayQueryPipelineLayout : meshPipelineLayout;
                    bindScene(cmd);
                    vkCmdBindIndexBuffer(cmd, geometry.indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
-
-                   // 노멀·거칠기와 반사 가중치는 프레임마다 처음부터 채운다. 경로 추적 프레임은 같은 이미지를
-                   // 스토리지로 쓰므로 지난 내용을 잇지 않는다.
-                   for (const Image* image : {&targets.guideNormal, &targets.guideSpecularAlbedo}) {
-                       imageBarrier(cmd,
-                                    image->handle,
-                                    VK_IMAGE_ASPECT_COLOR_BIT,
-                                    VK_IMAGE_LAYOUT_UNDEFINED,
-                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                    VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                    0,
-                                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-                   }
                    drawOpaque(cmd, VK_ATTACHMENT_LOAD_OP_CLEAR, firstPhase);
                }});
 
     // 1차 깊이로 HZB 를 만든다. 지난 프레임에 보였던 것만 그렸으므로 가리개가 적어 보수적이다.
-    graph.add({"HZB", "HZB", rasterTwoPhase, [&](VkCommandBuffer cmd) {
-                   imageBarrier(cmd,
-                                targets.depth.handle,
-                                VK_IMAGE_ASPECT_DEPTH_BIT,
-                                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-                   recordHzbPass(cmd);
-                   imageBarrier(cmd,
-                                targets.depth.handle,
-                                VK_IMAGE_ASPECT_DEPTH_BIT,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-                                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                                    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-                   for (const Image* image :
-                        {&targets.color, &targets.velocity, &targets.guideNormal, &targets.guideSpecularAlbedo}) {
-                       imageBarrier(cmd,
-                                    image->handle,
-                                    VK_IMAGE_ASPECT_COLOR_BIT,
-                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                    VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-                   }
-               }});
+    graph.add({"HZB",
+               "HZB",
+               rasterTwoPhase,
+               {depthSampled(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)},
+               {},
+               {},
+               [&](VkCommandBuffer cmd) { recordHzbPass(cmd); }});
 
     // 2) 나머지 중 HZB 로 보이는 것만 이어 그린다. 대개 비어 있거나 가장자리 몇 개다.
     graph.add({"컬링 2차",
                "컬링 2차",
                [&] { return !pathTracing && twoPhase && computeCullPath; },
+               {},
+               {},
+               {},
                [&](VkCommandBuffer cmd) { recordCullPass(cmd, batches, CULL_PHASE_SECOND); }});
-    graph.add({"불투명 2차", "불투명 2차", rasterTwoPhase, [&](VkCommandBuffer cmd) {
-                   drawOpaque(cmd, VK_ATTACHMENT_LOAD_OP_LOAD, CULL_PHASE_SECOND);
-               }});
+    graph.add({"불투명 2차",
+               "불투명 2차",
+               rasterTwoPhase,
+               {},
+               {colorWrite(targets.color, false),
+                colorWrite(targets.velocity, false),
+                colorWrite(targets.guideNormal, false),
+                colorWrite(targets.guideSpecularAlbedo, false),
+                depthWrite(false)},
+               {},
+               [&](VkCommandBuffer cmd) { drawOpaque(cmd, VK_ATTACHMENT_LOAD_OP_LOAD, CULL_PHASE_SECOND); }});
 
-    // 불투명이 끝났으니 노멀·거칠기와 반사 가중치는 읽기 전용이다. 반사 컴퓨트가 읽는다.
-    graph.add({"가이드 읽기 전용", nullptr, raster, [&](VkCommandBuffer cmd) {
-                   for (const Image* image : {&targets.guideNormal, &targets.guideSpecularAlbedo}) {
-                       imageBarrier(cmd,
-                                    image->handle,
-                                    VK_IMAGE_ASPECT_COLOR_BIT,
-                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-                   }
-               }});
+    // 불투명이 끝났으니 노멀·거칠기와 반사 가중치는 읽기 전용이다. 반사 컴퓨트와 디버그 뷰가 읽는다.
+    graph.add({"가이드 읽기 전용",
+               nullptr,
+               raster,
+               {sampled(targets.guideNormal, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT),
+                sampled(targets.guideSpecularAlbedo, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)},
+               {},
+               {},
+               [](VkCommandBuffer) {}});
 
     // 2) 아무것도 그려지지 않은 화소를 하늘로 채운다. 톤 매핑이 아니라 여기서 채워야 시간축
     //    업스케일러가 하늘까지 함께 누적하고, 반투명도 하늘 위에 합성된다.
@@ -4691,28 +4662,10 @@ void Renderer::recordCommands(Frame& frame,
         {"하늘",
          "하늘",
          [&] { return !pathTracing && useIbl && environment->ready(); },
+         {depthTest},
+         {colorWrite(targets.color, false), colorWrite(targets.velocity, false)},
+         {},
          [&](VkCommandBuffer cmd) {
-             imageBarrier(cmd,
-                          targets.depth.handle,
-                          VK_IMAGE_ASPECT_DEPTH_BIT,
-                          VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                          VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                          VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                          VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                          VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-                          VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
-             for (const Image* image : {&targets.color, &targets.velocity}) {
-                 imageBarrier(cmd,
-                              image->handle,
-                              VK_IMAGE_ASPECT_COLOR_BIT,
-                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                              VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                              VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                              VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                              VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-             }
-
              std::array<VkRenderingAttachmentInfo, 2> skyColor{
                  colorAttachment(targets.color.view, VK_ATTACHMENT_LOAD_OP_LOAD, {}),
                  colorAttachment(targets.velocity.view, VK_ATTACHMENT_LOAD_OP_LOAD, {})};
@@ -4741,55 +4694,51 @@ void Renderer::recordCommands(Frame& frame,
 
     // 2-2) 물 표면은 하늘 뒤다. 뒤에 있는 배경이 이미 색상 대상에 들어 있어야 미리 곱해진 알파로
     //      섞을 때 투과가 맞는다. 하늘 블록 «밖» 이라 IBL 을 꺼도 물이 사라지지 않는다.
-    graph.add({"유체 표면", nullptr, raster, [&](VkCommandBuffer cmd) {
-                   recordFluidSurfacePass(cmd, frame, batches, scene);
-               }});
+    //      반사 가중치를 첨부물로 되돌려 쓰고 다시 읽기 전용으로 남긴다(패스 안에서 전이).
+    graph.add({"유체 표면",
+               nullptr,
+               raster,
+               {sampled(targets.guideSpecularAlbedo, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)},
+               {},
+               {sampled(targets.guideSpecularAlbedo, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT),
+                colorWrite(targets.color, false),
+                colorWrite(targets.velocity, false),
+                depthWrite(false)},
+               [&](VkCommandBuffer cmd) { recordFluidSurfacePass(cmd, frame, batches, scene); }});
 
     // 3) 광선 반사. 불투명 깊이·노멀로 추적해 색상에 더한다. 하늘이 먼저 채워져 있어야 반사가
-    //    되짚는 히스토리와 색상이 맞고, 반투명은 이 위에 합성된다.
-    graph.add({"반사", nullptr, raster, [&](VkCommandBuffer cmd) {
-                   if (reflectionsActive() && rayQueryPass) {
-                       recordReflectionPass(cmd, frame);
-                       velocityReadable = true;
-                   } else {
-                       reflectionHistoryValid = false;
-                   }
-               }});
+    //    되짚는 히스토리와 색상이 맞고, 반투명은 이 위에 합성된다. 패스 안에서 깊이·색상을 스토리지로
+    //    옮겼다가 첨부물로 되돌리고, 모션 벡터는 읽기 전용으로 남긴다.
+    auto reflectionRuns = [&] { return !pathTracing && reflectionsActive() && rayQueryPass; };
+    graph.add(
+        {"반사",
+         nullptr,
+         reflectionRuns,
+         {sampled(targets.guideNormal, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT),
+          sampled(targets.guideSpecularAlbedo, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)},
+         {},
+         {sampled(targets.velocity, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT),
+          colorWrite(targets.color, false),
+          depthWrite(false)},
+         [&](VkCommandBuffer cmd) { recordReflectionPass(cmd, frame); }});
+    // 반사가 돌지 않은 프레임은 히스토리가 끊긴다.
+    graph.add({"반사 히스토리 무효",
+               nullptr,
+               [&] { return !reflectionRuns(); },
+               {},
+               {},
+               {},
+               [&](VkCommandBuffer) { reflectionHistoryValid = false; }});
 
     // 2) 반투명은 누적과 잔여 투과율 대상에 순서 독립으로 기록한다.
     graph.add(
         {"OIT",
          "OIT",
          [&] { return !pathTracing && hasTranslucent; },
+         {depthTest},
+         {colorWrite(targets.oitAccumulation, true), colorWrite(targets.oitRevealage, true)},
+         {},
          [&](VkCommandBuffer cmd) {
-             imageBarrier(cmd,
-                          targets.oitAccumulation.handle,
-                          VK_IMAGE_ASPECT_COLOR_BIT,
-                          VK_IMAGE_LAYOUT_UNDEFINED,
-                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                          VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                          0,
-                          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                          VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-             imageBarrier(cmd,
-                          targets.oitRevealage.handle,
-                          VK_IMAGE_ASPECT_COLOR_BIT,
-                          VK_IMAGE_LAYOUT_UNDEFINED,
-                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                          VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                          0,
-                          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                          VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-             imageBarrier(cmd,
-                          targets.depth.handle,
-                          VK_IMAGE_ASPECT_DEPTH_BIT,
-                          VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                          VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                          VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                          VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                          VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-                          VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
-
              std::array<VkRenderingAttachmentInfo, 2> oitAttachments{
                  colorAttachment(targets.oitAccumulation.view, VK_ATTACHMENT_LOAD_OP_CLEAR, {{0.0F, 0.0F, 0.0F, 0.0F}}),
                  colorAttachment(targets.oitRevealage.view, VK_ATTACHMENT_LOAD_OP_CLEAR, {{1.0F, 0.0F, 0.0F, 0.0F}})};
@@ -4818,35 +4767,11 @@ void Renderer::recordCommands(Frame& frame,
     graph.add({"OIT 합성",
                "OIT 합성",
                [&] { return !pathTracing && hasTranslucent; },
+               {sampled(targets.oitAccumulation, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT),
+                sampled(targets.oitRevealage, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT)},
+               {colorWrite(targets.color, false)},
+               {},
                [&](VkCommandBuffer cmd) {
-                   imageBarrier(cmd,
-                                targets.oitAccumulation.handle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-                   imageBarrier(cmd,
-                                targets.oitRevealage.handle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-                   imageBarrier(cmd,
-                                targets.color.handle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-
                    VkRenderingAttachmentInfo compositeColor =
                        colorAttachment(targets.color.view, VK_ATTACHMENT_LOAD_OP_LOAD, {});
                    VkRenderingInfo compositePass{VK_STRUCTURE_TYPE_RENDERING_INFO};
@@ -4871,56 +4796,41 @@ void Renderer::recordCommands(Frame& frame,
                    vkCmdEndRendering(cmd);
                }});
 
-    // 4) SSAO 가 이번 프레임 깊이를 읽는다. 결과는 다음 프레임의 셰이딩이 쓴다.
+    // 4) 깊이는 이제 읽기 전용이다. SSAO 와 콜라이더 표시의 프래그먼트, 디버그 뷰가 읽는다. SSAO 결과는
+    //    다음 프레임의 셰이딩이 쓴다.
     //
     // ponytail: 한 프레임 늦은 깊이라 카메라가 빠르게 움직이면 차폐가 살짝 밀린다. 정확히
     // 하려면 불투명 깊이 선행 패스를 넣고 같은 프레임 안에서 계산해야 한다.
-    graph.add({"깊이 읽기 전용", nullptr, raster, [&](VkCommandBuffer cmd) {
-                   imageBarrier(cmd,
-                                targets.depth.handle,
-                                VK_IMAGE_ASPECT_DEPTH_BIT,
-                                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                                // 콜라이더 표시의 프래그먼트도 이 깊이를 읽는다.
-                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-               }});
+    graph.add({"깊이 읽기 전용",
+               nullptr,
+               raster,
+               {depthSampled(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT)},
+               {},
+               {},
+               [](VkCommandBuffer) {}});
     graph.add({"SSAO",
                "SSAO",
                [&] { return !pathTracing && useSsao; },
+               {},
+               {},
+               {},
                [&](VkCommandBuffer cmd) { recordSsaoPass(cmd, frame); }});
 
     // ---- 여기부터 두 경로가 다시 합쳐진다.
     // 5) 시간축 업스케일러는 톤 매핑 앞에서 선형 HDR 을 받아 표시 해상도로 늘린다. 노출과 톤
     //    곡선이 흔들려도 히스토리가 따라 흔들리지 않으려면 이 순서여야 한다. 공간 업스케일은
     //    톤 매핑 뒤에서 도므로 여기서 두 경로가 갈린다.
-    // 경로 추적은 광선 생성 셰이더가 모션 벡터를 직접 쓰고 레이아웃도 그쪽에서 맞춘다. 반사 패스가
-    // 돌았으면 거기서 이미 읽기 전용으로 옮겼다.
-    graph.add({"후처리 입력 준비", nullptr, {}, [&](VkCommandBuffer cmd) {
-                   if (!pathTracing && !velocityReadable) {
-                       imageBarrier(cmd,
-                                    targets.velocity.handle,
-                                    VK_IMAGE_ASPECT_COLOR_BIT,
-                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-                   }
-                   // 톤 매핑(프래그먼트)뿐 아니라 Bloom 다운샘플과 자동 노출 히스토그램(컴퓨트)도 이 이미지를 읽는다.
-                   imageBarrier(cmd,
-                                targets.color.handle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-               }});
+    // 모션 벡터와 색상은 읽기 전용이어야 한다. 반사 패스나 경로 추적이 이미 옮겼으면 배리어가 나가지
+    // 않는다. 톤 매핑(프래그먼트)뿐 아니라 Bloom 다운샘플과 자동 노출 히스토그램(컴퓨트)도 색상을 읽는다.
+    graph.add(
+        {"후처리 입력 준비",
+         nullptr,
+         {},
+         {sampled(targets.velocity, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT),
+          sampled(targets.color, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)},
+         {},
+         {},
+         [](VkCommandBuffer) {}});
 
     // 경로 추적은 누적 버퍼가 이미 표본을 쌓고 있어 시간축 업스케일과 겹친다. 지터도 꺼져 있다.
     // Ray Reconstruction 만 예외다. 누적 대신 1표본을 받아 스스로 디노이즈한다.
@@ -4930,55 +4840,48 @@ void Renderer::recordCommands(Frame& frame,
     TonemapPushConstants tonemapPushConstants{};
     tonemapPushConstants.colorTexture = pathTracing ? targets.pathAccumulationSampledSlot : targets.colorSlot;
     tonemapPushConstants.exposure = exposure;
-    tonemapPushConstants.sampleCount = pathTracing ? pathSampleCount : 0U;
     tonemapPushConstants.camera = frame.cameraBuffer.address;
 
-    graph.add({"시간축 업스케일",
-               "시간축 업스케일",
-               [&] { return temporalUpscale; },
-               [&](VkCommandBuffer cmd) {
-                   // 지난 프레임 톤 매핑이 아직 읽고 있을 수 있다. 덮어쓰기 전에 그 읽기를 끝낸다.
-                   imageBarrier(cmd,
-                                targets.upscaledColor.handle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_GENERAL,
-                                VK_IMAGE_LAYOUT_GENERAL,
-                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    // 지난 프레임 톤 매핑이 아직 읽고 있을 수 있다. 덮어쓰기 전에 그 읽기를 끝낸다(그래프가 상태를 안다).
+    graph.add(
+        {"시간축 업스케일",
+         "시간축 업스케일",
+         [&] { return temporalUpscale; },
+         {},
+         {storage(targets.upscaledColor, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)},
+         {},
+         [&](VkCommandBuffer cmd) {
+             UpscaleInputs inputs{};
+             // RR 은 경로 추적의 1표본 색상과 안내 버퍼를 받는다. 깊이도 경로 추적이 따로 적은 것을 쓴다.
+             inputs.color = rayReconstruction ? &targets.pathAccumulation : &targets.color;
+             inputs.depth = rayReconstruction ? &targets.guideDepth : &targets.depth;
+             if (rayReconstruction) {
+                 inputs.guideDiffuseAlbedo = &targets.guideDiffuseAlbedo;
+                 inputs.guideSpecularAlbedo = &targets.guideSpecularAlbedo;
+                 inputs.guideNormal = &targets.guideNormal;
+                 inputs.guideRoughness = &targets.guideRoughness;
+                 inputs.guideDepth = &targets.guideDepth;
+             }
+             inputs.velocity = &targets.velocity;
+             inputs.output = &targets.upscaledColor;
+             inputs.colorTexture = targets.colorSlot;
+             inputs.depthTexture = targets.depthSlot;
+             inputs.velocityTexture = targets.velocitySlot;
+             inputs.outputStorage = targets.upscaledColorStorageSlot;
+             inputs.bindlessSet = bindlessSet;
+             inputs.jitter = currentJitter;
+             inputs.deltaSeconds = frameDeltaSeconds;
+             inputs.nearPlane = scene.camera.nearPlane;
+             inputs.verticalFovRadians = glm::radians(scene.camera.fovYDegrees);
+             inputs.reset = temporalResetThisFrame;
+             temporalUpscaler->evaluate(cmd, inputs);
 
-                   UpscaleInputs inputs{};
-                   // RR 은 경로 추적의 1표본 색상과 안내 버퍼를 받는다. 깊이도 경로 추적이 따로 적은 것을 쓴다.
-                   inputs.color = rayReconstruction ? &targets.pathAccumulation : &targets.color;
-                   inputs.depth = rayReconstruction ? &targets.guideDepth : &targets.depth;
-                   if (rayReconstruction) {
-                       inputs.guideDiffuseAlbedo = &targets.guideDiffuseAlbedo;
-                       inputs.guideSpecularAlbedo = &targets.guideSpecularAlbedo;
-                       inputs.guideNormal = &targets.guideNormal;
-                       inputs.guideRoughness = &targets.guideRoughness;
-                       inputs.guideDepth = &targets.guideDepth;
-                   }
-                   inputs.velocity = &targets.velocity;
-                   inputs.output = &targets.upscaledColor;
-                   inputs.colorTexture = targets.colorSlot;
-                   inputs.depthTexture = targets.depthSlot;
-                   inputs.velocityTexture = targets.velocitySlot;
-                   inputs.outputStorage = targets.upscaledColorStorageSlot;
-                   inputs.bindlessSet = bindlessSet;
-                   inputs.jitter = currentJitter;
-                   inputs.deltaSeconds = frameDeltaSeconds;
-                   inputs.nearPlane = scene.camera.nearPlane;
-                   inputs.verticalFovRadians = glm::radians(scene.camera.fovYDegrees);
-                   inputs.reset = temporalResetThisFrame;
-                   temporalUpscaler->evaluate(cmd, inputs);
-
-                   tonemapPushConstants.colorTexture = targets.upscaledColorSlot;
-               }});
+             tonemapPushConstants.colorTexture = targets.upscaledColorSlot;
+         }});
 
     // Bloom 과 자동 노출은 톤 매핑이 읽을 바로 그 이미지에서 만든다. 세 갈래(HDR 색상, 시간축
     // 업스케일 결과, 경로 추적 누적) 어느 쪽이든 같은 자리에서 같은 결과를 낸다.
-    graph.add({"후처리", nullptr, {}, [&](VkCommandBuffer cmd) {
+    graph.add({"후처리", nullptr, {}, {}, {}, {}, [&](VkCommandBuffer cmd) {
                    // 경로 추적 노드가 이번 프레임 표본을 더한 뒤의 값을 써야 한다. 그래프를 짤 때 잡으면 하나 모자란다.
                    tonemapPushConstants.sampleCount = pathTracing ? pathSampleCount : 0U;
                    recordPostEffects(cmd,
@@ -4994,19 +4897,20 @@ void Renderer::recordCommands(Frame& frame,
 
     // 시간축 경로는 이미 표시 해상도라 톤 매핑이 곧바로 표시 이미지를 채운다. 그렇지 않으면
     // 렌더 해상도 톤 매핑 결과를 만들고 공간 업스케일이 확대한다.
-    graph.add({"톤 매핑", "톤 매핑", {}, [&](VkCommandBuffer cmd) {
-                   const Image& tonemapTarget = temporalUpscale ? targets.present : targets.tonemapped;
-                   VkExtent2D tonemapExtent = temporalUpscale ? currentDisplayExtent : currentRenderExtent;
-                   imageBarrier(cmd,
-                                tonemapTarget.handle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_UNDEFINED,
-                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                0,
-                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-
+    const Image& tonemapTarget = temporalUpscale ? targets.present : targets.tonemapped;
+    VkExtent2D tonemapExtent = temporalUpscale ? currentDisplayExtent : currentRenderExtent;
+    std::vector<ImageUse> tonemapReads;
+    if (temporalUpscale) {
+        tonemapReads.push_back(storage(
+            targets.upscaledColor, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT));
+    }
+    graph.add({"톤 매핑",
+               "톤 매핑",
+               {},
+               std::move(tonemapReads),
+               {colorWrite(tonemapTarget, true)},
+               {},
+               [&](VkCommandBuffer cmd) {
                    VkRenderingAttachmentInfo tonemappedColor =
                        colorAttachment(tonemapTarget.view, VK_ATTACHMENT_LOAD_OP_DONT_CARE, {});
                    VkRenderingInfo tonemapPass{VK_STRUCTURE_TYPE_RENDERING_INFO};
@@ -5034,26 +4938,10 @@ void Renderer::recordCommands(Frame& frame,
     graph.add({"업스케일",
                "업스케일",
                [&] { return !temporalUpscale; },
+               {sampled(targets.tonemapped, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT)},
+               {colorWrite(targets.present, true)},
+               {},
                [&](VkCommandBuffer cmd) {
-                   imageBarrier(cmd,
-                                targets.tonemapped.handle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-                   imageBarrier(cmd,
-                                targets.present.handle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_UNDEFINED,
-                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                0,
-                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-
                    VkRenderingAttachmentInfo upscaleColor =
                        colorAttachment(targets.present.view, VK_ATTACHMENT_LOAD_OP_DONT_CARE, {});
                    VkRenderingInfo upscalePass{VK_STRUCTURE_TYPE_RENDERING_INFO};
@@ -5092,19 +4980,20 @@ void Renderer::recordCommands(Frame& frame,
     graph.add({"디버그 선",
                nullptr,
                [&] { return showColliders; },
+               {},
+               {},
+               {},
                [&](VkCommandBuffer cmd) { recordDebugLines(cmd, frame, scene, currentDisplayExtent); }});
 
-    // 8) 편집기 UI 를 스왑체인에 그린다. 오프스크린 대상들은 UI 가 샘플링할 수 있는 레이아웃으로 옮긴다.
-    graph.add({"표시 준비", nullptr, {}, [&](VkCommandBuffer cmd) {
-                   imageBarrier(cmd,
-                                targets.present.handle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    // 8) 편집기 UI 를 스왑체인에 그린다. 표시 대상은 UI 가 샘플링할 수 있는 레이아웃으로 옮긴다.
+    // 스왑체인 이미지는 프레임마다 새로 받아 그래프가 추적하지 않는다. 노드 안에서 전이한다.
+    graph.add({"표시 준비",
+               nullptr,
+               {},
+               {sampled(targets.present, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT)},
+               {},
+               {},
+               [&](VkCommandBuffer cmd) {
                    imageBarrier(cmd,
                                 swapchain->images[imageIndex],
                                 VK_IMAGE_ASPECT_COLOR_BIT,
@@ -5116,20 +5005,19 @@ void Renderer::recordCommands(Frame& frame,
                                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
                }});
 
-    // 표시 대상 캡처. UI 가 없는 렌더 결과만 떠서 실행 간 바이트 비교가 된다. present 는 위에서 읽기 전용이 되었다.
+    // 표시 대상 캡처. UI 가 없는 렌더 결과만 떠서 실행 간 바이트 비교가 된다. 복사 뒤 UI 가 샘플링할 수
+    // 있게 되돌린다.
     graph.add({"표시 캡처",
                nullptr,
                [&] { return !capturePath.empty() && capturePresent; },
+               {ImageUse{targets.present.handle,
+                         VK_IMAGE_ASPECT_COLOR_BIT,
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_COPY_BIT,
+                         VK_ACCESS_2_TRANSFER_READ_BIT}},
+               {},
+               {sampled(targets.present, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT)},
                [&](VkCommandBuffer cmd) {
-                   imageBarrier(cmd,
-                                targets.present.handle,
-                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                                VK_PIPELINE_STAGE_2_COPY_BIT,
-                                VK_ACCESS_2_TRANSFER_READ_BIT);
                    VkBufferImageCopy2 region{VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2};
                    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
                    region.imageSubresource.layerCount = 1;
@@ -5152,12 +5040,15 @@ void Renderer::recordCommands(Frame& frame,
                                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
                }});
 
-    graph.add({"UI", "UI", {}, [&](VkCommandBuffer cmd) { recordUiPass(cmd, imageIndex); }});
+    graph.add({"UI", "UI", {}, {}, {}, {}, [&](VkCommandBuffer cmd) { recordUiPass(cmd, imageIndex); }});
 
     // 스왑체인 캡처(UI 포함)를 뜨고 표시 레이아웃으로 넘긴다. 캡처가 없으면 전이만 한다.
     graph.add({"스왑체인 캡처",
                nullptr,
                [&] { return !capturePath.empty() && !capturePresent; },
+               {},
+               {},
+               {},
                [&](VkCommandBuffer cmd) {
                    imageBarrier(cmd,
                                 swapchain->images[imageIndex],
@@ -5194,6 +5085,9 @@ void Renderer::recordCommands(Frame& frame,
     graph.add({"표시 전이",
                nullptr,
                [&] { return capturePath.empty() || capturePresent; },
+               {},
+               {},
+               {},
                [&](VkCommandBuffer cmd) {
                    imageBarrier(cmd,
                                 swapchain->images[imageIndex],
