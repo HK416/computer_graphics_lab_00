@@ -72,8 +72,11 @@ cmake --preset debug -DCG_LAB_DLSS_SDK=<NVIDIA/DLSS 경로>   # 주지 않으면
 ./build/release/cg_lab --model public/assets/DamagedHelmet.glb --profile   # 종료할 때 구간 계측을 로그로 남긴다
 ```
 
-캡처에는 편집기 UI 가 함께 들어가고 콘솔에 시각이 찍히므로 두 실행의 PNG 는 바이트로 같지 않다. 렌더
-영역을 눈으로 견주거나 잘라서 비교한다.
+기본 캡처에는 편집기 UI 가 함께 들어가고 콘솔에 시각이 찍히므로 두 실행의 PNG 는 바이트로 같지 않다. **바이트로
+견줄 때는 `--fixed-dt 0.016666 --capture present` 를 준다**(렌더 결과만, 고정 프레임 간격). 동작이 바뀌지 않아야 하는
+변경은 이 인자로 전후를 `cmp` 한다. 비교 행렬: 헬멧(mesh shader / `--no-mesh-shader` / `--pathtrace` / `--upscaler 2
+--render-scale 0.5` / `--upscaler 1 --render-scale 0.5` / `--reflections`)과 `tests/scenes/rigid_*.json --play`. GPU 유체는
+원자 합 순서 때문에 바이트가 갈리니 눈으로 본다.
 
 기본값은 `--auto-tune safe` 라 **기기마다 렌더 설정이 달라진다**(높은 등급에서는 광선 반사가 켜지고,
 낮은 등급에서는 렌더 배율이 내려간다). 다른 기계의 캡처와 견주거나 변경 전후를 정확히 비교할 때는
@@ -153,7 +156,7 @@ CPU 백엔드를 부르느라 `physics` 를 하나 본다.
 | `src/app` | 수명 주기, SDL 창, 이벤트 루프, 모델/장면 적재. `plugin.h` 의 `Plugin`/`Services` 와 `plugins/` 의 기능 플러그인(물리 등) |
 | `src/asset` | glTF 적재, meshlet/LOD DAG 구축, 애니메이션 샘플링. CPU 측 표현 |
 | `src/scene` | 장면 그래프, 카메라, 커스텀 JSON 직렬화 |
-| `src/gfx` | Vulkan 컨텍스트, 리소스, 렌더 경로 전부. GPU SPH(`fluid.cpp`)도 여기 |
+| `src/gfx` | Vulkan 컨텍스트, 리소스, 렌더 경로 전부. `Renderer` 는 클래스 하나지만 정의가 `renderer_*.cpp` 에 기능별로 나뉜다(`renderer_internal.h` 가 공유 푸시 상수·포맷). `render_graph.h` 가 프레임 패스 목록. GPU SPH(`fluid.cpp`)도 여기 |
 | `src/physics` | 강체 솔버와 CPU SPH. `scene` 과 `core` 에만 의존한다. 강체는 재생 중 `Application::run` 이 고정 간격으로 부르고, 유체 CPU 백엔드는 `gfx::FluidSimulator` 가 부른다(그래서 `gfx` → `physics` 의존이 하나 있다) |
 | `src/editor` | ImGui 도킹 편집기 |
 | `src/core` | `fatal`, 잠금 없는 작업 큐 |
@@ -171,10 +174,11 @@ CPU 백엔드를 부르느라 `physics` 를 하나 본다.
 `refresh()` 는 편집기가 장면을 만진 **뒤**, 렌더러가 읽기 **전**에 불려야 한다. 훅이 아니라 지난 사본과
 필드를 직접 비교해 더티를 찾고 세계 변환/가시성 캐시를 다시 만든다(이유는 README).
 
-`Renderer::drawFrame` → `buildDrawCommands`(유체 `prepare` 포함) → `buildLights` → `recordCommands`. 기록 순서:
+`Renderer::drawFrame` → `buildDrawCommands`(유체 `prepare` 포함) → `buildLights` → `recordCommands`. `recordCommands` 는
+패스를 `RenderGraph` 노드로 등록하고(플러그인 `addPass` 훅이 그 뒤에 자기 노드를 끼움) `execute` 한다. 노드 순서:
 
-환경 맵 굽기(설정이 바뀔 때만) → 스킨 컴퓨트(변형 정점·meshlet 경계) → 유체 컴퓨트(입자 진행, 인스턴스와
-TLAS 인스턴스 쓰기) → 그림자 패스 → [경로 추적] **또는** [컬(1차) → 불투명(1차, 끝에 유체 인스턴스 드로우)
+환경 맵 굽기(설정이 바뀔 때만) → 스킨 컴퓨트(변형 정점·meshlet 경계) → [강체 GPU 솔버: PhysicsPlugin 이 끼움] →
+유체 컴퓨트(입자 진행, 인스턴스와 TLAS 인스턴스 쓰기) → 그림자 패스 → [경로 추적] **또는** [컬(1차) → 불투명(1차, 끝에 유체 인스턴스 드로우)
 → HZB → 컬(2차) → 불투명(2차) → 하늘 → 광선 반사 → OIT → 합성 → SSAO] → Bloom·자동 노출 → 시간축
 업스케일 → 톤 매핑 → 공간 업스케일 → UI.
 
@@ -210,7 +214,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | 모양 기하 `closestOn*Local` `probePointLocal` `closestOnTriangleSurface` (`src/physics/collider_shapes.h`) | 동명 함수 (`shaders/collider_shapes.glsl`) |
 | `physics::MAX_MANIFOLD_POINTS` (`src/physics/rigid_body.h`) | `RIGID_MAX_MANIFOLD` (`rigid_common.glsl`) |
 | `FluidSurfacePushConstants` (`src/gfx/fluid.h`) | 동명 블록 (`shaders/fluid_surface_common.glsl`) |
-| `FluidDrawPushConstants` (`src/gfx/renderer.cpp`) | 동명 블록 (`shaders/fluid_draw_common.glsl`) |
+| `FluidDrawPushConstants` (`src/gfx/renderer_internal.h`) | 동명 블록 (`shaders/fluid_draw_common.glsl`) |
 | `physics::SurfaceVertex` (`src/physics/marching_cubes.h`) | `FluidSurfaceVertex` (`shaders/fluid_types.glsl`) |
 | `physics::MC_TABLE` `MC_EDGES` `MC_CORNERS` (`marching_cubes.cpp`) | `MC_TABLE` `MC_EDGE_CORNERS` `MC_CORNER_OFFSET` (`shaders/marching_cubes.glsl`) |
 
@@ -224,7 +228,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `scene::ColliderShape` (`src/scene/scene.h`) | `COLLIDER_SHAPE_*` (`collider_shapes.glsl`; `RIGID_SHAPE_*` `FLUID_COLLIDER_*` 는 그 별칭) |
 
 | `Options::debugMode`, `Renderer::debugMode` | `DEBUG_MODE_*` (`scene_types.glsl`) |
-| `DebugLineVertex` (`src/gfx/debug_lines.h`), `DebugLinePushConstants` (`renderer.cpp`) | 동명 구조체 (`shaders/debug_line_common.glsl`) |
+| `DebugLineVertex` (`src/gfx/debug_lines.h`), `DebugLinePushConstants` (`renderer_internal.h`) | 동명 구조체 (`shaders/debug_line_common.glsl`) |
 
 전부 `scalar` 레이아웃이다.
 
@@ -257,6 +261,12 @@ MoltenVK(macOS)에는 mesh shader 와 광선 추적이 없어 고전 경로만 �
   평범한 `main()` 이라, `NDEBUG` 가 살아 있으면 검사가 통째로 사라진다.
 - 테스트가 도는 것은 순수 계산 부분(`*_math.cpp`, 장면 그래프, 애니메이션, 직렬화, 잠금 없는 큐)뿐이다.
   Vulkan 을 타는 코드에는 테스트가 없으므로 스크린샷 비교로 확인한다.
+- **새 렌더 패스**는 `recordCommands` 의 `graph.add` 노드로(또는 플러그인이면 `Renderer::addPass` 훅의 `addAfter` 로)
+  등록한다. 이미지 사용은 `reads`/`writes`/`leaves` 로 선언하고 **노드 안에 `imageBarrier` 를 새로 쓰지 않는다.** 층·밉
+  단위 전이만 예외이고, 그때는 `leaves` 로 남긴 상태를 알린다. 조건은 `enabled` 로 두고 노드 자체는 늘 등록한다.
+- **새 기능은 `app::Plugin`** 으로 붙이고 `Application::registerPlugins` 에 등록한다. 편집기 절은 `ui()` 에서
+  `editor.settingsSection("이름")` 으로 연다. `editor/` 는 `app::` 를 보지 않는다 — 플러그인 → 편집기 교환은 Editor 의 공개
+  상태 필드·콜백으로만.
 - **Vulkan 실패는 복구하지 않는다.** `VK_CHECK(...)`(`src/gfx/vk_check.h`) 또는 `core::fatal(...)` 로
   메시지 박스를 띄우고 종료한다.
 - **프로파일러 구간**은 `gfx::ProfilerScope scope(profiler, "이름", commandBuffer)` RAII 로 잡는다.
