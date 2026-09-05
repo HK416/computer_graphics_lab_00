@@ -2472,6 +2472,20 @@ bool Renderer::rayQueryShadowsAvailable() const {
     return context.caps.rayQuery && rayTracer != nullptr && rayTracingBlockedReason.empty();
 }
 
+const char* Renderer::debugModeBlockedReason(uint32_t mode) const {
+    if (usePathTracing && rayTracer != nullptr && !pathTraceSupportsDebugMode(mode)) {
+        return "경로 추적에는 이 값이 없어 셰이딩으로 그린다";
+    }
+    if ((mode == DEBUG_MODE_REFLECTION_RAW || mode == DEBUG_MODE_REFLECTION) && !rayQueryShadowsAvailable()) {
+        return "광선 질의가 없어 반사를 계산하지 않는다";
+    }
+    // mesh shader 경로는 meshlet 번호를 mesh 셰이더가 직접 넘기므로 gl_DrawID 가 필요 없다.
+    if ((mode == DEBUG_MODE_MESHLET || mode == DEBUG_MODE_LOD) && !useMeshPath() && !context.caps.shaderDrawIndex) {
+        return "gl_DrawID 가 없어 고전 경로는 meshlet 을 메쉬 단위로만 안다";
+    }
+    return nullptr;
+}
+
 void Renderer::createMeshPipelines() {
     scenePushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     if (context.caps.meshShader) {

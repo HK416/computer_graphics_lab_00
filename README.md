@@ -781,7 +781,8 @@ DamagedHelmet 을 렌더 배율 0.5, 고정 LOD 로 그리고 4배 초표본 기
 예외 하나는 `gl_DrawID` 다. MoltenVK 는 `shaderDrawParameters` 를 지원한다고 보고하지만 MSL 에
 `DrawIndex` 가 없어 SPIR-V 변환에서 죽는다. `VK_KHR_portability_subset` 을 내거는 장치에서는 정점
 셰이더를 `gl_DrawID` 없는 변종(`mesh_nodrawid.vert.spv`)으로 바꿔 끼운다. 그 값은 meshlet·LOD
-디버그 뷰에만 쓰이므로 렌더 결과는 같고, 두 디버그 뷰가 메쉬 단위로 뭉개진다.
+디버그 뷰에만 쓰이므로 렌더 결과는 같다. 편집기는 그 장치가 만들지 못하는 디버그 뷰(이 둘과, 광선
+질의가 없을 때의 반사 뷰)를 콤보에서 잠그고 사유를 보인다(`Renderer::debugModeBlockedReason`).
 
 **시뮬레이션은 예외다.** 그 원칙은 «어떻게 보이는가» 를 정하는 렌더 경로에 대한 것이고, 시뮬레이션은
 어디서 풀든 결과가 같아야 하는 계산이라 사용자가 백엔드를 고른다. 유체는 GPU 컴퓨트와 CPU SPH 를 모두

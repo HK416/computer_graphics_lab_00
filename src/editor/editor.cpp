@@ -1836,26 +1836,23 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
                                                            "컬 패스",
                                                            "반사 원본",
                                                            "반사 누적"};
-        // 경로 추적은 래스터에 있는 모드를 다 그리지는 못한다. 못 그리는 것만 개별로 잠근다.
-        auto modeUsable = [this](uint32_t mode) {
-            return !renderer.usePathTracing || gfx::pathTraceSupportsDebugMode(mode);
-        };
+        // 경로 추적이나 이 장치가 못 만드는 값은 개별로 잠그고 사유를 보인다.
         if (ImGui::BeginCombo("디버그 뷰", DEBUG_MODE_NAMES[renderer.debugMode])) {
             for (uint32_t mode = 0; mode < IM_ARRAYSIZE(DEBUG_MODE_NAMES); ++mode) {
-                bool usable = modeUsable(mode);
-                ImGui::BeginDisabled(!usable);
+                const char* blocked = renderer.debugModeBlockedReason(mode);
+                ImGui::BeginDisabled(blocked != nullptr);
                 if (ImGui::Selectable(DEBUG_MODE_NAMES[mode], renderer.debugMode == mode)) {
                     renderer.debugMode = mode;
                 }
                 ImGui::EndDisabled();
-                if (!usable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                    ImGui::SetTooltip("경로 추적에는 이 값이 없다");
+                if (blocked != nullptr && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    ImGui::SetTooltip("%s", blocked);
                 }
             }
             ImGui::EndCombo();
         }
-        if (!modeUsable(renderer.debugMode)) {
-            ImGui::TextDisabled("경로 추적 중에는 셰이딩으로 그린다");
+        if (const char* blocked = renderer.debugModeBlockedReason(renderer.debugMode); blocked != nullptr) {
+            ImGui::TextDisabled("%s", blocked);
         }
 
         bool vsync = renderer.vsyncEnabled();
@@ -1870,12 +1867,10 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         bool meshShader = caps.meshShader;
         bool rayTracing = caps.rayTracingPipeline;
         bool drawIndirectCount = caps.drawIndirectCount;
-        bool minmax = caps.samplerFilterMinmax;
         bool drawIndex = caps.shaderDrawIndex;
         ImGui::Checkbox("mesh shader", &meshShader);
         ImGui::Checkbox("레이트레이싱 파이프라인", &rayTracing);
         ImGui::Checkbox("drawIndirectCount", &drawIndirectCount);
-        ImGui::Checkbox("samplerFilterMinmax", &minmax);
         ImGui::Checkbox("gl_DrawID (없으면 meshlet 디버그 뷰가 메쉬 단위)", &drawIndex);
         ImGui::EndDisabled();
     }

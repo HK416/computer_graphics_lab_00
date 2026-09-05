@@ -24,8 +24,6 @@ struct Capabilities {
     // 간접 그리기 개수를 GPU 버퍼에서 읽어 압축 드로우가 가능한지. 없으면 고정 개수로 디스패치하고
     // 컬링된 드로우는 instanceCount 를 0 으로 기록한다.
     bool drawIndirectCount = false;
-    // HZB 밈맵 생성 시 min/max 리덕션 샘플러 사용 가능 여부.
-    bool samplerFilterMinmax = false;
     bool pipelineStatistics = false;
     bool shaderFloat16 = false;
     // FSR 셰이더가 SPIR-V Int16 능력을 선언한다.

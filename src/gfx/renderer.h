@@ -46,9 +46,11 @@ inline constexpr uint32_t FRAMES_IN_FLIGHT = 2;
 
 // shaders/scene_types.glsl 의 DEBUG_MODE_* 와 값이 같아야 한다.
 inline constexpr uint32_t DEBUG_MODE_SHADED = 0;
+inline constexpr uint32_t DEBUG_MODE_MESHLET = 1;
 inline constexpr uint32_t DEBUG_MODE_NORMAL = 2;
 inline constexpr uint32_t DEBUG_MODE_UV = 3;
 inline constexpr uint32_t DEBUG_MODE_DEPTH = 4;
+inline constexpr uint32_t DEBUG_MODE_LOD = 5;
 inline constexpr uint32_t DEBUG_MODE_SHADOW = 7;
 inline constexpr uint32_t DEBUG_MODE_VELOCITY = 8;
 inline constexpr uint32_t DEBUG_MODE_CULL_PHASE = 9;
@@ -321,6 +323,8 @@ public:
     bool useRayQueryShadows = false;
     float rayShadowDistance = 12.0F;
     bool rayQueryShadowsAvailable() const;
+    // 이 장치·모드에서 디버그 뷰가 값을 만들지 못하면 그 사유, 만들면 nullptr. 편집기가 콤보를 잠근다.
+    const char* debugModeBlockedReason(uint32_t mode) const;
     // 광선 기능이 처음 필요할 때 하위 가속 구조를 세운다. 예산을 넘으면 사유를 남기고 광선 기능을 끈다.
     bool ensureBottomLevel();
     // 광선 반사: 거칠기가 상한 이하인 불투명 표면의 스페큘러 IBL 을 추적한 반사로 바꾼다. 광선

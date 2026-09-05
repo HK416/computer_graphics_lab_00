@@ -261,7 +261,6 @@ Capabilities queryCapabilities(const FeatureChain& f,
     caps.rayTracingPipeline = caps.accelerationStructure && f.rayTracing.rayTracingPipeline == VK_TRUE;
     caps.rayQuery = caps.accelerationStructure && f.rayQuery.rayQuery == VK_TRUE;
     caps.drawIndirectCount = f.v12.drawIndirectCount == VK_TRUE;
-    caps.samplerFilterMinmax = f.v12.samplerFilterMinmax == VK_TRUE;
     caps.pipelineStatistics = f.features2.features.pipelineStatisticsQuery == VK_TRUE;
     caps.depthClamp = f.features2.features.depthClamp == VK_TRUE;
     caps.wideLines = f.features2.features.wideLines == VK_TRUE;
@@ -297,7 +296,6 @@ int scoreDevice(const VkPhysicalDeviceProperties& properties, const Capabilities
     score += caps.rayTracingPipeline ? 2000 : 0;
     score += caps.rayQuery ? 500 : 0;
     score += caps.drawIndirectCount ? 500 : 0;
-    score += caps.samplerFilterMinmax ? 200 : 0;
     return score;
 }
 
@@ -430,10 +428,7 @@ void logCapabilities(const VkPhysicalDeviceProperties& properties,
                  families.hasSeparateTransfer() ? " (별도)" : " (공유)");
     spdlog::info("mesh shader: {}, task shader: {}", caps.meshShader, caps.taskShader);
     spdlog::info("ray tracing pipeline: {}, ray query: {}", caps.rayTracingPipeline, caps.rayQuery);
-    spdlog::info("drawIndirectCount: {}, samplerFilterMinmax: {}, subgroup {}",
-                 caps.drawIndirectCount,
-                 caps.samplerFilterMinmax,
-                 caps.subgroupSize);
+    spdlog::info("drawIndirectCount: {}, subgroup {}", caps.drawIndirectCount, caps.subgroupSize);
     spdlog::info("타임스탬프 쿼리: {} (주기 {:.2f} ns, 유효 비트 {})",
                  caps.timestamps,
                  properties.limits.timestampPeriod,
@@ -594,7 +589,6 @@ Context::Context(SDL_Window* window) {
     enabled.v12.scalarBlockLayout = VK_TRUE;
     enabled.v12.hostQueryReset = VK_TRUE;
     enabled.v12.drawIndirectCount = caps.drawIndirectCount ? VK_TRUE : VK_FALSE;
-    enabled.v12.samplerFilterMinmax = caps.samplerFilterMinmax ? VK_TRUE : VK_FALSE;
     enabled.v12.shaderFloat16 = caps.shaderFloat16 ? VK_TRUE : VK_FALSE;
     enabled.v12.shaderInt8 = caps.shaderInt8 ? VK_TRUE : VK_FALSE;
     enabled.v13.dynamicRendering = VK_TRUE;
