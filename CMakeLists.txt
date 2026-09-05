@@ -578,6 +578,11 @@ add_test(NAME hardware_profile COMMAND cg_lab_hardware_profile_tests)
 add_test(NAME fluid COMMAND cg_lab_fluid_tests)
 add_test(NAME physics COMMAND cg_lab_physics_tests)
 add_test(NAME marching_cubes COMMAND cg_lab_marching_cubes_tests)
+# 헤드리스 물리 회귀: 강체 장면을 120 프레임 돌려 저장한 결과가 기준 파일과 바이트로 같은지 본다.
+add_test(NAME headless_physics
+    COMMAND ${CMAKE_COMMAND} -DCG_LAB=$<TARGET_FILE:cg_lab> -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/headless_rigid_cpu.json
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/headless_physics.cmake)
 
 # cmake --build --preset debug --target run 으로 빌드한 뒤 바로 실행한다.
 add_custom_target(run

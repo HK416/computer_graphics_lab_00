@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <vector>
@@ -29,6 +30,8 @@ namespace {
 constexpr int DEFAULT_WINDOW_WIDTH = 1600;
 constexpr int DEFAULT_WINDOW_HEIGHT = 900;
 constexpr float NANOSECONDS_PER_SECOND = 1.0e9F;
+// 헤드리스가 --fixed-dt 없이 쓰는 프레임 간격.
+constexpr float HEADLESS_DELTA_SECONDS = 1.0F / 60.0F;
 // 캡처 전에 스왑체인 크기가 안정될 시간을 준다.
 
 // Unity 처럼 새 장면에는 방향광 하나를 기본으로 둔다.
@@ -85,72 +88,78 @@ void frameCamera(scene::Scene& scene, const gfx::GeometryStore& geometry) {
 } // namespace
 
 Application::Application(const Options& options) : jobs(options.threadCount), options(options) {
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
+    // 헤드리스는 틱만 쓴다. 비디오를 올리지 않으면 core::fatal 의 메시지 박스도 뜨지 않고 바로 종료한다.
+    if (!SDL_Init(options.headless ? 0 : SDL_INIT_VIDEO)) {
         core::fatal("SDL 초기화에 실패했습니다: {}", SDL_GetError());
     }
 
-    window = SDL_CreateWindow("Computer Graphics Lab",
-                              DEFAULT_WINDOW_WIDTH,
-                              DEFAULT_WINDOW_HEIGHT,
-                              SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
-    if (window == nullptr) {
-        core::fatal("윈도우 생성에 실패했습니다: {}", SDL_GetError());
-    }
+    if (!options.headless) {
+        window = SDL_CreateWindow("Computer Graphics Lab",
+                                  DEFAULT_WINDOW_WIDTH,
+                                  DEFAULT_WINDOW_HEIGHT,
+                                  SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+        if (window == nullptr) {
+            core::fatal("윈도우 생성에 실패했습니다: {}", SDL_GetError());
+        }
 
-    context = std::make_unique<gfx::Context>(window);
-    context->memoryBudgetOverride = options.gpuBudgetMegabytes * 1024ULL * 1024ULL;
-    bindless = std::make_unique<gfx::BindlessTextures>(*context);
-    textures = std::make_unique<gfx::TextureCache>(*context, *bindless);
-    geometry = std::make_unique<gfx::GeometryStore>(*context);
+        context = std::make_unique<gfx::Context>(window);
+        context->memoryBudgetOverride = options.gpuBudgetMegabytes * 1024ULL * 1024ULL;
+        bindless = std::make_unique<gfx::BindlessTextures>(*context);
+        textures = std::make_unique<gfx::TextureCache>(*context, *bindless);
+        geometry = std::make_unique<gfx::GeometryStore>(*context);
+    }
+    // 내장 도형은 헤드리스에서도 올린다. 장면 파일이 가리키는 메쉬 번호와 메쉬 콜라이더가 여기서 나온다.
     registerBuiltinModels();
     loadScenes();
-    renderer = std::make_unique<gfx::Renderer>(*context, *geometry, *bindless, window, jobs, settings);
-    // 입자는 수만 개가 그려지므로 극에 삼각형이 몰리지 않는 정이십면체 구를 쓴다.
-    renderer->fluidSphereMesh = primitiveMeshes[static_cast<size_t>(asset::Primitive::ICO_SPHERE)];
-    editorUi = std::make_unique<editor::Editor>(*context, *renderer, window);
-    editorUi->workerCount = jobs.workerCount();
-    editorUi->primitiveMeshes = primitiveMeshes;
-    settings.debugMode = options.debugMode;
-    renderer->fixedFrameDelta = options.fixedDeltaSeconds;
-    renderer->capturePresent = options.capturePresent;
-    if (options.lodLevel != AUTOMATIC_LOD) {
-        settings.automaticLod = false;
-        settings.lodLevel = options.lodLevel;
-    }
-    settings.lodErrorThreshold = options.lodErrorThreshold;
-    settings.useNeuralLod = options.neuralLod;
-    settings.renderScale = options.renderScale;
-    settings.upscaler = static_cast<gfx::Upscaler>(options.upscaler);
-    if (options.pathTracing) {
-        // 편집기 체크박스와 같은 게이트를 탄다.
-        if (renderer->pathTracingAvailable()) {
-            settings.usePathTracing = true;
-        } else {
-            spdlog::warn("이 장치는 경로 추적을 지원하지 않아 --pathtrace 를 무시한다");
+    if (!options.headless) {
+        renderer = std::make_unique<gfx::Renderer>(*context, *geometry, *bindless, window, jobs, settings);
+        // 입자는 수만 개가 그려지므로 극에 삼각형이 몰리지 않는 정이십면체 구를 쓴다.
+        renderer->fluidSphereMesh = primitiveMeshes[static_cast<size_t>(asset::Primitive::ICO_SPHERE)];
+        editorUi = std::make_unique<editor::Editor>(*context, *renderer, window);
+        editorUi->workerCount = jobs.workerCount();
+        editorUi->primitiveMeshes = primitiveMeshes;
+        settings.debugMode = options.debugMode;
+        renderer->fixedFrameDelta = options.fixedDeltaSeconds;
+        renderer->capturePresent = options.capturePresent;
+        if (options.lodLevel != AUTOMATIC_LOD) {
+            settings.automaticLod = false;
+            settings.lodLevel = options.lodLevel;
         }
+        settings.lodErrorThreshold = options.lodErrorThreshold;
+        settings.useNeuralLod = options.neuralLod;
+        settings.renderScale = options.renderScale;
+        settings.upscaler = static_cast<gfx::Upscaler>(options.upscaler);
+        if (options.pathTracing) {
+            // 편집기 체크박스와 같은 게이트를 탄다.
+            if (renderer->pathTracingAvailable()) {
+                settings.usePathTracing = true;
+            } else {
+                spdlog::warn("이 장치는 경로 추적을 지원하지 않아 --pathtrace 를 무시한다");
+            }
+        }
+        if (options.triangleBudget > 0.0F) {
+            settings.triangleBudget = options.triangleBudget;
+        }
+        settings.occlusionCulling = options.occlusionCulling;
+        settings.useReflections = options.reflections;
+        if (!options.meshShader) {
+            settings.useMeshShader = false;
+        }
+        applyHardwareProfile();
+        orbitDegreesPerFrame = options.orbitDegreesPerFrame;
+        renderer->setUiCallback([this](VkCommandBuffer commandBuffer) { editorUi->record(commandBuffer); });
+        editorUi->setModelLoader(assetRoot, [this](const std::filesystem::path& path) { requestModel(path); });
+        editorUi->setSceneIo(
+            sceneRoot,
+            [this](const std::filesystem::path& path) { saveScene(path); },
+            [this](const std::filesystem::path& path) { openScene(path); });
+        editorUi->setModelCollector([this] { collectUnusedModels(true); });
     }
-    if (options.triangleBudget > 0.0F) {
-        settings.triangleBudget = options.triangleBudget;
-    }
-    settings.occlusionCulling = options.occlusionCulling;
-    settings.useReflections = options.reflections;
-    if (!options.meshShader) {
-        settings.useMeshShader = false;
-    }
-    applyHardwareProfile();
-    orbitDegreesPerFrame = options.orbitDegreesPerFrame;
-    renderer->setUiCallback([this](VkCommandBuffer commandBuffer) { editorUi->record(commandBuffer); });
-    editorUi->setModelLoader(assetRoot, [this](const std::filesystem::path& path) { requestModel(path); });
-    editorUi->setSceneIo(
-        sceneRoot,
-        [this](const std::filesystem::path& path) { saveScene(path); },
-        [this](const std::filesystem::path& path) { openScene(path); });
-    editorUi->setModelCollector([this] { collectUnusedModels(true); });
-    // 렌더러가 있어야 지오메트리 재구축을 알릴 수 있으므로 여기서 연다.
+    // 렌더러가 있어야 지오메트리 재구축을 알릴 수 있으므로 여기서 연다. 헤드리스에서는 콜라이더 메쉬만 남는다.
     for (const std::filesystem::path& path : options.modelPaths) {
         loadModel(path);
     }
-    if (!options.modelPaths.empty()) {
+    if (!options.modelPaths.empty() && geometry != nullptr) {
         frameCamera(scenes.active(), *geometry);
     }
     if (!options.scenePath.empty()) {
@@ -163,8 +172,16 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
 }
 
 Services Application::services() {
-    return Services{
-        scenes, jobs, options, hardwareProfile, settings, *context, *bindless, *geometry, *renderer, *editorUi};
+    return Services{scenes,
+                    jobs,
+                    options,
+                    hardwareProfile,
+                    settings,
+                    context.get(),
+                    bindless.get(),
+                    geometry.get(),
+                    renderer.get(),
+                    editorUi.get()};
 }
 
 // 등록 순서가 곧 프레임 안의 호출 순서다.
@@ -177,12 +194,14 @@ void Application::registerPlugins() {
     for (std::unique_ptr<Plugin>& plugin : plugins) {
         plugin->build(shared);
     }
-    editorUi->setPluginSettings([this] {
-        Services frame = services();
-        for (std::unique_ptr<Plugin>& plugin : plugins) {
-            plugin->ui(frame);
-        }
-    });
+    if (editorUi != nullptr) {
+        editorUi->setPluginSettings([this] {
+            Services frame = services();
+            for (std::unique_ptr<Plugin>& plugin : plugins) {
+                plugin->ui(frame);
+            }
+        });
+    }
 }
 
 Application::~Application() {
@@ -197,7 +216,9 @@ Application::~Application() {
     textures.reset();
     bindless.reset();
     context.reset();
-    SDL_DestroyWindow(window);
+    if (window != nullptr) {
+        SDL_DestroyWindow(window);
+    }
     SDL_Quit();
 }
 
@@ -210,7 +231,9 @@ void Application::loadScenes() {
     created.colliderMeshes = &colliderMeshes;
     addDefaultLight(created);
     created.refresh();
-    geometry->build();
+    if (geometry != nullptr) {
+        geometry->build();
+    }
     scenes.setActive(0);
     spdlog::info("기본 장면 준비 완료: {}", created.name);
 }
@@ -360,12 +383,16 @@ Application::PrepareTimings Application::prepareModel(asset::Model& model, asset
 }
 
 asset::LoadSettings Application::loadSettings() const {
-    asset::LoadSettings settings;
-    settings.weldSmoothingDegrees = options.weldAngleDegrees;
-    return settings;
+    asset::LoadSettings load;
+    load.weldSmoothingDegrees = options.weldAngleDegrees;
+    return load;
 }
 
 bool Application::fitsGpuBudget(const asset::Model& model) const {
+    // 헤드리스에는 GPU 가 없다. 콜라이더 메쉬만 남으므로 예산을 볼 것이 없다.
+    if (context == nullptr) {
+        return true;
+    }
     VkDeviceSize geometryBytes = gfx::GeometryStore::estimateModelBytes(model);
     VkDeviceSize textureBytes = 0;
     for (const asset::Texture& texture : model.textures) {
@@ -420,19 +447,26 @@ uint32_t Application::findModel(const std::filesystem::path& path) const {
 }
 
 uint32_t Application::registerModel(const std::filesystem::path& path, asset::Model& model, bool builtin) {
-    gfx::Uploader uploader(*context);
-    std::vector<uint32_t> textureSlots;
-    textureSlots.reserve(model.textures.size());
-    for (const asset::Texture& texture : model.textures) {
-        textureSlots.push_back(textures->add(uploader, texture));
-    }
-
     LoadedModel entry;
     entry.path = path;
     entry.builtin = builtin;
-    entry.range = geometry->addModel(model, textureSlots);
-    entry.meshBase = entry.range.meshBase;
-    entry.meshCount = entry.range.meshCount;
+    std::vector<uint32_t> textureSlots;
+    std::optional<gfx::Uploader> uploader;
+    if (context != nullptr) {
+        uploader.emplace(*context);
+        textureSlots.reserve(model.textures.size());
+        for (const asset::Texture& texture : model.textures) {
+            textureSlots.push_back(textures->add(*uploader, texture));
+        }
+        entry.range = geometry->addModel(model, textureSlots);
+        entry.meshBase = entry.range.meshBase;
+        entry.meshCount = entry.range.meshCount;
+    } else {
+        // 헤드리스는 지오메트리 저장소가 없어 메쉬 번호를 콜라이더 표 끝에 이어서 매긴다. 장면 파일은
+        // (모델, 모델 안 번호) 로 적혀 있어 어느 번호 체계든 meshBase 만 맞으면 된다.
+        entry.meshBase = static_cast<uint32_t>(colliderMeshes.size());
+        entry.meshCount = static_cast<uint32_t>(model.meshes.size());
+    }
     // 메쉬 콜라이더용 CPU 사본. 삼각형 수가 상한 아래인 가장 고운 LOD 단계 하나만 담는다(위치만).
     if (colliderMeshes.size() < entry.meshBase + entry.meshCount) {
         colliderMeshes.resize(entry.meshBase + entry.meshCount);
@@ -466,7 +500,9 @@ uint32_t Application::registerModel(const std::filesystem::path& path, asset::Mo
     entry.textureSlots = std::move(textureSlots);
     entry.skeleton = std::move(model.skeleton);
     entry.instances = std::move(model.instances);
-    uploader.flush();
+    if (uploader) {
+        uploader->flush();
+    }
 
     // 해제된 자리가 있으면 거기 넣는다. 애니메이터가 모델 번호를 들고 있어 항목을 지우지 않는다.
     for (uint32_t i = 0; i < loadedModels.size(); ++i) {
@@ -497,9 +533,9 @@ void Application::collectUnusedModels(bool force) {
     };
     for (size_t s = 0; s < scenes.count(); ++s) {
         const scene::Scene& scene = scenes.at(s);
-        for (const scene::MeshRenderer& renderer : scene.meshRenderers) {
-            if (renderer.mesh != scene::INVALID_MESH) {
-                markMesh(renderer.mesh);
+        for (const scene::MeshRenderer& meshRenderer : scene.meshRenderers) {
+            if (meshRenderer.mesh != scene::INVALID_MESH) {
+                markMesh(meshRenderer.mesh);
             }
         }
         for (const scene::Animator& animator : scene.animators) {
@@ -687,12 +723,16 @@ void Application::completeLoad() {
     }
 
     // 지오메트리 버퍼를 통째로 다시 만들기 때문에 진행 중인 프레임이 끝난 뒤에 손대야 한다.
-    renderer->waitIdle();
+    if (renderer != nullptr) {
+        renderer->waitIdle();
+    }
     uint64_t uploadStart = SDL_GetTicksNS();
 
     uint32_t modelIndex = registerModel(load.path, load.model);
-    geometry->build();
-    renderer->onGeometryChanged();
+    if (renderer != nullptr) {
+        geometry->build();
+        renderer->onGeometryChanged();
+    }
     instantiateModel(modelIndex, target);
 
     uint64_t end = SDL_GetTicksNS();
@@ -808,7 +848,9 @@ void Application::openScene(const std::filesystem::path& path) {
     // 적재는 지오메트리 버퍼를 다시 만드므로 진행 중인 프레임이 끝난 뒤에 한다.
     // ponytail: 장면 파일의 모델은 아직 동기로 올린다. 백그라운드 적재가 도는 중이면 같은 워커를 나눠
     // 써서 둘 다 느려질 뿐 결과는 옳다.
-    renderer->waitIdle();
+    if (renderer != nullptr) {
+        renderer->waitIdle();
+    }
     std::vector<uint32_t> modelIndices;
     modelIndices.reserve(loaded.models.size());
     for (const std::filesystem::path& modelPath : loaded.models) {
@@ -822,7 +864,7 @@ void Application::openScene(const std::filesystem::path& path) {
         }
         modelIndices.push_back(index);
     }
-    if (!loaded.models.empty()) {
+    if (!loaded.models.empty() && renderer != nullptr) {
         geometry->build();
         renderer->onGeometryChanged();
     }
@@ -859,7 +901,61 @@ void Application::openScene(const std::filesystem::path& path) {
     spdlog::info("장면 열기: {} (오브젝트 {}, 조명 {})", path.string(), created.objects.size(), created.lights.size());
 }
 
+void Application::runHeadless() {
+    // 벽시계를 쓰지 않는다. 실행마다 같은 결과가 나와야 저장 파일을 기준과 바이트로 견줄 수 있다.
+    float deltaSeconds = options.fixedDeltaSeconds > 0.0F ? options.fixedDeltaSeconds : HEADLESS_DELTA_SECONDS;
+    scene::Scene& scene = scenes.active();
+    uint32_t gpuBodies = 0;
+    for (const scene::RigidBody& body : scene.rigidBodies) {
+        gpuBodies += body.backend == scene::SimulationBackend::GPU ? 1U : 0U;
+    }
+    if (gpuBodies > 0) {
+        spdlog::warn("GPU 백엔드 강체 {} 개는 헤드리스에서 움직이지 않는다 (CPU 솔버만 돈다)", gpuBodies);
+    }
+    for (uint64_t frame = 0; frame < options.frames; ++frame) {
+        scene.update(deltaSeconds, &jobs);
+        Services shared = services();
+        for (std::unique_ptr<Plugin>& plugin : plugins) {
+            plugin->update(shared, deltaSeconds);
+        }
+        scene.refresh(&jobs);
+    }
+    spdlog::info("헤드리스 {} 프레임 완료 (간격 {:.4f} 초, 강체 {} 개)",
+                 options.frames,
+                 static_cast<double>(deltaSeconds),
+                 scene.rigidBodies.size());
+    if (!options.savePath.empty()) {
+        saveScene(options.savePath);
+    } else {
+        dumpRigidBodies();
+    }
+}
+
+void Application::dumpRigidBodies() const {
+    // 로그 접두어 없이 표준 출력에 바로 적는다. 스크립트가 줄 단위로 읽는다.
+    const scene::Scene& scene = scenes.active();
+    for (const scene::Object& object : scene.objects) {
+        if (object.rigidBody < 0) {
+            continue;
+        }
+        const scene::Transform& transform = object.transform;
+        std::cout << std::format("{} {:.6f} {:.6f} {:.6f} {:.6f} {:.6f} {:.6f} {:.6f}\n",
+                                 object.name,
+                                 transform.position.x,
+                                 transform.position.y,
+                                 transform.position.z,
+                                 transform.rotation.w,
+                                 transform.rotation.x,
+                                 transform.rotation.y,
+                                 transform.rotation.z);
+    }
+}
+
 void Application::run() {
+    if (options.headless) {
+        runHeadless();
+        return;
+    }
     bool running = true;
     uint64_t previousTicks = SDL_GetTicksNS();
     uint64_t frameCount = 0;

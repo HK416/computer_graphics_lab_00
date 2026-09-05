@@ -13,21 +13,19 @@ namespace app {
 
 struct Options;
 
-// 플러그인이 만질 수 있는 것 전부. Application 이 소유하는 객체의 참조라 플러그인보다 오래 산다.
-//
-// ponytail: 헤드리스(창·렌더러 없는 물리 전용 실행)가 오면 gfx 멤버를 포인터로 바꾸고 플러그인이 null 을
-// 살핀다. 지금은 모두 있다고 보고 참조로 둔다. settings 는 렌더러 없이도 있으므로 그때도 참조로 남는다.
+// 플러그인이 만질 수 있는 것 전부. Application 이 소유하는 객체라 플러그인보다 오래 산다.
 struct Services {
     scene::SceneManager& scenes;
     core::JobSystem& jobs;
     const Options& options;
     const gfx::HardwareProfile& profile;
     gfx::RenderSettings& settings;
-    gfx::Context& context;
-    gfx::BindlessTextures& bindless;
-    gfx::GeometryStore& geometry;
-    gfx::Renderer& renderer;
-    editor::Editor& editor;
+    // 아래는 헤드리스(--headless, 창·렌더러 없는 물리 전용 실행)에서 nullptr 다. 플러그인은 쓰기 전에 살핀다.
+    gfx::Context* context;
+    gfx::BindlessTextures* bindless;
+    gfx::GeometryStore* geometry;
+    gfx::Renderer* renderer;
+    editor::Editor* editor;
 };
 
 // 기능 하나. Application 이 등록한 순서대로 훅을 부른다(Bevy 의 Plugin 과 같은 자리).
@@ -44,7 +42,7 @@ struct Plugin {
         (void)services;
         (void)deltaSeconds;
     }
-    // 편집기 «렌더 설정» 창 안의 절. editor.settingsSection 으로 접는 머리를 만든다.
+    // 편집기 «렌더 설정» 창 안의 절. editor->settingsSection 으로 접는 머리를 만든다. 편집기가 있을 때만 불린다.
     virtual void ui(Services& services) { (void)services; }
 };
 

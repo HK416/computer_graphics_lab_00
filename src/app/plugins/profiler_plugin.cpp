@@ -26,15 +26,17 @@ ProfilerPlugin::~ProfilerPlugin() {
 }
 
 void ProfilerPlugin::build(Services& services) {
-    renderer = &services.renderer;
-    renderer->profiler().enabled = services.options.profile;
+    renderer = services.renderer;
+    if (renderer != nullptr) {
+        renderer->profiler().enabled = services.options.profile;
+    }
 }
 
 void ProfilerPlugin::ui(Services& services) {
-    if (!services.editor.settingsSection("프로파일러")) {
+    if (!services.editor->settingsSection("프로파일러")) {
         return;
     }
-    gfx::GpuProfiler& profiler = services.renderer.profiler();
+    gfx::GpuProfiler& profiler = services.renderer->profiler();
     ImGui::Checkbox("구간 계측", &profiler.enabled);
     if (!profiler.gpuAvailable()) {
         ImGui::SameLine();

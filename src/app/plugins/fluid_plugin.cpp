@@ -15,10 +15,10 @@ void FluidPlugin::build(Services& services) {
 }
 
 void FluidPlugin::ui(Services& services) {
-    if (!services.editor.settingsSection("유체")) {
+    if (!services.editor->settingsSection("유체")) {
         return;
     }
-    gfx::Renderer& renderer = services.renderer;
+    gfx::Renderer& renderer = *services.renderer;
     auto limit = static_cast<int>(services.settings.fluidParticleLimit);
     if (ImGui::SliderInt("입자 상한", &limit, 1024, static_cast<int>(gfx::FLUID_MAX_PARTICLES))) {
         services.settings.fluidParticleLimit = static_cast<uint32_t>(limit);

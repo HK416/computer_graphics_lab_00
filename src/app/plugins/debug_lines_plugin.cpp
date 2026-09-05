@@ -11,7 +11,7 @@ void DebugLinesPlugin::build(Services& services) {
 }
 
 void DebugLinesPlugin::ui(Services& services) {
-    if (!services.editor.settingsSection("콜라이더 표시")) {
+    if (!services.editor->settingsSection("콜라이더 표시")) {
         return;
     }
     ImGui::Checkbox("콜라이더 표시", &services.settings.showColliders);

@@ -79,6 +79,11 @@ struct Options {
     float fixedDeltaSeconds = 0.0F;
     // 스크린샷을 스왑체인(편집기 UI 포함) 대신 표시 대상(렌더 결과만)에서 뜬다. 바이트 비교용.
     bool capturePresent = false;
+    // 창·Vulkan·편집기 없이 장면을 열어 물리만 frames 프레임 돌린다. --save 가 있으면 장면을 저장하고, 없으면
+    // 강체 오브젝트의 위치·회전을 표준 출력에 한 줄씩 적는다. 프레임 간격은 --fixed-dt, 없으면 1/60.
+    bool headless = false;
+    uint64_t frames = 120;
+    std::filesystem::path savePath;
 };
 
 class Application {
@@ -161,6 +166,9 @@ private:
     // 장면을 커스텀 JSON 으로 저장하고 읽는다. 읽은 장면은 새 장면으로 추가한 뒤 전환한다.
     void saveScene(const std::filesystem::path& path);
     void openScene(const std::filesystem::path& path);
+    // --headless 의 본체. run() 이 창 대신 이것을 돈다.
+    void runHeadless();
+    void dumpRigidBodies() const;
 
     SDL_Window* window = nullptr;
     std::unique_ptr<gfx::Context> context;

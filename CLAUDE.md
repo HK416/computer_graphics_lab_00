@@ -50,7 +50,7 @@ ctest --test-dir build/debug --output-on-failure
 
 테스트 이름: `lod_network` `animation` `camera` `scene` `scene_io` `profiler` `shadow` `upscaler`
 `concurrency` `vertex_pack` `physics` `primitives` `debug_lines` `hardware_profile` `fluid`
-`marching_cubes`.
+`marching_cubes` `headless_physics`(cg_lab 을 `--headless` 로 돌려 저장 결과를 `tests/scenes/expected/` 와 cmp).
 
 선택 기능:
 
@@ -70,7 +70,11 @@ cmake --preset debug -DCG_LAB_DLSS_SDK=<NVIDIA/DLSS 경로>   # 주지 않으면
 ./build/release/cg_lab --model public/assets/DamagedHelmet.glb --screenshot out.png --debug 8   # 8 = 모션 벡터
 ./build/release/cg_lab --open public/scenes/<저장한장면>.json --play --screenshot out.png --screenshot-frame 120
 ./build/release/cg_lab --model public/assets/DamagedHelmet.glb --profile   # 종료할 때 구간 계측을 로그로 남긴다
+./build/release/cg_lab --headless --open tests/scenes/rigid_cpu.json --play --frames 120 --save out.json   # 창 없이 물리만
 ```
+
+강체 솔버를 바꾸면 `headless_physics` 기준 파일이 갈린다. 의도한 변화면 위 명령으로 다시 만들어
+`tests/scenes/expected/rigid_cpu_120.json` 을 갱신하고 커밋한다.
 
 기본 캡처에는 편집기 UI 가 함께 들어가고 콘솔에 시각이 찍히므로 두 실행의 PNG 는 바이트로 같지 않다. **바이트로
 견줄 때는 `--fixed-dt 0.016666 --capture present` 를 준다**(렌더 결과만, 고정 프레임 간격). 동작이 바뀌지 않아야 하는
@@ -268,7 +272,8 @@ MoltenVK(macOS)에는 mesh shader 와 광선 추적이 없어 고전 경로만 �
   등록한다. 이미지 사용은 `reads`/`writes`/`leaves` 로 선언하고 **노드 안에 `imageBarrier` 를 새로 쓰지 않는다.** 층·밉
   단위 전이만 예외이고, 그때는 `leaves` 로 남긴 상태를 알린다. 조건은 `enabled` 로 두고 노드 자체는 늘 등록한다.
 - **새 기능은 `app::Plugin`** 으로 붙이고 `Application::registerPlugins` 에 등록한다. 편집기 절은 `ui()` 에서
-  `editor.settingsSection("이름")` 으로 연다. `editor/` 는 `app::` 를 보지 않는다 — 플러그인 → 편집기 교환은 Editor 의 공개
+  `editor->settingsSection("이름")` 으로 연다. `Services` 의 gfx·editor 멤버는 포인터고 `--headless` 에서 null 이다 —
+  `build`/`update` 는 쓰기 전에 살피고, `ui` 는 편집기가 있을 때만 불린다. `editor/` 는 `app::` 를 보지 않는다 — 플러그인 → 편집기 교환은 Editor 의 공개
   상태 필드·콜백으로만.
 - **Vulkan 실패는 복구하지 않는다.** `VK_CHECK(...)`(`src/gfx/vk_check.h`) 또는 `core::fatal(...)` 로
   메시지 박스를 띄우고 종료한다.

@@ -51,6 +51,9 @@ Vulkan SDK 를 압축만 풀어 쓰는 환경을 위해 `VK_LAYER_PATH` 를 채�
 | `--model <경로>` | 시작할 때 glTF 모델을 기본 장면에 불러온다. 여러 번 줄 수 있다 |
 | `--screenshot <경로>` | 몇 프레임 뒤 화면을 PNG 로 저장하고 종료한다. 렌더 결과 검증용 |
 | `--screenshot-frame <n>` | 몇 번째 프레임을 저장할지. 기본 8. 시간축 업스케일은 뒤쪽을 봐야 한다 |
+| `--headless` | 창·Vulkan·편집기 없이 장면을 열어 물리만 돌리고 종료한다. GPU 백엔드 강체는 움직이지 않는다 |
+| `--frames <n>` | 헤드리스가 돌릴 프레임 수. 기본 120. 간격은 `--fixed-dt`, 없으면 1/60 |
+| `--save <경로>` | 헤드리스가 끝난 장면을 이 파일에 저장한다. 없으면 강체 오브젝트의 위치·회전을 표준 출력에 한 줄씩 적는다 |
 | `--debug <n>` | 디버그 뷰: 0 셰이딩, 1 meshlet, 2 노멀, 3 UV, 4 깊이, 5 LOD, 6 캐스케이드, 7 그림자, 8 모션 벡터, 9 컬 패스, 10 반사 원본, 11 반사 누적 |
 | `--lod <n>` | 고정 LOD 단계. 주지 않으면 오차 기반 자동 선정 |
 | `--lod-error <px>` | 자동 선정이 허용할 화면 공간 오차 |
@@ -829,8 +832,8 @@ DamagedHelmet 을 렌더 배율 0.5, 고정 LOD 로 그리고 4배 초표본 기
 
 기능은 `app::Plugin`(`src/app/plugin.h`) 으로 붙인다. 훅은 셋이다: `build(Services&)` 는 기동 시 한 번(자원 생성, 렌더
 패스 등록, 옵션·하드웨어 프로파일 읽기), `update(Services&, dt)` 는 프레임 앞(`scene.update` 뒤, `renderer.prepareFrame`
-앞), `ui(Services&)` 는 편집기 «렌더 설정» 창의 절이다. `Services` 는 장면·작업 큐·옵션·프로파일·gfx 객체·편집기의
-참조 묶음이라 플러그인은 그것으로만 다른 계층을 본다. `Application::registerPlugins` 의 **등록 순서가 호출 순서**다.
+앞), `ui(Services&)` 는 편집기 «렌더 설정» 창의 절이다. `Services` 는 장면·작업 큐·옵션·프로파일·설정의 참조와 gfx 객체·편집기의
+포인터 묶음이라 플러그인은 그것으로만 다른 계층을 본다. 포인터는 헤드리스에서 null 이다. `Application::registerPlugins` 의 **등록 순서가 호출 순서**다.
 
 렌더 패스는 `Renderer::addPass` 로 끼운다. 훅은 프레임마다 `recordCommands` 가 자기 노드를 다 넣은 뒤 불리고,
 `graph.addAfter(앵커, 노드)` 로 자리를 고른다. `PhysicsPlugin` 이 그 예다 — GPU 강체 솔버(`gfx::RigidBodySimulator`)를
@@ -839,8 +842,12 @@ DamagedHelmet 을 렌더 배율 0.5, 고정 LOD 로 그리고 4배 초표본 기
 지금 플러그인: 물리(CPU 스텝·GPU 솔버·«물리» 절), 유체(입자 상한·«유체» 절), 디버그 선(`--no-colliders`·«콜라이더
 표시» 절), 프로파일러(`--profile`·«프로파일러» 절·종료 시 로그). 그림자·SSAO·반사·IBL·컬링·Upscaling·Path Tracing 절은
 Renderer 필드만 만지므로 편집기(`editor.cpp`)에 그대로 있다 — 수명 주기가 없는 값 묶음을 플러그인으로 감싸면 구현
-하나짜리 인터페이스만 생긴다. 헤드리스(창·렌더러 없는 물리 전용 실행)는 아직 없다. `Services` 의 gfx 멤버를 포인터로
-바꾸는 것이 첫 단계다.
+하나짜리 인터페이스만 생긴다.
+
+헤드리스(`--headless`)는 창·Vulkan·렌더러·편집기를 만들지 않고 같은 플러그인 목록으로 `update` 만 돈다. 내장 도형과
+장면 파일의 모델은 메쉬 콜라이더용 CPU 사본만 남고 메쉬 번호는 콜라이더 표 끝에 이어서 매긴다. `ctest -R
+headless_physics` 가 `tests/scenes/rigid_cpu.json` 을 120 프레임 돌려 `tests/scenes/expected/rigid_cpu_120.json` 과
+바이트로 견준다 — 강체 솔버를 고치면 기준 파일도 같이 갱신한다.
 
 ## 하드웨어 기능 게이트
 

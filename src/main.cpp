@@ -44,6 +44,12 @@ int main(int argc, char* argv[]) {
             options.pathTracing = true;
         } else if (argument == "--play") {
             options.play = true;
+        } else if (argument == "--headless") {
+            options.headless = true;
+        } else if (argument == "--frames" && i + 1 < argc) {
+            options.frames = static_cast<uint64_t>(std::atoll(argv[++i]));
+        } else if (argument == "--save" && i + 1 < argc) {
+            options.savePath = argv[++i];
         } else if (argument == "--fixed-dt" && i + 1 < argc) {
             options.fixedDeltaSeconds = static_cast<float>(std::atof(argv[++i]));
         } else if (argument == "--capture" && i + 1 < argc) {
