@@ -21,18 +21,15 @@ inline constexpr uint32_t FLUID_MAX_COLLIDERS = 8;
 inline constexpr uint32_t FLUID_CELL_CAPACITY = 32;
 
 // 유체가 부딪히는 강체 하나. 일방향이라 입자는 밀려나지만 강체는 밀리지 않는다.
+// 지역 공간에서 판정하고(physics/collider_shapes.h) 세계 공간으로 되돌린다. 메쉬 콜라이더는 넘어오지
+// 않는다(ponytail: 입자 대 삼각형은 아직 없다).
 struct FluidCollider {
     scene::ColliderShape shape = scene::ColliderShape::SPHERE;
-    // 구.
-    glm::vec3 center{0.0F};
     float radius = 0.0F;
-    // 상자. 지역 공간에서 판정하고 세계 공간으로 되돌린다.
+    // 상자 반쪽 크기. 원기둥·캡슐은 y 가 반높이.
     glm::vec3 halfExtents{0.0F};
     glm::mat4 world{1.0F};
     glm::mat4 inverseWorld{1.0F};
-    // 평면. dot(normal, x) = offset.
-    glm::vec3 normal{0.0F, 1.0F, 0.0F};
-    float offset = 0.0F;
 };
 
 // 부품 설정과 장면에서 끌어낸 시뮬레이션 상수. CPU 솔버와 GPU 셰이더가 «같은 함수»로 만든 같은

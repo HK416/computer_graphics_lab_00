@@ -10,6 +10,7 @@
 #include <glm/gtx/quaternion.hpp>
 
 #include "core/job_system.h"
+#include "physics/collider_shapes.h"
 
 namespace physics {
 
@@ -110,27 +111,19 @@ FluidParams deriveFluidParams(const scene::Fluid& settings,
             continue;
         }
         const scene::RigidBody& body = scene.rigidBodies[static_cast<size_t>(slot)];
+        if (body.shape == scene::ColliderShape::MESH) {
+            // ponytail: 입자 대 삼각형 판정은 아직 없다. 메쉬 콜라이더는 유체가 통과한다.
+            continue;
+        }
         // 크기 규칙은 강체 솔버·콜라이더 표시와 같은 함수로 낸다.
         scene::ColliderPose pose = scene::colliderPose(body, scene.world(index));
         FluidCollider& collider = params.colliders[params.colliderCount++];
         collider.shape = body.shape;
-        switch (body.shape) {
-        case scene::ColliderShape::SPHERE:
-            collider.center = pose.position;
-            collider.radius = pose.radius;
-            break;
-        case scene::ColliderShape::BOX: {
-            glm::mat4 rigid = glm::translate(glm::mat4{1.0F}, pose.position) * glm::mat4_cast(pose.rotation);
-            collider.halfExtents = pose.halfExtents;
-            collider.world = rigid;
-            collider.inverseWorld = glm::inverse(rigid);
-            break;
-        }
-        case scene::ColliderShape::PLANE:
-            collider.normal = pose.rotation * glm::vec3{0.0F, 1.0F, 0.0F};
-            collider.offset = glm::dot(collider.normal, pose.position);
-            break;
-        }
+        collider.radius = pose.radius;
+        collider.halfExtents = pose.halfExtents;
+        glm::mat4 rigid = glm::translate(glm::mat4{1.0F}, pose.position) * glm::mat4_cast(pose.rotation);
+        collider.world = rigid;
+        collider.inverseWorld = glm::inverse(rigid);
     }
     return params;
 }
@@ -293,36 +286,18 @@ void FluidSolver::substep(const FluidParams& params, float dt, core::JobSystem* 
                 }
             }
 
+            // 강체 콜라이더. 일방향이라 입자는 밀려나지만 강체는 밀리지 않는다. 모양별 기하는 강체
+            // 솔버와 같은 collider_shapes.h 다.
             for (uint32_t c = 0; c < params.colliderCount; ++c) {
                 const FluidCollider& collider = params.colliders[c];
-                if (collider.shape == scene::ColliderShape::SPHERE) {
-                    glm::vec3 delta = position - collider.center;
-                    float distance = glm::length(delta);
-                    float reach = collider.radius + params.particleRadius;
-                    if (distance < reach) {
-                        glm::vec3 normal = distance > 1e-6F ? delta / distance : glm::vec3{0.0F, 1.0F, 0.0F};
-                        position = collider.center + normal * reach;
-                        bounce(velocity, normal, params.wallRestitution);
-                    }
-                } else if (collider.shape == scene::ColliderShape::BOX) {
-                    glm::vec3 local = glm::vec3{collider.inverseWorld * glm::vec4{position, 1.0F}};
-                    glm::vec3 halfSize = collider.halfExtents + params.particleRadius;
-                    if (glm::all(glm::lessThan(glm::abs(local), halfSize))) {
-                        glm::vec3 gap = halfSize - glm::abs(local);
-                        int axis = gap.x < gap.y ? (gap.x < gap.z ? 0 : 2) : (gap.y < gap.z ? 1 : 2);
-                        glm::vec3 localNormal{0.0F};
-                        localNormal[axis] = local[axis] >= 0.0F ? 1.0F : -1.0F;
-                        local[axis] = localNormal[axis] * halfSize[axis];
-                        position = glm::vec3{collider.world * glm::vec4{local, 1.0F}};
-                        bounce(
-                            velocity, glm::normalize(glm::mat3{collider.world} * localNormal), params.wallRestitution);
-                    }
-                } else {
-                    float distance = glm::dot(collider.normal, position) - collider.offset;
-                    if (distance < params.particleRadius) {
-                        position += collider.normal * (params.particleRadius - distance);
-                        bounce(velocity, collider.normal, params.wallRestitution);
-                    }
+                glm::vec3 local = glm::vec3{collider.inverseWorld * glm::vec4{position, 1.0F}};
+                SurfacePoint surface =
+                    closestOnColliderLocal(ColliderLocal{collider.shape, collider.radius, collider.halfExtents}, local);
+                if (surface.distance < params.particleRadius) {
+                    glm::vec3 normal = glm::normalize(glm::mat3{collider.world} * surface.normal);
+                    position =
+                        glm::vec3{collider.world * glm::vec4{surface.point, 1.0F}} + normal * params.particleRadius;
+                    bounce(velocity, normal, params.wallRestitution);
                 }
             }
 

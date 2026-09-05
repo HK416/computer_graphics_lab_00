@@ -194,6 +194,8 @@ private:
     std::filesystem::path assetRoot;
     std::filesystem::path sceneRoot;
     std::vector<LoadedModel> loadedModels;
+    // 전역 메쉬 번호마다의 메쉬 콜라이더 삼각형. 모든 장면이 이것을 가리킨다(Scene::colliderMeshes).
+    std::vector<scene::ColliderMesh> colliderMeshes;
     // 기본 도형마다의 전역 메쉬 번호. asset::Primitive 순서와 같다.
     std::vector<uint32_t> primitiveMeshes;
     // 기동 시 고른 하드웨어 프로파일. 편집기가 판정 근거를 보여 준다.

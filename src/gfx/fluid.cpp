@@ -493,19 +493,9 @@ void FluidSimulator::fillParams(GpuFluidParams& params, const State& state, cons
         const physics::FluidCollider& source = shared.colliders[i];
         GpuFluidCollider& collider = params.colliders[i];
         collider.type = static_cast<uint32_t>(source.shape);
-        switch (source.shape) {
-        case scene::ColliderShape::SPHERE:
-            collider.data0 = glm::vec4{source.center, source.radius};
-            break;
-        case scene::ColliderShape::BOX:
-            collider.data0 = glm::vec4{source.halfExtents, 0.0F};
-            collider.world = source.world;
-            collider.inverseWorld = source.inverseWorld;
-            break;
-        case scene::ColliderShape::PLANE:
-            collider.data0 = glm::vec4{source.normal, source.offset};
-            break;
-        }
+        collider.data0 = glm::vec4{source.halfExtents, source.radius};
+        collider.world = source.world;
+        collider.inverseWorld = source.inverseWorld;
     }
 }
 

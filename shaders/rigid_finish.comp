@@ -30,13 +30,7 @@ void main() {
                 continue;
             }
         }
-        RigidManifold manifold;
-        if (self.shape == RIGID_SHAPE_SPHERE || other.shape != RIGID_SHAPE_SPHERE) {
-            manifold = rigidCollide(self, other);
-        } else {
-            manifold = rigidCollide(other, self);
-            manifold.normal = -manifold.normal;
-        }
+        RigidManifold manifold = rigidCollide(self, other);
         float totalInverseMass = self.position.w + other.position.w;
         if (manifold.count == 0 || totalInverseMass <= 0.0) {
             continue;
@@ -45,18 +39,21 @@ void main() {
         // 번호를 보고 갈라 준다.
         vec3 between = other.position.xyz - self.position.xyz;
         if (dot(between, between) < 1.0e-12) {
-            manifold.normal = i < j ? vec3(0.0, 1.0, 0.0) : vec3(0.0, -1.0, 0.0);
+            manifold = overrideNormal(manifold, i < j ? vec3(0.0, 1.0, 0.0) : vec3(0.0, -1.0, 0.0));
         }
         // 같은 짝의 여러 점은 가장 깊은 것 하나로 민다. 네 점을 다 밀면 네 배로 튀어 오른다.
-        float deepest = 0.0;
-        for (int c = 0; c < manifold.count; ++c) {
-            deepest = max(deepest, manifold.depths[c]);
+        int deepest = 0;
+        for (int c = 1; c < manifold.count; ++c) {
+            if (manifold.depths[c] > manifold.depths[deepest]) {
+                deepest = c;
+            }
         }
-        float depth = deepest - push.penetrationSlop;
+        float depth = manifold.depths[deepest] - push.penetrationSlop;
         if (depth <= 0.0) {
             continue;
         }
-        correction -= manifold.normal * (push.positionCorrection * depth / totalInverseMass) * self.position.w;
+        correction -=
+            manifold.normals[deepest] * (push.positionCorrection * depth / totalInverseMass) * self.position.w;
     }
 
     self.position.xyz += correction;

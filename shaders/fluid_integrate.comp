@@ -88,39 +88,16 @@ void main() {
         }
     }
 
-    // 강체 콜라이더. 일방향이라 입자는 밀려나지만 강체는 밀리지 않는다.
+    // 강체 콜라이더. 일방향이라 입자는 밀려나지만 강체는 밀리지 않는다. 모양별 기하는
+    // collider_shapes.glsl 이 강체 솔버와 함께 쓴다.
     for (uint c = 0u; c < params.colliderCount; ++c) {
         FluidCollider collider = params.colliders[c];
-        if (collider.type == FLUID_COLLIDER_SPHERE) {
-            vec3 delta = position - collider.data0.xyz;
-            float distance = length(delta);
-            float reach = collider.data0.w + radius;
-            if (distance < reach) {
-                vec3 normal = distance > 1e-6 ? delta / distance : vec3(0.0, 1.0, 0.0);
-                position = collider.data0.xyz + normal * reach;
-                bounce(velocity, normal, restitution);
-            }
-        } else if (collider.type == FLUID_COLLIDER_BOX) {
-            vec3 local = (collider.inverseWorld * vec4(position, 1.0)).xyz;
-            // half 는 GLSL 예약어라 이름을 달리 둔다.
-            vec3 halfSize = collider.data0.xyz + radius;
-            if (all(lessThan(abs(local), halfSize))) {
-                // 가장 얕은 면으로 밀어낸다.
-                vec3 gap = halfSize - abs(local);
-                int axis = gap.x < gap.y ? (gap.x < gap.z ? 0 : 2) : (gap.y < gap.z ? 1 : 2);
-                vec3 localNormal = vec3(0.0);
-                localNormal[axis] = local[axis] >= 0.0 ? 1.0 : -1.0;
-                local[axis] = localNormal[axis] * halfSize[axis];
-                position = (collider.world * vec4(local, 1.0)).xyz;
-                bounce(velocity, normalize(mat3(collider.world) * localNormal), restitution);
-            }
-        } else {
-            vec3 normal = collider.data0.xyz;
-            float distance = dot(normal, position) - collider.data0.w;
-            if (distance < radius) {
-                position += normal * (radius - distance);
-                bounce(velocity, normal, restitution);
-            }
+        vec3 local = (collider.inverseWorld * vec4(position, 1.0)).xyz;
+        SurfacePoint surface = closestOnColliderLocal(collider.type, collider.data0.w, collider.data0.xyz, local);
+        if (surface.distance < radius) {
+            vec3 normal = normalize(mat3(collider.world) * surface.normal);
+            position = (collider.world * vec4(surface.point, 1.0)).xyz + normal * radius;
+            bounce(velocity, normal, restitution);
         }
     }
 

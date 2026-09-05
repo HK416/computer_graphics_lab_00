@@ -3,6 +3,10 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <vector>
+
+#include <glm/gtc/constants.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include "core/job_system.h"
 #include "physics/rigid_body.h"
@@ -33,6 +37,28 @@ uint32_t addSphere(scene::Scene& scene, glm::vec3 position, float radius, float 
     scene::RigidBody body;
     body.radius = radius;
     body.restitution = restitution;
+    scene.attachRigidBody(index, body);
+    return index;
+}
+
+// 임의 모양의 동적 강체. 원기둥·캡슐은 radius 와 halfExtents.y(반높이)를 쓴다.
+uint32_t addBody(scene::Scene& scene,
+                 scene::ColliderShape shape,
+                 glm::vec3 position,
+                 glm::quat rotation,
+                 float radius,
+                 glm::vec3 halfExtents) {
+    scene::Object object;
+    object.name = "강체";
+    object.transform.position = position;
+    object.transform.rotation = rotation;
+    scene.objects.push_back(std::move(object));
+    auto index = static_cast<uint32_t>(scene.objects.size() - 1);
+    scene::RigidBody body;
+    body.shape = shape;
+    body.radius = radius;
+    body.halfExtents = halfExtents;
+    body.restitution = 0.0F;
     scene.attachRigidBody(index, body);
     return index;
 }
@@ -158,6 +184,129 @@ int main() {
                              scene.rigidBodies[scene.objects[right].rigidBody].velocity;
         assert(std::abs(momentum.x - 4.0F) < 0.05F && "운동량 합이 그대로여야 한다");
         assert(scene.rigidBodies[scene.objects[right].rigidBody].velocity.x > 3.0F && "오른쪽 구가 밀려 나가야 한다");
+    }
+
+    // 서 있는 원기둥은 뚜껑 전체로 바닥에 닿아 넘어지지 않고 반높이에서 쉰다.
+    {
+        scene::Scene scene;
+        addFloor(scene);
+        uint32_t cylinder = addBody(scene,
+                                    scene::ColliderShape::CYLINDER,
+                                    glm::vec3{0.0F, 1.5F, 0.0F},
+                                    glm::quat{1.0F, 0.0F, 0.0F, 0.0F},
+                                    0.3F,
+                                    glm::vec3{0.3F, 0.5F, 0.3F});
+        simulate(scene, 3.0F, &jobs);
+        const scene::Transform& transform = scene.objects[cylinder].transform;
+        std::printf("  서 있는 원기둥 y=%.3f\n", static_cast<double>(transform.position.y));
+        assert(std::abs(transform.position.y - 0.5F) < 0.03F && "원기둥은 반높이에서 멈춘다");
+        glm::vec3 axis = transform.rotation * glm::vec3{0.0F, 1.0F, 0.0F};
+        assert(axis.y > 0.99F && "서 있는 원기둥은 넘어지지 않는다");
+    }
+
+    // 누운 원기둥은 옆면(반지름)에서 쉰다. 상자 위에 놓아 원기둥 대 상자도 함께 본다.
+    {
+        scene::Scene scene;
+        scene::Object platform;
+        scene.objects.push_back(std::move(platform));
+        scene::RigidBody box;
+        box.shape = scene::ColliderShape::BOX;
+        box.kinematic = true;
+        box.halfExtents = glm::vec3{2.0F, 0.5F, 2.0F};
+        scene.attachRigidBody(0, box);
+        glm::quat onSide = glm::angleAxis(glm::half_pi<float>(), glm::vec3{0.0F, 0.0F, 1.0F});
+        uint32_t cylinder = addBody(scene,
+                                    scene::ColliderShape::CYLINDER,
+                                    glm::vec3{0.0F, 1.5F, 0.0F},
+                                    onSide,
+                                    0.25F,
+                                    glm::vec3{0.25F, 0.6F, 0.25F});
+        simulate(scene, 3.0F, &jobs);
+        float y = scene.objects[cylinder].transform.position.y;
+        std::printf("  누운 원기둥 y=%.3f\n", static_cast<double>(y));
+        assert(std::abs(y - 0.75F) < 0.03F && "누운 원기둥은 상자 윗면 위 반지름 높이에서 멈춘다");
+    }
+
+    // 캡슐은 서면 반높이 + 반지름, 누우면 반지름에서 쉰다.
+    {
+        scene::Scene scene;
+        addFloor(scene);
+        uint32_t standing = addBody(scene,
+                                    scene::ColliderShape::CAPSULE,
+                                    glm::vec3{-2.0F, 2.0F, 0.0F},
+                                    glm::quat{1.0F, 0.0F, 0.0F, 0.0F},
+                                    0.25F,
+                                    glm::vec3{0.25F, 0.5F, 0.25F});
+        glm::quat onSide = glm::angleAxis(glm::half_pi<float>(), glm::vec3{1.0F, 0.0F, 0.0F});
+        uint32_t lying = addBody(scene,
+                                 scene::ColliderShape::CAPSULE,
+                                 glm::vec3{2.0F, 2.0F, 0.0F},
+                                 onSide,
+                                 0.25F,
+                                 glm::vec3{0.25F, 0.5F, 0.25F});
+        simulate(scene, 3.0F, &jobs);
+        float standingY = scene.objects[standing].transform.position.y;
+        float lyingY = scene.objects[lying].transform.position.y;
+        std::printf("  캡슐 서서 y=%.3f, 누워서 y=%.3f\n", static_cast<double>(standingY), static_cast<double>(lyingY));
+        assert(std::abs(standingY - 0.75F) < 0.03F && "선 캡슐은 반높이 + 반지름에서 멈춘다");
+        assert(std::abs(lyingY - 0.25F) < 0.03F && "누운 캡슐은 반지름에서 멈춘다");
+    }
+
+    // 구가 캡슐 위에 얹히면 두 반지름 합만큼 떨어져 멈춘다(구 대 캡슐은 표본 기반 접촉이다).
+    {
+        scene::Scene scene;
+        scene::Object post;
+        scene.objects.push_back(std::move(post));
+        scene::RigidBody capsule;
+        capsule.shape = scene::ColliderShape::CAPSULE;
+        capsule.kinematic = true;
+        capsule.radius = 0.5F;
+        capsule.halfExtents = glm::vec3{0.5F, 0.5F, 0.5F};
+        scene.attachRigidBody(0, capsule);
+        uint32_t ball = addSphere(scene, glm::vec3{0.0F, 3.0F, 0.0F}, 0.25F, 0.0F);
+        simulate(scene, 3.0F, &jobs);
+        float y = scene.objects[ball].transform.position.y;
+        std::printf("  캡슐 위의 구 y=%.3f\n", static_cast<double>(y));
+        assert(std::abs(y - 1.25F) < 0.03F && "구는 캡슐 꼭대기에서 멈춘다");
+    }
+
+    // 메쉬 콜라이더. 두 삼각형으로 만든 정사각형 위에 구와 상자가 앉는다. 메쉬는 늘 운동학이다.
+    {
+        std::vector<scene::ColliderMesh> meshes(1);
+        scene::ColliderMesh& quad = meshes[0];
+        quad.positions = {glm::vec3{-2.0F, 0.0F, -2.0F},
+                          glm::vec3{2.0F, 0.0F, -2.0F},
+                          glm::vec3{2.0F, 0.0F, 2.0F},
+                          glm::vec3{-2.0F, 0.0F, 2.0F}};
+        // 위(+Y)에서 보아 반시계가 앞면이다.
+        quad.indices = {0, 3, 2, 0, 2, 1};
+        quad.boundsRadius = 3.0F;
+
+        scene::Scene scene;
+        scene.colliderMeshes = &meshes;
+        scene::Object ground;
+        ground.transform.position = glm::vec3{0.0F, 1.0F, 0.0F};
+        scene.objects.push_back(std::move(ground));
+        scene.attachMeshRenderer(0, 0);
+        scene::RigidBody meshBody;
+        meshBody.shape = scene::ColliderShape::MESH;
+        meshBody.mass = 5.0F;
+        scene.attachRigidBody(0, meshBody);
+
+        uint32_t ball = addSphere(scene, glm::vec3{0.5F, 3.0F, 0.5F}, 0.25F, 0.0F);
+        uint32_t box = addBody(scene,
+                               scene::ColliderShape::BOX,
+                               glm::vec3{-0.8F, 3.0F, 0.0F},
+                               glm::quat{1.0F, 0.0F, 0.0F, 0.0F},
+                               0.5F,
+                               glm::vec3{0.25F});
+        simulate(scene, 3.0F, &jobs);
+        float ballY = scene.objects[ball].transform.position.y;
+        float boxY = scene.objects[box].transform.position.y;
+        std::printf("  메쉬 위의 구 y=%.3f, 상자 y=%.3f\n", static_cast<double>(ballY), static_cast<double>(boxY));
+        assert(std::abs(scene.objects[0].transform.position.y - 1.0F) < 1e-6F && "메쉬 콜라이더는 밀리지 않는다");
+        assert(std::abs(ballY - 1.25F) < 0.03F && "구는 메쉬 위 반지름 높이에서 멈춘다");
+        assert(std::abs(boxY - 1.25F) < 0.03F && "상자는 메쉬 위 반쪽 크기 높이에서 멈춘다");
     }
 
     std::printf("강체 물리 자체 점검 통과\n");

@@ -11,6 +11,7 @@
 #include <glm/gtx/norm.hpp>
 
 #include "core/job_system.h"
+#include "physics/collider_shapes.h"
 #include "scene/scene.h"
 
 namespace physics {
@@ -284,16 +285,126 @@ void collideBoxBox(const Body& a, const Body& b, uint32_t ia, uint32_t ib, std::
     out.push_back(contact);
 }
 
-void collide(const std::vector<Body>& bodies, uint32_t ia, uint32_t ib, std::vector<Contact>& out) {
+ColliderLocal asCollider(const Body& body) {
+    return ColliderLocal{body.shape, body.radius, body.halfExtents};
+}
+
+// 상대 표면에서 자기 중심에 가장 가까운 점을 자기 지역 공간으로. probePointLocal 의 힌트다.
+glm::vec3 probeHint(const Body& self, const Body& other) {
+    SurfacePoint near = closestOnCollider(asCollider(other), other.position, other.rotation, self.position);
+    return glm::conjugate(self.rotation) * (near.point - self.position);
+}
+
+// 원기둥·캡슐이 낀 짝. a 의 표본점을 b 표면에, b 의 표본점을 a 표면에 찔러 깊이가 양수인 것을 접촉으로
+// 낸다. GLSL 의 rigidCollideGeneric 과 같은 규칙이다.
+//
+// ponytail: 볼록 형상 일반 해법(GJK/EPA)이 아니라 표본 기반이다. 표본 사이(원기둥 테두리 22.5도)로
+// 파고드는 얇은 모서리는 놓칠 수 있다.
+void collideGeneric(const Body& a, const Body& b, uint32_t ia, uint32_t ib, std::vector<Contact>& out) {
+    size_t begin = out.size();
+    ColliderLocal colliderA = asCollider(a);
+    ColliderLocal colliderB = asCollider(b);
+    glm::vec3 hintA = probeHint(a, b);
+    for (int i = 0, n = probeCount(a.shape); i < n; ++i) {
+        float radius = 0.0F;
+        glm::vec3 local = probePointLocal(colliderA, hintA, i, radius);
+        glm::vec3 world = a.position + a.rotation * local;
+        SurfacePoint surface = closestOnCollider(colliderB, b.position, b.rotation, world);
+        float depth = radius - surface.distance;
+        if (depth <= 0.0F) {
+            continue;
+        }
+        Contact contact;
+        contact.a = ia;
+        contact.b = ib;
+        // b 의 바깥 법선은 b 에서 a 를 향하므로 뒤집는다.
+        contact.normal = -surface.normal;
+        contact.point = surface.point;
+        contact.penetration = depth;
+        addManifoldPoint(out, begin, contact);
+    }
+    glm::vec3 hintB = probeHint(b, a);
+    for (int i = 0, n = probeCount(b.shape); i < n; ++i) {
+        float radius = 0.0F;
+        glm::vec3 local = probePointLocal(colliderB, hintB, i, radius);
+        glm::vec3 world = b.position + b.rotation * local;
+        SurfacePoint surface = closestOnCollider(colliderA, a.position, a.rotation, world);
+        float depth = radius - surface.distance;
+        if (depth <= 0.0F) {
+            continue;
+        }
+        Contact contact;
+        contact.a = ia;
+        contact.b = ib;
+        contact.normal = surface.normal;
+        contact.point = surface.point;
+        contact.penetration = depth;
+        addManifoldPoint(out, begin, contact);
+    }
+}
+
+// a 의 표본점을 메쉬 b 의 삼각형마다 본다. 메쉬는 운동학이라 찌르지 않는다. 힌트는 세계 아래쪽이라
+// 지형 위에 놓인 원기둥이 아래 테두리를 표본으로 고른다.
+//
+// ponytail: 삼각형을 전부 훑는다. ColliderMesh::MAX_TRIANGLES 가 상한이라 감당하지만 BVH 가 있으면
+// 0단계 LOD 를 쓸 수 있다.
+void collideMesh(const Body& a,
+                 const Body& mesh,
+                 uint32_t ia,
+                 uint32_t ib,
+                 const std::vector<Triangle>& triangles,
+                 std::vector<Contact>& out) {
+    size_t begin = out.size();
+    ColliderLocal colliderA = asCollider(a);
+    glm::vec3 hint = glm::conjugate(a.rotation) * glm::vec3{0.0F, -a.boundingRadius, 0.0F};
+    // 뒷면으로 이만큼까지 들어간 점은 앞면으로 밀어 올린다. 물체 크기에 비례해야 큰 상자의 꼭짓점이
+    // 한 스텝에 깊이 들어와도 놓치지 않는다.
+    float thickness = 0.5F * a.boundingRadius;
+    for (int i = 0, n = probeCount(a.shape); i < n; ++i) {
+        float radius = 0.0F;
+        glm::vec3 local = probePointLocal(colliderA, hint, i, radius);
+        glm::vec3 world = a.position + a.rotation * local;
+        for (uint32_t t = 0; t < mesh.triangleCount; ++t) {
+            const Triangle& triangle = triangles[mesh.triangleOffset + t];
+            SurfacePoint surface;
+            if (!closestOnTriangleSurface(triangle.a, triangle.b, triangle.c, world, radius, thickness, surface)) {
+                continue;
+            }
+            Contact contact;
+            contact.a = ia;
+            contact.b = ib;
+            contact.normal = -surface.normal;
+            contact.point = surface.point;
+            contact.penetration = radius - surface.distance;
+            addManifoldPoint(out, begin, contact);
+        }
+    }
+}
+
+void collide(const std::vector<Body>& bodies,
+             uint32_t ia,
+             uint32_t ib,
+             const std::vector<Triangle>& triangles,
+             std::vector<Contact>& out) {
     using scene::ColliderShape;
     const Body& a = bodies[ia];
     const Body& b = bodies[ib];
-    // 평면끼리는 만나지 않는다. 짝은 항상 (구/상자, 무엇이든) 순서로 맞춘다.
-    if (a.shape == ColliderShape::PLANE) {
-        if (b.shape == ColliderShape::PLANE) {
+    auto isStatic = [](ColliderShape shape) { return shape == ColliderShape::PLANE || shape == ColliderShape::MESH; };
+    // 평면·메쉬끼리는 만나지 않는다. 짝은 항상 (움직이는 모양, 무엇이든) 순서로 맞춘다.
+    if (isStatic(a.shape)) {
+        if (isStatic(b.shape)) {
             return;
         }
-        collide(bodies, ib, ia, out);
+        collide(bodies, ib, ia, triangles, out);
+        return;
+    }
+    if (b.shape == ColliderShape::MESH) {
+        collideMesh(a, b, ia, ib, triangles, out);
+        return;
+    }
+    if (a.shape == ColliderShape::CYLINDER || a.shape == ColliderShape::CAPSULE || b.shape == ColliderShape::CYLINDER ||
+        b.shape == ColliderShape::CAPSULE) {
+        collideGeneric(a, b, ia, ib, out);
         return;
     }
     if (a.shape == ColliderShape::SPHERE) {
@@ -306,6 +417,8 @@ void collide(const std::vector<Body>& bodies, uint32_t ia, uint32_t ib, std::vec
             break;
         case ColliderShape::PLANE:
             collideSpherePlane(a, b, ia, ib, out);
+            break;
+        default:
             break;
         }
         return;
@@ -320,6 +433,8 @@ void collide(const std::vector<Body>& bodies, uint32_t ia, uint32_t ib, std::vec
         break;
     case ColliderShape::PLANE:
         collideBoxPlane(a, b, ia, ib, out);
+        break;
+    default:
         break;
     }
 }
@@ -427,8 +542,12 @@ void solveContacts(std::vector<Body>& bodies, std::vector<Contact>& contacts) {
 
 } // namespace
 
-void collectRigidBodies(const scene::Scene& scene, scene::SimulationBackend backend, std::vector<RigidBodyState>& out) {
+void collectRigidBodies(const scene::Scene& scene,
+                        scene::SimulationBackend backend,
+                        std::vector<RigidBodyState>& out,
+                        std::vector<Triangle>& triangles) {
     out.clear();
+    triangles.clear();
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
         int32_t slot = scene.objects[index].rigidBody;
         if (slot < 0 || static_cast<size_t>(slot) >= scene.rigidBodies.size()) {
@@ -460,22 +579,69 @@ void collectRigidBodies(const scene::Scene& scene, scene::SimulationBackend back
         body.useGravity = component.useGravity;
         body.radius = pose.radius;
         body.halfExtents = pose.halfExtents;
-        bool fixed = component.kinematic || component.shape == scene::ColliderShape::PLANE || component.mass <= 0.0F;
+        bool fixed = component.kinematic || component.shape == scene::ColliderShape::PLANE ||
+                     component.shape == scene::ColliderShape::MESH || component.mass <= 0.0F;
         body.inverseMass = fixed ? 0.0F : 1.0F / component.mass;
         if (!fixed) {
-            if (component.shape == scene::ColliderShape::SPHERE) {
-                float inertia = 0.4F * component.mass * body.radius * body.radius;
-                body.inverseInertia = glm::vec3{1.0F / inertia};
-            } else {
-                glm::vec3 size = body.halfExtents * 2.0F;
-                glm::vec3 inertia{component.mass / 12.0F * (size.y * size.y + size.z * size.z),
-                                  component.mass / 12.0F * (size.x * size.x + size.z * size.z),
-                                  component.mass / 12.0F * (size.x * size.x + size.y * size.y)};
+            float mass = component.mass;
+            float r2 = body.radius * body.radius;
+            switch (component.shape) {
+            case scene::ColliderShape::SPHERE:
+                body.inverseInertia = glm::vec3{1.0F / (0.4F * mass * r2)};
+                break;
+            case scene::ColliderShape::CYLINDER:
+            case scene::ColliderShape::CAPSULE: {
+                // 캡슐은 반구까지 포함한 높이의 원기둥으로 어림한다.
+                float height = 2.0F * body.halfExtents.y +
+                               (component.shape == scene::ColliderShape::CAPSULE ? 2.0F * body.radius : 0.0F);
+                float side = mass / 12.0F * (3.0F * r2 + height * height);
+                glm::vec3 inertia{side, 0.5F * mass * r2, side};
                 body.inverseInertia = 1.0F / glm::max(inertia, glm::vec3{1.0e-6F});
+                break;
+            }
+            default: {
+                glm::vec3 size = body.halfExtents * 2.0F;
+                glm::vec3 inertia{mass / 12.0F * (size.y * size.y + size.z * size.z),
+                                  mass / 12.0F * (size.x * size.x + size.z * size.z),
+                                  mass / 12.0F * (size.x * size.x + size.y * size.y)};
+                body.inverseInertia = 1.0F / glm::max(inertia, glm::vec3{1.0e-6F});
+                break;
+            }
             }
         }
-        body.boundingRadius =
-            component.shape == scene::ColliderShape::SPHERE ? body.radius : glm::length(body.halfExtents);
+        switch (component.shape) {
+        case scene::ColliderShape::SPHERE:
+            body.boundingRadius = body.radius;
+            break;
+        case scene::ColliderShape::CYLINDER:
+            body.boundingRadius = std::sqrt(body.radius * body.radius + body.halfExtents.y * body.halfExtents.y);
+            break;
+        case scene::ColliderShape::CAPSULE:
+            body.boundingRadius = body.radius + body.halfExtents.y;
+            break;
+        case scene::ColliderShape::MESH: {
+            // 삼각형을 세계 공간으로 옮겨 이어 붙인다. 경계 구 중심이 원점에서 벗어나 있을 수 있어 그
+            // 거리까지 더한 보수적 반지름이다.
+            const scene::ColliderMesh* mesh = scene.colliderMesh(index);
+            body.triangleOffset = static_cast<uint32_t>(triangles.size());
+            if (mesh != nullptr) {
+                auto toWorld = [&](uint32_t vertex) {
+                    return glm::vec3{worldMatrix * glm::vec4{mesh->positions[vertex], 1.0F}};
+                };
+                for (size_t t = 0; t + 2 < mesh->indices.size(); t += 3) {
+                    triangles.push_back(Triangle{
+                        toWorld(mesh->indices[t]), toWorld(mesh->indices[t + 1]), toWorld(mesh->indices[t + 2])});
+                }
+                float maxScale = std::max({pose.scale.x, pose.scale.y, pose.scale.z});
+                body.boundingRadius = (glm::length(mesh->boundsCenter) + mesh->boundsRadius) * maxScale;
+            }
+            body.triangleCount = static_cast<uint32_t>(triangles.size()) - body.triangleOffset;
+            break;
+        }
+        default:
+            body.boundingRadius = glm::length(body.halfExtents);
+            break;
+        }
         out.push_back(body);
     }
 }
@@ -526,7 +692,8 @@ void stepRigidBodies(scene::Scene& scene, float dt, core::JobSystem* jobs) {
     }
     // 1) 부품이 붙은 오브젝트를 모아 세계 공간 상태로 편다. GPU 백엔드는 여기서 빠진다.
     std::vector<Body> bodies;
-    collectRigidBodies(scene, scene::SimulationBackend::CPU, bodies);
+    std::vector<Triangle> triangles;
+    collectRigidBodies(scene, scene::SimulationBackend::CPU, bodies, triangles);
     if (bodies.empty()) {
         return;
     }
@@ -567,7 +734,7 @@ void stepRigidBodies(scene::Scene& scene, float dt, core::JobSystem* jobs) {
     // 4) 협역: 짝마다 접촉을 만든다. 짝 수가 적어 직렬이다.
     std::vector<Contact> contacts;
     for (const auto& [i, j] : pairs) {
-        collide(bodies, i, j, contacts);
+        collide(bodies, i, j, triangles, contacts);
     }
 
     // 5) 순차 임펄스로 속도를 고친다.

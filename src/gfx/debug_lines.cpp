@@ -63,6 +63,50 @@ void box(std::vector<DebugLineVertex>& out,
     }
 }
 
+// 원기둥: 두 뚜껑의 원과 네 세로선.
+void cylinder(std::vector<DebugLineVertex>& out,
+              glm::vec3 center,
+              const glm::quat& rotation,
+              float radius,
+              float halfHeight,
+              uint32_t color) {
+    glm::vec3 up = rotation * glm::vec3{0.0F, 1.0F, 0.0F};
+    glm::vec3 right = rotation * glm::vec3{1.0F, 0.0F, 0.0F};
+    glm::vec3 forward = rotation * glm::vec3{0.0F, 0.0F, 1.0F};
+    glm::vec3 top = center + up * halfHeight;
+    glm::vec3 bottom = center - up * halfHeight;
+    circle(out, top, right, forward, radius, color);
+    circle(out, bottom, right, forward, radius, color);
+    for (const glm::vec3& side : {right, -right, forward, -forward}) {
+        line(out, top + side * radius, bottom + side * radius, color);
+    }
+}
+
+// 캡슐: 원기둥에 두 반구(두 평면의 반원씩)를 씌운다.
+void capsule(std::vector<DebugLineVertex>& out,
+             glm::vec3 center,
+             const glm::quat& rotation,
+             float radius,
+             float halfHeight,
+             uint32_t color) {
+    cylinder(out, center, rotation, radius, halfHeight, color);
+    glm::vec3 up = rotation * glm::vec3{0.0F, 1.0F, 0.0F};
+    glm::vec3 right = rotation * glm::vec3{1.0F, 0.0F, 0.0F};
+    glm::vec3 forward = rotation * glm::vec3{0.0F, 0.0F, 1.0F};
+    for (float side : {1.0F, -1.0F}) {
+        glm::vec3 cap = center + up * (side * halfHeight);
+        for (const glm::vec3& axis : {right, forward}) {
+            glm::vec3 previous = cap + axis * radius;
+            for (uint32_t segment = 1; segment <= CIRCLE_SEGMENTS / 2; ++segment) {
+                float angle = PI * static_cast<float>(segment) / static_cast<float>(CIRCLE_SEGMENTS / 2);
+                glm::vec3 point = cap + (axis * std::cos(angle) + up * (side * std::sin(angle))) * radius;
+                line(out, previous, point, color);
+                previous = point;
+            }
+        }
+    }
+}
+
 // 축 정렬 상자. 유체의 용기가 이 꼴이다.
 void axisAlignedBox(std::vector<DebugLineVertex>& out, glm::vec3 minimum, glm::vec3 maximum, uint32_t color) {
     box(out, (minimum + maximum) * 0.5F, glm::quat{1.0F, 0.0F, 0.0F, 0.0F}, (maximum - minimum) * 0.5F, color);
@@ -93,6 +137,28 @@ void buildDebugLines(const scene::Scene& scene, const DebugLineOptions& options,
             case scene::ColliderShape::BOX:
                 box(out, pose.position, pose.rotation, pose.halfExtents, color);
                 break;
+            case scene::ColliderShape::CYLINDER:
+                cylinder(out, pose.position, pose.rotation, pose.radius, pose.halfExtents.y, color);
+                break;
+            case scene::ColliderShape::CAPSULE:
+                capsule(out, pose.position, pose.rotation, pose.radius, pose.halfExtents.y, color);
+                break;
+            case scene::ColliderShape::MESH: {
+                // 콜라이더가 실제로 보는 삼각형(굵은 LOD)을 그린다. 메쉬가 없으면 표시할 것이 없다.
+                const scene::ColliderMesh* mesh = scene.colliderMesh(index);
+                if (mesh == nullptr) {
+                    break;
+                }
+                for (size_t t = 0; t + 2 < mesh->indices.size(); t += 3) {
+                    glm::vec3 a{world * glm::vec4{mesh->positions[mesh->indices[t]], 1.0F}};
+                    glm::vec3 b{world * glm::vec4{mesh->positions[mesh->indices[t + 1]], 1.0F}};
+                    glm::vec3 c{world * glm::vec4{mesh->positions[mesh->indices[t + 2]], 1.0F}};
+                    line(out, a, b, color);
+                    line(out, b, c, color);
+                    line(out, c, a, color);
+                }
+                break;
+            }
             case scene::ColliderShape::PLANE: {
                 // 무한 평면이라 오브젝트의 +Y 를 법선으로 하는 격자 한 장으로 대신한다.
                 glm::vec3 right = pose.rotation * glm::vec3{1.0F, 0.0F, 0.0F};

@@ -42,8 +42,12 @@ struct RigidBodyState {
     float inverseMass = 0.0F;
     // 지역 축의 관성 역수. 세계 공간에서는 회전으로 감싼다.
     glm::vec3 inverseInertia{0.0F};
+    // 구·원기둥·캡슐 반지름. 원기둥·캡슐은 halfExtents.y 가 반높이다.
     float radius = 0.5F;
     glm::vec3 halfExtents{0.5F};
+    // 메쉬 콜라이더의 세계 공간 삼각형 구간(collectRigidBodies 의 triangles 기준).
+    uint32_t triangleOffset = 0;
+    uint32_t triangleCount = 0;
     float restitution = 0.3F;
     float friction = 0.5F;
     // 광역 검사용 경계 반지름. 평면은 무한이라 따로 다룬다.
@@ -51,14 +55,25 @@ struct RigidBodyState {
     bool useGravity = true;
 };
 
-// 힘을 받는 물체인지. 운동학 물체와 평면은 밀리지 않는다.
+// 메쉬 콜라이더의 세계 공간 삼각형 하나. 앞면은 CCW.
+struct Triangle {
+    glm::vec3 a{0.0F};
+    glm::vec3 b{0.0F};
+    glm::vec3 c{0.0F};
+};
+
+// 힘을 받는 물체인지. 운동학 물체와 평면·메쉬는 밀리지 않는다.
 inline bool isDynamic(const RigidBodyState& body) {
     return body.inverseMass > 0.0F;
 }
 
 // backend 가 붙은 강체 부품을 모아 세계 공간 상태로 편다. AUTO 는 하드웨어가 정한 기본값이므로
-// 부르는 쪽이 CPU 또는 GPU 로 풀어 넘긴다.
-void collectRigidBodies(const scene::Scene& scene, scene::SimulationBackend backend, std::vector<RigidBodyState>& out);
+// 부르는 쪽이 CPU 또는 GPU 로 풀어 넘긴다. 메쉬 콜라이더의 삼각형은 세계 공간으로 옮겨 triangles 에
+// 이어 붙이고 상태가 그 구간을 가리킨다. 메쉬 렌더러가 없는 메쉬 콜라이더는 삼각형이 0 개다.
+void collectRigidBodies(const scene::Scene& scene,
+                        scene::SimulationBackend backend,
+                        std::vector<RigidBodyState>& out,
+                        std::vector<Triangle>& triangles);
 
 // 세계 상태를 오브젝트의 지역 변환과 부품 속도로 되돌려 쓴다. 부모 변환을 읽으므로 직렬이다.
 void writeBackRigidBodies(scene::Scene& scene, const std::vector<RigidBodyState>& bodies);
@@ -67,8 +82,10 @@ void writeBackRigidBodies(scene::Scene& scene, const std::vector<RigidBodyState>
 // 변환에 되돌려 쓴다. 고정 간격으로 나눠 부르는 것은 부르는 쪽 몫이다. jobs 가 있으면 적분·광역
 // 검사·되돌려 쓰기를 워커에 나누고, 접촉 목록은 원자 카운터로 모아 잠금이 없다.
 //
-// 구·상자·평면 콜라이더, 순차 임펄스 접촉 해결(반발·마찰) 뒤 Baumgarte 위치 보정. 상자끼리는 여섯
-// 면 축의 분리축 검사로 접촉을 만든다. 관절이나 슬립은 없다.
+// 구·상자·평면·원기둥·캡슐·메쉬 콜라이더, 순차 임펄스 접촉 해결(반발·마찰) 뒤 Baumgarte 위치 보정.
+// 상자끼리는 여섯 면 축의 분리축 검사로 접촉을 만들고, 원기둥·캡슐이 끼면 표면 표본점을 상대에 찔러
+// 보는 방식(collider_shapes.h 의 probe)이며, 메쉬는 운동학 전용으로 상대의 표본점을 삼각형마다 본다.
+// 관절이나 슬립은 없다.
 // GPU 백엔드로 표시된 강체는 건너뛴다. 그쪽은 gfx::RigidBodySimulator 가 푼다.
 void stepRigidBodies(scene::Scene& scene, float dt, core::JobSystem* jobs);
 

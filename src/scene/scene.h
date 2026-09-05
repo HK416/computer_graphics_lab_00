@@ -95,12 +95,19 @@ enum class SimulationBackend : uint32_t {
     GPU = 2,
 };
 
+// GLSL 의 RIGID_SHAPE_* / FLUID_COLLIDER_* 와 번호가 같아야 한다.
 enum class ColliderShape : uint32_t {
     SPHERE = 0,
     BOX = 1,
     // 오브젝트의 +Y 를 법선으로 하는 무한 평면. 바닥으로 쓴다.
     PLANE = 2,
+    // 축이 +Y 인 원기둥·캡슐. radius 와 halfExtents.y(반높이)를 쓴다.
+    CYLINDER = 3,
+    CAPSULE = 4,
+    // 오브젝트의 메쉬 렌더러가 그리는 메쉬를 그대로 콜라이더로 쓴다. 늘 운동학이다(바닥·지형용).
+    MESH = 5,
 };
+inline constexpr uint32_t COLLIDER_SHAPE_COUNT = 6;
 
 // 강체 부품. 재생 중에 physics 가 세계 공간에서 적분해 오브젝트 변환에 되돌려 쓴다. 운동학 물체는
 // 힘을 받지 않고 다른 물체만 밀어낸다. 평면은 늘 운동학으로 다룬다.
@@ -113,7 +120,8 @@ struct RigidBody {
     bool kinematic = false;
     float restitution = 0.3F;
     float friction = 0.5F;
-    // 구 반지름과 상자 반쪽 크기(오브젝트 지역 공간, 크기 변환 전).
+    // 구·원기둥·캡슐 반지름과 상자 반쪽 크기(오브젝트 지역 공간, 크기 변환 전). 원기둥·캡슐은
+    // halfExtents.y 를 반높이로 쓴다(캡슐은 반구를 뺀 몸통의 반높이).
     float radius = 0.5F;
     glm::vec3 halfExtents{0.5F};
     // 시뮬레이션 상태. 재생을 멈추면 스냅샷 복귀로 함께 되돌아간다.
@@ -124,14 +132,31 @@ struct RigidBody {
 };
 
 // 강체 부품이 세계 공간에서 차지하는 모양. 솔버와 편집기의 콜라이더 표시가 어긋나지 않도록 규칙을
-// 여기서 한 번만 정한다. 구는 가장 큰 축의 배율을 받고 상자는 축마다 따로 받는다.
+// 여기서 한 번만 정한다. 구는 가장 큰 축의 배율을 받고 상자는 축마다 따로 받는다. 원기둥·캡슐은
+// 반지름이 X·Z 중 큰 배율, 반높이(halfExtents.y)가 Y 배율을 받는다.
 struct ColliderPose {
     glm::vec3 position{0.0F};
     glm::quat rotation{1.0F, 0.0F, 0.0F, 0.0F};
     float radius = 0.0F;
     glm::vec3 halfExtents{0.0F};
+    // 메쉬 콜라이더만. 오브젝트 배율 그대로(메쉬 정점에 곱한다).
+    glm::vec3 scale{1.0F};
 };
 ColliderPose colliderPose(const RigidBody& body, const glm::mat4& world);
+
+// 메쉬 콜라이더가 읽는 CPU 측 삼각형. 전역 메쉬 번호로 찾는다. 모델을 올릴 때 app 이 채우고 내릴 때
+// 비운다. 물리가 gfx 를 보지 않으므로 여기(scene)에 둔다.
+//
+// ponytail: 삼각형 수가 MAX_TRIANGLES 이하인 가장 고운 LOD 단계를 담는다. 굵은 단계는 화면의 메쉬와
+// 조금 어긋나지만 삼각형마다 훑는 협역 검사가 감당할 크기다. BVH 를 넣으면 0단계를 쓸 수 있다.
+struct ColliderMesh {
+    static constexpr uint32_t MAX_TRIANGLES = 2048;
+    std::vector<glm::vec3> positions;
+    std::vector<uint32_t> indices;
+    glm::vec3 boundsCenter{0.0F};
+    float boundsRadius = 0.0F;
+    bool empty() const { return indices.empty(); }
+};
 
 // 유체를 화면에 어떻게 낼지. 입자는 내장 구 인스턴스, 표면은 마칭 큐브로 뽑은 등치면이다.
 enum class FluidDisplay : uint8_t { PARTICLES, SURFACE };
@@ -261,6 +286,11 @@ struct Scene {
     Camera camera;
     // 재생 중인지. 참일 때만 물리가 돌고, 편집기는 되돌리기 기록을 멈춘다. 저장하지 않는다.
     bool simulating = false;
+    // 전역 메쉬 번호로 찾는 메쉬 콜라이더 표. app 이 소유하고 모든 장면이 같은 것을 가리킨다.
+    // 저장하지 않는다.
+    const std::vector<ColliderMesh>* colliderMeshes = nullptr;
+    // 오브젝트의 메쉬 콜라이더. 메쉬 렌더러가 없거나 표에 없으면 nullptr.
+    const ColliderMesh* colliderMesh(uint32_t index) const;
     // 조명이 닿지 않는 곳을 채우는 균일 환경광.
     glm::vec3 ambientColor{0.25F};
     float ambientIntensity = 1.0F;

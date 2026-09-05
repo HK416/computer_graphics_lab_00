@@ -177,6 +177,7 @@ void Application::loadScenes() {
 
     // Unity 처럼 빈 장면 하나로 시작한다. public/assets 의 glTF 는 편집기 «모델 불러오기» 나 --model 로 올린다.
     scene::Scene& created = scenes.create("GameScene");
+    created.colliderMeshes = &colliderMeshes;
     addDefaultLight(created);
     created.refresh();
     geometry->build();
@@ -403,6 +404,36 @@ uint32_t Application::registerModel(const std::filesystem::path& path, asset::Mo
     entry.range = geometry->addModel(model, textureSlots);
     entry.meshBase = entry.range.meshBase;
     entry.meshCount = entry.range.meshCount;
+    // 메쉬 콜라이더용 CPU 사본. 삼각형 수가 상한 아래인 가장 고운 LOD 단계 하나만 담는다(위치만).
+    if (colliderMeshes.size() < entry.meshBase + entry.meshCount) {
+        colliderMeshes.resize(entry.meshBase + entry.meshCount);
+    }
+    for (uint32_t i = 0; i < entry.meshCount; ++i) {
+        const asset::Mesh& mesh = model.meshes[i];
+        scene::ColliderMesh& collider = colliderMeshes[entry.meshBase + i];
+        collider = {};
+        const asset::MeshLod* chosen = nullptr;
+        for (const asset::MeshLod& lod : mesh.lods) {
+            if (lod.indexCount / 3 <= scene::ColliderMesh::MAX_TRIANGLES) {
+                chosen = &lod;
+                break;
+            }
+        }
+        if (chosen == nullptr && !mesh.lods.empty()) {
+            chosen = &mesh.lods.back();
+        }
+        if (chosen == nullptr) {
+            continue;
+        }
+        collider.indices.assign(mesh.indices.begin() + chosen->indexOffset,
+                                mesh.indices.begin() + chosen->indexOffset + chosen->indexCount);
+        collider.positions.reserve(mesh.vertices.size());
+        for (const asset::Vertex& vertex : mesh.vertices) {
+            collider.positions.push_back(vertex.position);
+        }
+        collider.boundsCenter = mesh.boundsCenter;
+        collider.boundsRadius = mesh.boundsRadius;
+    }
     entry.textureSlots = std::move(textureSlots);
     entry.skeleton = std::move(model.skeleton);
     entry.instances = std::move(model.instances);
@@ -483,6 +514,9 @@ void Application::collectUnusedModels(bool force) {
         model.textureSlots.clear();
         model.skeleton = {};
         model.instances.clear();
+        for (uint32_t i = 0; i < model.meshCount && model.meshBase + i < colliderMeshes.size(); ++i) {
+            colliderMeshes[model.meshBase + i] = {};
+        }
     }
     geometry->build();
     renderer->onGeometryChanged();
@@ -766,6 +800,7 @@ void Application::openScene(const std::filesystem::path& path) {
 
     scene::Scene& created = scenes.create(loaded.scene.name);
     created = std::move(loaded.scene);
+    created.colliderMeshes = &colliderMeshes;
     // 모델과 같은 규칙: 상대 경로는 에셋 뿌리 기준으로 푼다.
     if (!created.environment.hdrPath.empty() && !created.environment.hdrPath.is_absolute()) {
         created.environment.hdrPath = assetRoot / created.environment.hdrPath;

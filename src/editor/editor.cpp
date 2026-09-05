@@ -888,8 +888,8 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         }
     }
 
-    // 메쉬 렌더러. 메쉬는 바꿀 수 있고 재질은 메쉬에 딸려 온다.
-    if (object.meshRenderer >= 0 && componentHeader("메쉬 렌더러", &scene::Object::meshRenderer)) {
+    // Mesh Renderer. 메쉬는 바꿀 수 있고 재질은 메쉬에 딸려 온다.
+    if (object.meshRenderer >= 0 && componentHeader("Mesh Renderer", &scene::Object::meshRenderer)) {
         uint32_t selectedMesh = active.meshOf(objectIndex);
         bool live = geometry.meshLive(selectedMesh);
         std::string current = live ? std::to_string(selectedMesh) + ": " + geometry.meshName(selectedMesh) : "(없음)";
@@ -927,19 +927,46 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
     if (object.rigidBody >= 0 && object.rigidBody < static_cast<int>(active.rigidBodies.size()) &&
         componentHeader("강체", &scene::Object::rigidBody)) {
         scene::RigidBody& body = active.rigidBodies[static_cast<size_t>(object.rigidBody)];
-        constexpr std::array<const char*, 3> SHAPE_NAMES{"구", "상자", "평면"};
+        constexpr std::array<const char*, scene::COLLIDER_SHAPE_COUNT> SHAPE_NAMES{
+            "구", "상자", "평면", "원기둥", "캡슐", "메쉬"};
         auto shapeIndex = static_cast<int>(body.shape);
         if (ImGui::Combo("모양", &shapeIndex, SHAPE_NAMES.data(), static_cast<int>(SHAPE_NAMES.size()))) {
             body.shape = static_cast<scene::ColliderShape>(shapeIndex);
         }
-        if (body.shape == scene::ColliderShape::SPHERE) {
+        bool alwaysKinematic = body.shape == scene::ColliderShape::PLANE || body.shape == scene::ColliderShape::MESH;
+        switch (body.shape) {
+        case scene::ColliderShape::SPHERE:
             ImGui::DragFloat("반지름", &body.radius, 0.01F, 0.01F, 100.0F);
-        } else if (body.shape == scene::ColliderShape::BOX) {
+            break;
+        case scene::ColliderShape::BOX:
             ImGui::DragFloat3("반쪽 크기", glm::value_ptr(body.halfExtents), 0.01F, 0.01F, 100.0F);
-        } else {
+            break;
+        case scene::ColliderShape::CYLINDER:
+        case scene::ColliderShape::CAPSULE:
+            ImGui::DragFloat("반지름", &body.radius, 0.01F, 0.01F, 100.0F);
+            ImGui::DragFloat("반높이", &body.halfExtents.y, 0.01F, 0.01F, 100.0F);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(body.shape == scene::ColliderShape::CAPSULE
+                                      ? "축은 오브젝트의 +Y. 반구를 뺀 몸통의 반높이다"
+                                      : "축은 오브젝트의 +Y");
+            }
+            break;
+        case scene::ColliderShape::MESH:
+            if (active.colliderMesh(objectIndex) != nullptr) {
+                ImGui::TextDisabled("Mesh Renderer 의 메쉬(삼각형 %zu개, 굵은 LOD)를 그대로 쓴다. 늘 운동학이다",
+                                    active.colliderMesh(objectIndex)->indices.size() / 3);
+            } else {
+                ImGui::TextDisabled("Mesh Renderer 가 없어 부딪히지 않는다. 늘 운동학이다");
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("바닥·지형용. 움직이는 물체가 이 삼각형에 닿는다. 유체는 통과한다");
+            }
+            break;
+        case scene::ColliderShape::PLANE:
             ImGui::TextDisabled("오브젝트의 +Y 가 법선인 무한 평면. 늘 운동학이다");
+            break;
         }
-        ImGui::BeginDisabled(body.shape == scene::ColliderShape::PLANE);
+        ImGui::BeginDisabled(alwaysKinematic);
         ImGui::Checkbox("운동학", &body.kinematic);
         ImGui::SameLine();
         ImGui::Checkbox("중력", &body.useGravity);
@@ -1033,9 +1060,10 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         }
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip(surfaceUsable ? "표면은 마칭 큐브로 등치면을 뽑아 물처럼 그린다.\n"
-                                              "경로 추적·광선 반사는 아직 입자를 보고, 표면은 그림자를 던지지 않는다"
-                                            : "이 장치에서는 표면 컴퓨트를 만들지 못했다. CPU 백엔드로는 쓸 수 있다");
+            ImGui::SetTooltip(
+                surfaceUsable ? "표면은 마칭 큐브로 등치면을 뽑아 물처럼 그린다.\n"
+                                "Path Tracing·Ray Traced Reflections는 아직 입자를 보고, 표면은 그림자를 던지지 않는다"
+                              : "이 장치에서는 표면 컴퓨트를 만들지 못했다. CPU 백엔드로는 쓸 수 있다");
         }
         if (fluid.display == scene::FluidDisplay::SURFACE) {
             uint32_t ceiling = onCpu ? gfx::FLUID_MAX_CPU_SURFACE_RESOLUTION : gfx::FLUID_MAX_SURFACE_RESOLUTION;
@@ -1069,7 +1097,7 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         ImGui::DragFloat3("용기 최소", glm::value_ptr(fluid.containerMin), 0.05F, -100.0F, 100.0F);
         ImGui::DragFloat3("용기 최대", glm::value_ptr(fluid.containerMax), 0.05F, -100.0F, 100.0F);
         ImGui::DragFloat3("중력", glm::value_ptr(fluid.gravity), 0.1F, -100.0F, 100.0F);
-        ImGui::TextDisabled("입자는 GPU 에서 계산해 내장 구로 그린다. 경로 추적에도 보인다");
+        ImGui::TextDisabled("입자는 GPU 에서 계산해 내장 구로 그린다. Path Tracing에도 보인다");
     }
 
     ImGui::Separator();
@@ -1078,7 +1106,7 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
     }
     if (ImGui::BeginPopup("컴포넌트 추가")) {
         ImGui::BeginDisabled(object.meshRenderer >= 0);
-        if (ImGui::BeginMenu("메쉬 렌더러")) {
+        if (ImGui::BeginMenu("Mesh Renderer")) {
             for (uint32_t meshIndex = 0; meshIndex < geometry.meshCount(); ++meshIndex) {
                 if (!geometry.meshLive(meshIndex)) {
                     continue;
@@ -1398,16 +1426,16 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
             ImGui::SeparatorText(name);
             return true;
         }
-        // 헤더 이름이 안의 체크박스 이름("광선 반사", "경로 추적")과 같으면 ID 가 겹쳐 체크박스가
+        // 헤더 이름이 안의 체크박스 이름("Ray Traced Reflections", "Path Tracing")과 같으면 ID 가 겹쳐 체크박스가
         // 눌리지 않는다. 숨은 접미사로 헤더 ID 를 따로 둔다.
         std::string header = std::string(name) + "##section";
         return ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
     };
 
-    // 경로 추적은 래스터 패스를 통째로 건너뛴다. 거기 딸린 설정은 눌러도 아무 일이 없으므로
+    // Path Tracing은 래스터 패스를 통째로 건너뛴다. 거기 딸린 설정은 눌러도 아무 일이 없으므로
     // 디버그 뷰와 같은 이유로 잠근다.
     bool rasterOnly = renderer.usePathTracing;
-    // 광선 그림자와 반사는 래스터 안에서 도는 것이라 경로 추적과는 무관하다.
+    // 광선 그림자와 반사는 래스터 안에서 도는 것이라 Path Tracing과는 무관하다.
     bool rayQueryReady = renderer.rayQueryShadowsAvailable() && !rasterOnly;
     scene::PostProcess& post = active.post;
 
@@ -1485,7 +1513,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
             ImGui::SetTooltip("클수록 넓은 밉 쪽에 무게를 두어 멀리 퍼진다");
         }
         ImGui::EndDisabled();
-        ImGui::Checkbox("자동 노출", &post.autoExposure);
+        ImGui::Checkbox("Auto Exposure", &post.autoExposure);
         ImGui::BeginDisabled(!post.autoExposure);
         ImGui::SliderFloat("적응 속도", &post.adaptationSpeed, 0.1F, 10.0F, "%.1f /s");
         ImGui::DragFloatRange2("EV 범위", &post.exposureMinEv, &post.exposureMaxEv, 0.1F, -10.0F, 20.0F, "%.1f");
@@ -1508,9 +1536,9 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::BeginDisabled(rasterOnly);
         ImGui::Checkbox("그림자", &renderer.shadowsEnabled);
         ImGui::BeginDisabled(!renderer.shadowsEnabled);
-        ImGui::Checkbox("시점 절두체 컬링", &renderer.shadowViewCulling);
+        ImGui::Checkbox("시점 Frustum Culling", &renderer.shadowViewCulling);
         ImGui::SameLine();
-        ImGui::Checkbox("캐스터 컬링", &renderer.shadowCasterCulling);
+        ImGui::Checkbox("Caster Culling", &renderer.shadowCasterCulling);
         ImGui::Checkbox("시점 캐싱", &renderer.shadowCaching);
         int cascades = static_cast<int>(renderer.shadowCascades);
         if (ImGui::SliderInt("캐스케이드", &cascades, 1, static_cast<int>(gfx::MAX_SHADOW_CASCADES))) {
@@ -1527,28 +1555,28 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::TextDisabled("그림자 시점 %u개까지 (방향광/스폿광 1, 점광 6)", gfx::MAX_SHADOW_VIEWS);
 
         ImGui::BeginDisabled(!rayQueryReady);
-        ImGui::Checkbox("광선 그림자 (하이브리드)", &renderer.useRayQueryShadows);
+        ImGui::Checkbox("Ray Traced Shadows (하이브리드)", &renderer.useRayQueryShadows);
         ImGui::BeginDisabled(!renderer.useRayQueryShadows);
         ImGui::SliderFloat("광선 거리", &renderer.rayShadowDistance, 1.0F, 200.0F, "%.0f");
         ImGui::EndDisabled();
         ImGui::EndDisabled();
         if (rasterOnly) {
-            ImGui::TextDisabled("경로 추적 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
+            ImGui::TextDisabled("Path Tracing 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
         } else if (!rayQueryReady) {
             if (!renderer.rayTracingBlocked().empty()) {
                 ImGui::TextWrapped("%s", renderer.rayTracingBlocked().c_str());
             } else {
-                ImGui::TextDisabled("이 장치는 광선 질의를 지원하지 않는다");
+                ImGui::TextDisabled("이 장치는 Ray Query를 지원하지 않는다");
             }
         } else {
             ImGui::TextDisabled("이 거리 안쪽만 광선으로 판정하고 바깥은 그림자 맵을 쓴다");
         }
     }
 
-    if (section("광선 반사")) {
+    if (section("Ray Traced Reflections")) {
         bool reflectionReady = rayQueryReady && renderer.useIbl;
         ImGui::BeginDisabled(!reflectionReady);
-        ImGui::Checkbox("광선 반사", &renderer.useReflections);
+        ImGui::Checkbox("Ray Traced Reflections", &renderer.useReflections);
         ImGui::BeginDisabled(!renderer.useReflections);
         ImGui::SliderFloat("거칠기 상한", &renderer.reflectionRoughnessCutoff, 0.03F, 1.0F, "%.2f");
         ImGui::SliderFloat("반사 세기", &renderer.reflectionIntensity, 0.0F, 2.0F, "%.2f");
@@ -1559,13 +1587,13 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::EndDisabled();
         ImGui::EndDisabled();
         if (rasterOnly) {
-            ImGui::TextDisabled("경로 추적이 반사를 직접 계산한다");
+            ImGui::TextDisabled("Path Tracing이 반사를 직접 계산한다");
         } else if (!rayQueryReady) {
-            ImGui::TextDisabled("이 장치는 광선 질의를 지원하지 않는다");
+            ImGui::TextDisabled("이 장치는 Ray Query를 지원하지 않는다");
         } else if (!renderer.useIbl) {
             ImGui::TextDisabled("IBL 이 꺼져 있으면 스페큘러 항이 없어 반사도 쉰다");
         } else {
-            ImGui::TextDisabled("거칠기 상한 이하의 불투명 표면만 추적한다. 픽셀당 광선 하나, 시간축 누적");
+            ImGui::TextDisabled("거칠기 상한 이하의 불투명 표면만 추적한다. 픽셀당 광선 하나, Temporal 누적");
         }
     }
 
@@ -1637,29 +1665,29 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::EndDisabled();
         ImGui::EndDisabled();
         if (rasterOnly) {
-            ImGui::TextDisabled("경로 추적 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
+            ImGui::TextDisabled("Path Tracing 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
         }
 
-        // 컬 컴퓨트도 태스크 셰이더도 래스터 분기 안에서만 돈다. 경로 추적의 가속 구조는 0단계 LOD
+        // 컬 컴퓨트도 태스크 셰이더도 래스터 분기 안에서만 돈다. Path Tracing의 가속 구조는 0단계 LOD
         // 삼각형으로 세우므로 meshlet 컬링도 LOD 선정도 관여하지 않는다.
     }
 
     if (section("컬링과 LOD")) {
         ImGui::BeginDisabled(rasterOnly);
-        ImGui::Checkbox("컴퓨트 컬링", &renderer.useComputeCulling);
-        // 오클루전은 mesh shader 경로의 태스크 셰이더에도 적용되므로 컴퓨트 컬링 잠금 밖에 둔다.
-        ImGui::Checkbox("HZB 오클루전 컬링 (두 패스)", &renderer.occlusionCulling);
+        ImGui::Checkbox("Compute Culling", &renderer.useComputeCulling);
+        // 오클루전은 Mesh Shader 경로의 태스크 셰이더에도 적용되므로 Compute Culling 잠금 밖에 둔다.
+        ImGui::Checkbox("HZB Occlusion Culling (두 패스)", &renderer.occlusionCulling);
         ImGui::BeginDisabled(!renderer.useComputeCulling);
-        ImGui::Checkbox("절두체 컬링", &renderer.frustumCulling);
+        ImGui::Checkbox("Frustum Culling", &renderer.frustumCulling);
         ImGui::SameLine();
-        ImGui::Checkbox("법선 원뿔 컬링", &renderer.coneCulling);
+        ImGui::Checkbox("Normal Cone Culling", &renderer.coneCulling);
         ImGui::EndDisabled();
 
         ImGui::Checkbox("자동 LOD 선정", &renderer.automaticLod);
         if (renderer.automaticLod) {
             ImGui::SliderFloat("허용 화면 오차", &renderer.lodErrorThreshold, 0.1F, 32.0F, "%.2f px");
 
-            ImGui::Checkbox("신경망 보정", &renderer.useNeuralLod);
+            ImGui::Checkbox("Neural LOD", &renderer.useNeuralLod);
             if (renderer.useNeuralLod) {
                 ImGui::Checkbox("학습", &renderer.trainLodNetwork);
                 ImGui::SameLine();
@@ -1684,11 +1712,11 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
 
         ImGui::EndDisabled();
         if (rasterOnly) {
-            ImGui::TextDisabled("경로 추적 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
+            ImGui::TextDisabled("Path Tracing 중에는 래스터 패스를 건너뛰므로 적용되지 않는다");
         }
     }
 
-    if (section("해상도와 업스케일")) {
+    if (section("해상도와 Upscaling")) {
         if (ImGui::SliderFloat("렌더 배율", &renderer.renderScale, 0.25F, 2.0F, "%.2f")) {
             // 배율은 다음 프레임의 표시 크기 갱신에서 반영된다.
         }
@@ -1702,7 +1730,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         bool dlssSelected = renderer.upscaler == gfx::Upscaler::DLSS || renderer.upscaler == gfx::Upscaler::DLSS_RR;
         for (const gfx::UpscalerInfo& info : upscalers) {
             // Ray Reconstruction 은 DLSS 의 한 모드다. 목록에 따로 두면 초해상과 무관한 별개 기법처럼
-            // 보이고, 경로 추적을 켜야 한다는 조건도 드러나지 않는다. 아래에서 체크박스로 다룬다.
+            // 보이고, Path Tracing을 켜야 한다는 조건도 드러나지 않는다. 아래에서 체크박스로 다룬다.
             if (info.kind == gfx::Upscaler::DLSS_RR) {
                 continue;
             }
@@ -1718,7 +1746,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
             }
         }
         if (renderer.upscaler == gfx::Upscaler::SPATIAL) {
-            ImGui::SliderFloat("선명화", &renderer.upscaleSharpness, 0.0F, 1.0F, "%.2f");
+            ImGui::SliderFloat("Sharpening", &renderer.upscaleSharpness, 0.0F, 1.0F, "%.2f");
         }
         if (dlssSelected) {
             ImGui::Indent();
@@ -1751,18 +1779,18 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
                 ImGui::SameLine();
                 ImGui::TextDisabled("(%s)", reconstruction.reason);
             } else if (useReconstruction && !renderer.usePathTracing) {
-                ImGui::TextDisabled("경로 추적을 켜야 동작한다. 그전까지는 초해상으로 돌아간다");
+                ImGui::TextDisabled("Path Tracing을 켜야 동작한다. 그전까지는 Super Resolution 으로 돌아간다");
             } else if (useReconstruction) {
-                ImGui::TextDisabled("경로 추적 1표본을 디노이즈하면서 확대한다");
+                ImGui::TextDisabled("Path Tracing 1표본을 Denoise 하면서 확대한다");
             }
 
             ImGui::Unindent();
         }
     }
 
-    if (section("경로 추적")) {
+    if (section("Path Tracing")) {
         ImGui::BeginDisabled(!renderer.pathTracingAvailable());
-        ImGui::Checkbox("경로 추적", &renderer.usePathTracing);
+        ImGui::Checkbox("Path Tracing", &renderer.usePathTracing);
         ImGui::EndDisabled();
         if (!renderer.pathTracingAvailable()) {
             ImGui::SameLine();
@@ -1786,7 +1814,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
             }
             ImGui::Checkbox("다음 사건 추정", &options.nextEventEstimation);
             ImGui::SameLine();
-            ImGui::Checkbox("러시안 룰렛", &options.russianRoulette);
+            ImGui::Checkbox("Russian Roulette", &options.russianRoulette);
             ImGui::SliderFloat("복사휘도 상한", &options.radianceClamp, 1.0F, 64.0F, "%.1f");
             ImGui::SliderFloat("하늘 밝기", &options.skyIntensity, 0.0F, 4.0F, "%.2f");
             ImGui::Text("누적 표본 %u", renderer.pathTraceSamples());
@@ -1798,45 +1826,45 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
     }
 
     if (section("파이프라인")) {
-        ImGui::Checkbox("와이어프레임", &renderer.wireframe);
+        ImGui::Checkbox("Wireframe", &renderer.wireframe);
         ImGui::Checkbox("콜라이더 표시", &renderer.showColliders);
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("강체 콜라이더는 초록, 유체 용기는 청록, 방출 상자는 노랑으로 덧그린다");
         }
-        // 경로 추적은 깊이 버퍼를 채우지 않아 가림을 판정할 수 없다. 그 모드에서는 늘 보인다.
+        // Path Tracing은 깊이 버퍼를 채우지 않아 가림을 판정할 수 없다. 그 모드에서는 늘 보인다.
         bool depthAvailable = !renderer.usePathTracing;
         ImGui::BeginDisabled(!renderer.showColliders || !depthAvailable);
         ImGui::SameLine();
         ImGui::Checkbox("가림 판정", &renderer.colliderOcclusion);
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(depthAvailable ? "끄면 물체에 가려도 선이 그대로 보인다"
-                                             : "경로 추적은 깊이 버퍼를 채우지 않아 늘 보인다");
+                                             : "Path Tracing은 깊이 버퍼를 채우지 않아 늘 보인다");
         }
         ImGui::EndDisabled();
         ImGui::BeginDisabled(!renderer.meshShaderAvailable() || rasterOnly);
-        ImGui::Checkbox("mesh shader 경로", &renderer.useMeshShader);
+        ImGui::Checkbox("Mesh Shader 경로", &renderer.useMeshShader);
         ImGui::EndDisabled();
         if (!renderer.meshShaderAvailable()) {
             ImGui::SameLine();
             ImGui::TextDisabled("(미지원)");
         } else if (rasterOnly) {
             // 광선 순회는 가속 구조를 타지 mesh 셰이더를 실행하지 않는다. 둘은 아예 다른 파이프라인이다.
-            ImGui::TextDisabled("경로 추적은 래스터 파이프라인을 타지 않는다");
+            ImGui::TextDisabled("Path Tracing은 래스터 파이프라인을 타지 않는다");
         }
 
-        static constexpr const char* DEBUG_MODE_NAMES[] = {"셰이딩",
-                                                           "meshlet",
-                                                           "노멀",
+        static constexpr const char* DEBUG_MODE_NAMES[] = {"Shading",
+                                                           "Meshlet",
+                                                           "Normal",
                                                            "UV",
-                                                           "깊이",
+                                                           "Depth",
                                                            "LOD",
-                                                           "캐스케이드",
-                                                           "그림자",
-                                                           "모션 벡터",
-                                                           "컬 패스",
-                                                           "반사 원본",
-                                                           "반사 누적"};
-        // 경로 추적이나 이 장치가 못 만드는 값은 개별로 잠그고 사유를 보인다.
+                                                           "Shadow Cascade",
+                                                           "Shadow",
+                                                           "Motion Vector",
+                                                           "Cull Pass",
+                                                           "Reflection Raw",
+                                                           "Reflection Accumulated"};
+        // Path Tracing이나 이 장치가 못 만드는 값은 개별로 잠그고 사유를 보인다.
         if (ImGui::BeginCombo("디버그 뷰", DEBUG_MODE_NAMES[renderer.debugMode])) {
             for (uint32_t mode = 0; mode < IM_ARRAYSIZE(DEBUG_MODE_NAMES); ++mode) {
                 const char* blocked = renderer.debugModeBlockedReason(mode);
@@ -1869,7 +1897,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         bool drawIndirectCount = caps.drawIndirectCount;
         bool drawIndex = caps.shaderDrawIndex;
         ImGui::Checkbox("mesh shader", &meshShader);
-        ImGui::Checkbox("레이트레이싱 파이프라인", &rayTracing);
+        ImGui::Checkbox("Ray Tracing Pipeline", &rayTracing);
         ImGui::Checkbox("drawIndirectCount", &drawIndirectCount);
         ImGui::Checkbox("gl_DrawID (없으면 meshlet 디버그 뷰가 메쉬 단위)", &drawIndex);
         ImGui::EndDisabled();

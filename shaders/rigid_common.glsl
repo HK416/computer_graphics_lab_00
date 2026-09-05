@@ -4,6 +4,8 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 
+#include "collider_shapes.glsl"
+
 // 강체 GPU 솔버. src/gfx/rigid_body_gpu.h 의 GpuRigidBody / RigidPushConstants 와 배치가 같아야 한다.
 // 접촉 생성은 src/physics/rigid_body.cpp 와 같은 규칙이라 두 백엔드가 같은 접촉을 본다.
 //
@@ -11,9 +13,12 @@
 // 전부와의 접촉을 «같은 속도로» 풀어 한 번에 더한다. 순서 의존이 없어 나눠 풀 수 있는 대신 수렴이
 // 느려 반복을 더 돌고, 쌓인 물체가 CPU 보다 조금 더 물렁하다.
 
-#define RIGID_SHAPE_SPHERE 0u
-#define RIGID_SHAPE_BOX 1u
-#define RIGID_SHAPE_PLANE 2u
+#define RIGID_SHAPE_SPHERE COLLIDER_SHAPE_SPHERE
+#define RIGID_SHAPE_BOX COLLIDER_SHAPE_BOX
+#define RIGID_SHAPE_PLANE COLLIDER_SHAPE_PLANE
+#define RIGID_SHAPE_CYLINDER COLLIDER_SHAPE_CYLINDER
+#define RIGID_SHAPE_CAPSULE COLLIDER_SHAPE_CAPSULE
+#define RIGID_SHAPE_MESH COLLIDER_SHAPE_MESH
 
 #define RIGID_FLAG_GRAVITY 1u
 
@@ -34,21 +39,34 @@ struct RigidBody {
     vec4 preAngularVelocity;
     // xyz 지역 축 관성 역수, w 반발 계수.
     vec4 inverseInertia;
-    // xyz 상자 반쪽 크기, w 마찰 계수.
+    // xyz 상자 반쪽 크기(원기둥·캡슐은 y 가 반높이), w 마찰 계수.
     vec4 halfExtents;
     uint shape;
     uint flags;
-    uint pad0;
-    uint pad1;
+    // 메쉬 콜라이더의 세계 공간 삼각형 구간(push.triangles 기준).
+    uint triangleOffset;
+    uint triangleCount;
 };
 
 layout(buffer_reference, scalar) buffer RigidBodyBuffer {
     RigidBody items[];
 };
 
+// 메쉬 콜라이더의 세계 공간 삼각형. 앞면은 CCW.
+struct RigidTriangle {
+    vec3 a;
+    vec3 b;
+    vec3 c;
+};
+
+layout(buffer_reference, scalar) buffer RigidTriangleBuffer {
+    RigidTriangle items[];
+};
+
 layout(push_constant, scalar) uniform RigidPushConstants {
     RigidBodyBuffer bodiesIn;
     RigidBodyBuffer bodiesOut;
+    RigidTriangleBuffer triangles;
     uint bodyCount;
     float dt;
     float gravity;
@@ -87,10 +105,12 @@ bool rigidDynamic(RigidBody body) {
     return body.position.w > 0.0;
 }
 
-// 한 짝의 접촉. 법선은 a 에서 b 를 향하고 점마다 침투가 다르다.
+// 한 짝의 접촉. 법선은 a 에서 b 를 향하고 점마다 침투와 법선이 다를 수 있다(표본 기반 접촉).
 struct RigidManifold {
+    // 새 점의 기본 법선. 상자·구 짝은 모든 점이 이것을 쓴다.
     vec3 normal;
     vec3 points[RIGID_MAX_MANIFOLD];
+    vec3 normals[RIGID_MAX_MANIFOLD];
     float depths[RIGID_MAX_MANIFOLD];
     int count;
 };
@@ -100,6 +120,7 @@ RigidManifold noContact() {
     manifold.normal = vec3(0.0, 1.0, 0.0);
     for (int i = 0; i < RIGID_MAX_MANIFOLD; ++i) {
         manifold.points[i] = vec3(0.0);
+        manifold.normals[i] = vec3(0.0, 1.0, 0.0);
         manifold.depths[i] = 0.0;
     }
     manifold.count = 0;
@@ -108,9 +129,10 @@ RigidManifold noContact() {
 
 // 상한을 넘으면 가장 얕은 것을 밀어낸다. CPU 의 addManifoldPoint 와 같은 규칙이어야 두 백엔드가 같은
 // 접촉을 본다. 그냥 버리면 상자가 기울어 깊은 꼭짓점이 뒤쪽 번호일 때 침투를 얕게 본다.
-void addPoint(inout RigidManifold manifold, vec3 point, float depth) {
+void addPointNormal(inout RigidManifold manifold, vec3 point, vec3 normal, float depth) {
     if (manifold.count < RIGID_MAX_MANIFOLD) {
         manifold.points[manifold.count] = point;
+        manifold.normals[manifold.count] = normal;
         manifold.depths[manifold.count] = depth;
         ++manifold.count;
         return;
@@ -123,8 +145,31 @@ void addPoint(inout RigidManifold manifold, vec3 point, float depth) {
     }
     if (manifold.depths[shallowest] < depth) {
         manifold.points[shallowest] = point;
+        manifold.normals[shallowest] = normal;
         manifold.depths[shallowest] = depth;
     }
+}
+
+void addPoint(inout RigidManifold manifold, vec3 point, float depth) {
+    addPointNormal(manifold, point, manifold.normal, depth);
+}
+
+// 법선을 모두 뒤집는다. a·b 순서를 바꿔 만든 접촉을 되돌릴 때 쓴다.
+RigidManifold flipManifold(RigidManifold manifold) {
+    manifold.normal = -manifold.normal;
+    for (int i = 0; i < RIGID_MAX_MANIFOLD; ++i) {
+        manifold.normals[i] = -manifold.normals[i];
+    }
+    return manifold;
+}
+
+// 모든 점의 법선을 하나로 맞춘다. 중심이 겹쳐 법선을 정할 근거가 없을 때 쓴다.
+RigidManifold overrideNormal(RigidManifold manifold, vec3 normal) {
+    manifold.normal = normal;
+    for (int i = 0; i < RIGID_MAX_MANIFOLD; ++i) {
+        manifold.normals[i] = normal;
+    }
+    return manifold;
 }
 
 // 상자 지역 공간에서 점까지의 가장 가까운 표면점과 침투. CPU 의 closestOnBox 와 같은 규칙이다.
@@ -243,8 +288,86 @@ RigidManifold collideBoxBox(RigidBody a, RigidBody b) {
     return manifold;
 }
 
-// a 와 b 사이의 접촉. 법선은 a 에서 b 를 향한다.
-RigidManifold rigidCollide(RigidBody a, RigidBody b) {
+// 세계 점에서 물체 표면의 가장 가까운 점. collider_shapes.glsl 의 지역 함수를 쿼터니언으로 감싼다.
+SurfacePoint closestOnBody(RigidBody body, vec3 worldPoint) {
+    vec3 local = rotateByQuatInverse(body.rotation, worldPoint - body.position.xyz);
+    SurfacePoint result = closestOnColliderLocal(body.shape, body.velocity.w, body.halfExtents.xyz, local);
+    result.point = body.position.xyz + rotateByQuat(body.rotation, result.point);
+    result.normal = rotateByQuat(body.rotation, result.normal);
+    return result;
+}
+
+// 상대 표면에서 자기 중심에 가장 가까운 점을 자기 지역 공간으로. probePointLocal 의 힌트다.
+vec3 probeHint(RigidBody self, RigidBody other) {
+    SurfacePoint near = closestOnBody(other, self.position.xyz);
+    return rotateByQuatInverse(self.rotation, near.point - self.position.xyz);
+}
+
+// 원기둥·캡슐이 낀 짝. 표본점을 서로에게 찔러 깊이가 양수인 것을 접촉으로 낸다. CPU 의 collideGeneric
+// 과 같은 규칙이다.
+RigidManifold rigidCollideGeneric(RigidBody a, RigidBody b) {
+    RigidManifold manifold = noContact();
+    vec3 hintA = probeHint(a, b);
+    int countA = probeCount(a.shape);
+    for (int i = 0; i < countA; ++i) {
+        float radius;
+        vec3 local = probePointLocal(a.shape, a.velocity.w, a.halfExtents.xyz, hintA, i, radius);
+        vec3 world = a.position.xyz + rotateByQuat(a.rotation, local);
+        SurfacePoint surface = closestOnBody(b, world);
+        float depth = radius - surface.distance;
+        if (depth > 0.0) {
+            // b 의 바깥 법선은 b 에서 a 를 향하므로 뒤집는다.
+            addPointNormal(manifold, surface.point, -surface.normal, depth);
+        }
+    }
+    vec3 hintB = probeHint(b, a);
+    int countB = probeCount(b.shape);
+    for (int i = 0; i < countB; ++i) {
+        float radius;
+        vec3 local = probePointLocal(b.shape, b.velocity.w, b.halfExtents.xyz, hintB, i, radius);
+        vec3 world = b.position.xyz + rotateByQuat(b.rotation, local);
+        SurfacePoint surface = closestOnBody(a, world);
+        float depth = radius - surface.distance;
+        if (depth > 0.0) {
+            addPointNormal(manifold, surface.point, surface.normal, depth);
+        }
+    }
+    if (manifold.count > 0) {
+        manifold.normal = manifold.normals[0];
+    }
+    return manifold;
+}
+
+// a 의 표본점을 메쉬 b 의 삼각형마다 본다. CPU 의 collideMesh 와 같은 규칙이다.
+RigidManifold rigidCollideMesh(RigidBody a, RigidBody mesh) {
+    RigidManifold manifold = noContact();
+    vec3 hint = rotateByQuatInverse(a.rotation, vec3(0.0, -a.angularVelocity.w, 0.0));
+    float thickness = 0.5 * a.angularVelocity.w;
+    int count = probeCount(a.shape);
+    for (int i = 0; i < count; ++i) {
+        float radius;
+        vec3 local = probePointLocal(a.shape, a.velocity.w, a.halfExtents.xyz, hint, i, radius);
+        vec3 world = a.position.xyz + rotateByQuat(a.rotation, local);
+        for (uint t = 0u; t < mesh.triangleCount; ++t) {
+            RigidTriangle triangle = push.triangles.items[mesh.triangleOffset + t];
+            SurfacePoint surface;
+            if (closestOnTriangleSurface(triangle.a, triangle.b, triangle.c, world, radius, thickness, surface)) {
+                addPointNormal(manifold, surface.point, -surface.normal, radius - surface.distance);
+            }
+        }
+    }
+    if (manifold.count > 0) {
+        manifold.normal = manifold.normals[0];
+    }
+    return manifold;
+}
+
+bool rigidStatic(uint shape) {
+    return shape == RIGID_SHAPE_PLANE || shape == RIGID_SHAPE_MESH;
+}
+
+// 구·상자·평면 짝. a 는 구 또는 상자여야 하고, (상자, 구)는 부르는 쪽이 바꿔서 준다.
+RigidManifold rigidCollideBasic(RigidBody a, RigidBody b) {
     RigidManifold manifold = noContact();
 
     if (a.shape == RIGID_SHAPE_SPHERE && b.shape == RIGID_SHAPE_SPHERE) {
@@ -274,8 +397,7 @@ RigidManifold rigidCollide(RigidBody a, RigidBody b) {
     if (a.shape == RIGID_SHAPE_SPHERE && b.shape == RIGID_SHAPE_BOX) {
         manifold = closestOnBox(b, a.position.xyz, a.velocity.w);
         // closestOnBox 의 법선은 상자에서 구를 향한다. a 가 구이므로 뒤집는다.
-        manifold.normal = -manifold.normal;
-        return manifold;
+        return flipManifold(manifold);
     }
 
     if (a.shape == RIGID_SHAPE_BOX && b.shape == RIGID_SHAPE_PLANE) {
@@ -298,6 +420,34 @@ RigidManifold rigidCollide(RigidBody a, RigidBody b) {
     }
 
     return manifold;
+}
+
+// a 와 b 사이의 접촉. 법선은 a 에서 b 를 향한다. 어느 순서로 주어도 된다. CPU 의 collide 와 같은 분기다.
+// GLSL 은 재귀가 없어 순서를 바꿀 때 자리를 맞바꾸고 끝에 뒤집는다.
+RigidManifold rigidCollide(RigidBody a, RigidBody b) {
+    bool flipped = false;
+    if (rigidStatic(a.shape)) {
+        if (rigidStatic(b.shape)) {
+            return noContact();
+        }
+        RigidBody swap = a;
+        a = b;
+        b = swap;
+        flipped = true;
+    }
+    RigidManifold manifold;
+    if (b.shape == RIGID_SHAPE_MESH) {
+        manifold = rigidCollideMesh(a, b);
+    } else if (a.shape == RIGID_SHAPE_CYLINDER || a.shape == RIGID_SHAPE_CAPSULE ||
+               b.shape == RIGID_SHAPE_CYLINDER || b.shape == RIGID_SHAPE_CAPSULE) {
+        manifold = rigidCollideGeneric(a, b);
+    } else if (a.shape == RIGID_SHAPE_BOX && b.shape == RIGID_SHAPE_SPHERE) {
+        // 구·상자·평면. (상자, 구)는 (구, 상자)로 바꿔 만들고 뒤집는다.
+        manifold = flipManifold(rigidCollideBasic(b, a));
+    } else {
+        manifold = rigidCollideBasic(a, b);
+    }
+    return flipped ? flipManifold(manifold) : manifold;
 }
 
 #endif

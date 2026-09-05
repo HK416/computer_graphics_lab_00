@@ -1,0 +1,59 @@
+{
+  "version": 3,
+  "name": "강체 모양 점검 (원기둥·캡슐·메쉬)",
+  "models": [
+    "<builtin:plane>",
+    "<builtin:cylinder>",
+    "<builtin:capsule>",
+    "<builtin:torus>",
+    "<builtin:icosphere>",
+    "<builtin:box>"
+  ],
+  "camera": {
+    "position": [0.0, 3.0, 7.0],
+    "yaw": -90.0,
+    "pitch": -20.0,
+    "fovY": 60.0,
+    "near": 0.05,
+    "moveSpeed": 2.0,
+    "mode": "orbit",
+    "target": [0.0, 0.8, 0.0],
+    "distance": 7.0
+  },
+  "ambient": {"color": [0.25, 0.25, 0.25], "intensity": 1.0},
+  "lights": [
+    {
+      "type": "directional",
+      "color": [1.0, 0.97, 0.9],
+      "intensity": 3.0,
+      "range": 20.0,
+      "innerCone": 20.0,
+      "outerCone": 30.0,
+      "size": [2.0, 2.0],
+      "castsShadow": true
+    }
+  ],
+  "animators": [],
+  "rigidBodies": [
+    {"shape": "plane", "kinematic": true, "restitution": 0.2, "friction": 0.6, "backend": "gpu"},
+    {"shape": "cylinder", "mass": 1.0, "restitution": 0.05, "friction": 0.6, "radius": 1.0, "halfExtents": [1.0, 1.0, 1.0], "backend": "gpu"},
+    {"shape": "cylinder", "mass": 1.0, "restitution": 0.05, "friction": 0.6, "radius": 1.0, "halfExtents": [1.0, 1.0, 1.0], "backend": "gpu"},
+    {"shape": "capsule", "mass": 1.0, "restitution": 0.05, "friction": 0.6, "radius": 0.5, "halfExtents": [0.5, 0.5, 0.5], "backend": "gpu"},
+    {"shape": "capsule", "mass": 1.0, "restitution": 0.05, "friction": 0.6, "radius": 0.5, "halfExtents": [0.5, 0.5, 0.5], "backend": "gpu"},
+    {"shape": "mesh", "kinematic": true, "restitution": 0.2, "friction": 0.6, "backend": "gpu"},
+    {"shape": "sphere", "mass": 1.0, "restitution": 0.3, "friction": 0.5, "radius": 1.0, "backend": "gpu"},
+    {"shape": "box", "mass": 1.0, "restitution": 0.05, "friction": 0.6, "halfExtents": [1.0, 1.0, 1.0], "backend": "gpu"}
+  ],
+  "fluids": [],
+  "objects": [
+    {"name": "태양", "parent": -1, "position": [0, 5, 0], "rotation": [-0.383, 0.0, 0.0, 0.924], "scale": [1, 1, 1], "visible": true, "light": 0},
+    {"name": "바닥", "parent": -1, "position": [0.0, 0.0, 0.0], "rotation": [0, 0, 0, 1], "scale": [6.0, 1.0, 6.0], "visible": true, "model": 0, "mesh": 0, "skin": -1, "rigidBody": 0},
+    {"name": "선 원기둥", "parent": -1, "position": [-2.5, 1.0, 0.0], "rotation": [0, 0, 0, 1], "scale": [0.3, 0.5, 0.3], "visible": true, "model": 1, "mesh": 0, "skin": -1, "rigidBody": 1},
+    {"name": "누운 원기둥", "parent": -1, "position": [-2.5, 1.2, 1.5], "rotation": [0, 0, 0.7071, 0.7071], "scale": [0.25, 0.6, 0.25], "visible": true, "model": 1, "mesh": 0, "skin": -1, "rigidBody": 2},
+    {"name": "선 캡슐", "parent": -1, "position": [-1.0, 1.5, 0.0], "rotation": [0, 0, 0, 1], "scale": [0.6, 0.6, 0.6], "visible": true, "model": 2, "mesh": 0, "skin": -1, "rigidBody": 3},
+    {"name": "누운 캡슐", "parent": -1, "position": [-1.0, 1.2, 1.5], "rotation": [0.7071, 0, 0, 0.7071], "scale": [0.6, 0.6, 0.6], "visible": true, "model": 2, "mesh": 0, "skin": -1, "rigidBody": 4},
+    {"name": "토러스 지형", "parent": -1, "position": [1.5, 0.3, 0.0], "rotation": [0, 0, 0, 1], "scale": [1.5, 1.5, 1.5], "visible": true, "model": 3, "mesh": 0, "skin": -1, "rigidBody": 5},
+    {"name": "공", "parent": -1, "position": [2.6, 2.5, 0.0], "rotation": [0, 0, 0, 1], "scale": [0.25, 0.25, 0.25], "visible": true, "model": 4, "mesh": 0, "skin": -1, "rigidBody": 6},
+    {"name": "상자", "parent": -1, "position": [0.9, 2.5, 0.6], "rotation": [0, 0, 0, 1], "scale": [0.2, 0.2, 0.2], "visible": true, "model": 5, "mesh": 0, "skin": -1, "rigidBody": 7}
+  ]
+}

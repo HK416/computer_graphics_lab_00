@@ -36,11 +36,12 @@ struct GpuRigidBody {
     glm::vec4 preVelocity{0.0F};
     glm::vec4 preAngularVelocity{0.0F};
     glm::vec4 inverseInertia{0.0F}; // xyz 지역 축 관성 역수, w 반발 계수
-    glm::vec4 halfExtents{0.0F};    // xyz 상자 반쪽 크기, w 마찰 계수
+    glm::vec4 halfExtents{0.0F};    // xyz 상자 반쪽 크기(원기둥·캡슐은 y 반높이), w 마찰 계수
     uint32_t shape = 0;
     uint32_t flags = 0;
-    uint32_t pad0 = 0;
-    uint32_t pad1 = 0;
+    // 메쉬 콜라이더의 세계 공간 삼각형 구간(triangles 버퍼 기준).
+    uint32_t triangleOffset = 0;
+    uint32_t triangleCount = 0;
 };
 static_assert(sizeof(GpuRigidBody) == 144, "강체 배치가 셰이더와 어긋난다");
 
@@ -48,6 +49,7 @@ static_assert(sizeof(GpuRigidBody) == 144, "강체 배치가 셰이더와 어긋
 struct RigidPushConstants {
     VkDeviceAddress bodiesIn = 0;
     VkDeviceAddress bodiesOut = 0;
+    VkDeviceAddress triangles = 0;
     uint32_t bodyCount = 0;
     float dt = 0.0F;
     float gravity = -9.81F;
@@ -55,7 +57,7 @@ struct RigidPushConstants {
     float penetrationSlop = 0.005F;
     float restitutionThreshold = 1.0F;
 };
-static_assert(sizeof(RigidPushConstants) == 40, "강체 푸시 상수 배치가 셰이더와 어긋난다");
+static_assert(sizeof(RigidPushConstants) == 48, "강체 푸시 상수 배치가 셰이더와 어긋난다");
 
 // 강체 GPU 솔버. CPU 솔버와 같은 함수(physics::collectRigidBodies)로 세계 상태를 펴 컴퓨트로 풀고,
 // 결과를 되읽어 오브젝트 변환에 되쓴다.
@@ -97,6 +99,7 @@ public:
 private:
     void createPipelines();
     void reserveBuffers(uint32_t count);
+    void reserveTriangles(uint32_t count);
     // 이번에 모은 상태를 GPU 로 보낼 모습으로 편다.
     void buildUpload();
     // 편집기가 손댄 것이 있는지. 적분이 바꾸는 값(위치·회전·속도)은 오차를 봐주고 나머지는 그대로
@@ -109,6 +112,8 @@ private:
 
     // 이번 프레임에 푸는 강체의 세계 상태. 되쓰기가 오브젝트 번호를 여기서 읽는다.
     std::vector<physics::RigidBodyState> bodies;
+    // 메쉬 콜라이더의 세계 공간 삼각형. 강체와 함께 올린다(메쉬는 운동학이라 편집기가 손댈 때만 바뀐다).
+    std::vector<physics::Triangle> triangles;
     std::vector<GpuRigidBody> upload;
     // GPU 가 들고 있다고 믿는 상태. 되읽기 결과와 마지막 업로드를 합친 것이다. 이번에 모은 것과 견줘
     // 편집기가 손댄 것을 알아챈다.
@@ -121,12 +126,16 @@ private:
     uint32_t stepCount = 0;
     float stepSeconds = 0.0F;
     uint32_t capacity = 0;
+    uint32_t triangleCapacity = 0;
 
     // 읽는 쪽과 쓰는 쪽을 번갈아 쓴다.
     std::array<Buffer, 2> bodyBuffers;
     // 업로드 스테이징은 프레임마다 하나다. 하나로 두면 아직 복사 중인 지난 프레임의 것을 덮어쓴다.
     std::array<Buffer, RIGID_READBACK_SLOTS> stagings;
     std::array<Buffer, RIGID_READBACK_SLOTS> readbacks;
+    // 메쉬 콜라이더 삼각형. 장치 버퍼 하나와 프레임마다의 스테이징.
+    Buffer triangleBuffer;
+    std::array<Buffer, RIGID_READBACK_SLOTS> triangleStagings;
     // 슬롯마다 «어느 프레임이 채웠는지»와 «몇 개인지». 프레임이 끝난 슬롯만 읽는다.
     std::array<uint64_t, RIGID_READBACK_SLOTS> readbackFrame{};
     std::array<uint32_t, RIGID_READBACK_SLOTS> readbackCount{};

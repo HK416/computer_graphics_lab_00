@@ -39,15 +39,7 @@ void main() {
             }
         }
 
-        // 접촉은 늘 (구, 무엇이든) 또는 (상자, 상자/평면) 순으로 만든다. 자기가 상자이고 상대가
-        // 구이면 순서를 바꿔 만든 뒤 법선을 뒤집는다. 평면은 정적이라 self 가 될 수 없다.
-        RigidManifold manifold;
-        if (self.shape == RIGID_SHAPE_SPHERE || other.shape != RIGID_SHAPE_SPHERE) {
-            manifold = rigidCollide(self, other);
-        } else {
-            manifold = rigidCollide(other, self);
-            manifold.normal = -manifold.normal;
-        }
+        RigidManifold manifold = rigidCollide(self, other);
         if (manifold.count == 0) {
             continue;
         }
@@ -56,7 +48,7 @@ void main() {
         // 않고 통째로 한쪽으로 가속한다. 번호로 갈라 서로 반대쪽으로 민다.
         vec3 between = other.position.xyz - self.position.xyz;
         if (dot(between, between) < 1.0e-12) {
-            manifold.normal = i < j ? vec3(0.0, 1.0, 0.0) : vec3(0.0, -1.0, 0.0);
+            manifold = overrideNormal(manifold, i < j ? vec3(0.0, 1.0, 0.0) : vec3(0.0, -1.0, 0.0));
         }
 
         float totalInverseMass = self.position.w + other.position.w;
@@ -71,29 +63,30 @@ void main() {
 
         for (int c = 0; c < manifold.count; ++c) {
             vec3 point = manifold.points[c];
+            vec3 normal = manifold.normals[c];
             vec3 armSelf = point - self.position.xyz;
             vec3 armOther = point - other.position.xyz;
 
             // 반발 목표는 반복 전 속도로 잰다.
             vec3 preSelf = self.preVelocity.xyz + cross(self.preAngularVelocity.xyz, armSelf);
             vec3 preOther = other.preVelocity.xyz + cross(other.preAngularVelocity.xyz, armOther);
-            float preClosing = dot(preOther - preSelf, manifold.normal);
+            float preClosing = dot(preOther - preSelf, normal);
             float restitutionTarget = preClosing < -push.restitutionThreshold ? -restitution * preClosing : 0.0;
 
             vec3 velocitySelf = self.velocity.xyz + cross(self.angularVelocity.xyz, armSelf);
             vec3 velocityOther = other.velocity.xyz + cross(other.angularVelocity.xyz, armOther);
             vec3 relative = velocityOther - velocitySelf;
 
-            vec3 torqueSelf = cross(armSelf, manifold.normal);
-            vec3 torqueOther = cross(armOther, manifold.normal);
+            vec3 torqueSelf = cross(armSelf, normal);
+            vec3 torqueOther = cross(armOther, normal);
             float angular = dot(torqueSelf, inertiaSelf * torqueSelf) + dot(torqueOther, inertiaOther * torqueOther);
             float effectiveMass = 1.0 / (totalInverseMass + angular);
 
-            float closing = dot(relative, manifold.normal);
+            float closing = dot(relative, normal);
             float lambda = max(effectiveMass * (-closing + restitutionTarget), 0.0) * share;
             // 법선은 self 에서 other 를 향하므로 self 는 반대로 밀린다.
-            deltaLinear -= manifold.normal * lambda * self.position.w;
-            deltaAngular -= inertiaSelf * cross(armSelf, manifold.normal * lambda);
+            deltaLinear -= normal * lambda * self.position.w;
+            deltaAngular -= inertiaSelf * cross(armSelf, normal * lambda);
 
             // 마찰. 접선 속도를 줄이되 쿨롱 원뿔 안에서만.
             //
@@ -103,7 +96,7 @@ void main() {
             // 한계가 넉넉해도 과하게 걸리지 않는다.
             // ponytail: CPU 는 실제로 쌓인 임펄스를 쓴다. 여기서는 어림값이라 수치가 완전히 같지 않다.
             float coneLambda = max(effectiveMass * (-preClosing + restitutionTarget), 0.0) * share;
-            vec3 tangent = relative - manifold.normal * closing;
+            vec3 tangent = relative - normal * closing;
             float tangentSpeed = length(tangent);
             if (tangentSpeed > 1.0e-6) {
                 tangent /= tangentSpeed;

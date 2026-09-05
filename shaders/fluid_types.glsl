@@ -14,17 +14,22 @@
 // 물 표면 패스의 작업 그룹 한 변. src/gfx/fluid.h 의 FLUID_SURFACE_GROUP_SIZE 와 같아야 디스패치 수가 맞는다.
 #define FLUID_SURFACE_GROUP_SIZE 4
 
-#define FLUID_COLLIDER_SPHERE 0u
-#define FLUID_COLLIDER_BOX 1u
-#define FLUID_COLLIDER_PLANE 2u
+#include "collider_shapes.glsl"
+
+// scene::ColliderShape 와 같은 번호. collider_shapes.glsl 이 정의를 갖는다.
+#define FLUID_COLLIDER_SPHERE COLLIDER_SHAPE_SPHERE
+#define FLUID_COLLIDER_BOX COLLIDER_SHAPE_BOX
+#define FLUID_COLLIDER_PLANE COLLIDER_SHAPE_PLANE
+#define FLUID_COLLIDER_CYLINDER COLLIDER_SHAPE_CYLINDER
+#define FLUID_COLLIDER_CAPSULE COLLIDER_SHAPE_CAPSULE
 
 // 입자 인스턴스가 지난 위치 대신 현재 위치를 이전 변환으로 쓴다(히스토리 없음).
 #define FLUID_FLAG_RESET_HISTORY 1u
 // 상위 가속 구조 인스턴스도 쓴다. 광선 기능이 켜져 있고 구의 하위 구조가 있을 때만 선다.
 #define FLUID_FLAG_WRITE_TLAS 2u
 
-// 강체 하나. 구: data0.xyz 중심, w 반지름. 상자: data0.xyz 반쪽 크기, inverseWorld 로 지역 공간에서 판정.
-// 평면: data0.xyz 법선, w = dot(법선, 평면 위 점).
+// 강체 하나. data0.xyz 반쪽 크기(원기둥·캡슐은 y 가 반높이), w 반지름. world/inverseWorld 로 지역
+// 공간에서 판정한다(collider_shapes.glsl). 메쉬 콜라이더는 넘어오지 않는다.
 struct FluidCollider {
     vec4 data0;
     mat4 inverseWorld;

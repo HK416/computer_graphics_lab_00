@@ -15,6 +15,10 @@ Vulkan 1.3 기반 실시간 렌더러. mesh shader 경로와 하드웨어 경로
 
 주석, 로그 문자열, 커밋 메시지, 문서는 모두 **한국어**다. 식별자만 영어다. 새 코드도 같게 쓴다.
 
+편집기 UI 의 기술 이름은 **영문 표기가 더 자연스러우면 영문**으로 적는다(Path Tracing, Ray Query,
+Upscaling, Mesh Renderer, Frustum Culling 처럼). 설명 문장과 일반 명사(강체, 유체, 반지름, 바닥)는
+한국어다.
+
 `// ponytail:` 은 알려진 한계와 후속 작업을 적는 이 저장소의 표식이다. 타협을 남길 때 같은 표식을 쓴다.
 
 ## 명령
@@ -108,8 +112,10 @@ include 순서는 clang-format 이 재그룹핑으로 강제한다: 짝꿍 헤�
    grep -rlP '^\xEF\xBB\xBF' src shaders       # 비어야 한다
    ```
 
-4. **코드 리뷰.** 커밋 전에 diff 를 한 번 리뷰(에이전트 또는 사람)하고 지적을 반영한다.
-5. **커밋.** 제목은 한국어 한 줄, 필요하면 본문. `Co-Authored-By` 같은 꼬릿말은 적지 않는다.
+4. **코드 리뷰.** 커밋 전에 diff 를 한 번 리뷰(에이전트 또는 사람)하고 지적을 반영한다. 간단해도 건너뛰지
+   않는다. 지적은 고치거나 `// ponytail:` 로 남긴다.
+5. **커밋.** 제목은 한국어 한 줄, 필요하면 본문. `Co-Authored-By` 같은 꼬릿말은 적지 않는다. 큼직한 구현이
+   끝났으면 다음 작업으로 넘어가기 전에 반드시 커밋한다.
 
 빌드는 VS 개발자 환경이 필요하다. PowerShell 에서:
 
@@ -120,6 +126,15 @@ cmd /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliar
 ### 설계 원칙
 
 이 저장소는 **mesh shader 경로와 하드웨어 광선 추적의 융합**을 살피기 위한 것이다. 기능을 넣을 때:
+
+- **병렬화할 수 있는 것은 병렬화한다.** 프레임 CPU 작업(컬링 준비, 애니메이션, 장면 비교, 물리 적분·광역
+  검사)은 `core::JobSystem` 에 나눈다. 순서가 필요한 부분만 직렬로 남기고 그 이유를 적는다.
+- **공유 상태는 잠금 없는 구조를 먼저 쓴다.** 원자 카운터로 채우는 미리 잡은 배열, `std::atomic_ref`
+  격자, `core::LockFreeQueue` 가 그 예다. 뮤텍스는 그 방법이 안 될 때만 쓰고 이유를 적는다.
+- **하드웨어 가속 경로가 있으면 그것을 우선한다.** 광선 질의·가속 구조·mesh shader·컴퓨트가 있으면
+  그 경로를 기본으로 두고, 고전 경로는 비교·폴백용이다.
+- **설정 기본값은 장치 능력에 맞춘다.** `gfx::HardwareProfile`(자동 튜닝)이 기기 등급에 따라 렌더 배율·
+  반사·업스케일러를 고른다. 새 기능의 기본값도 여기에 등급별로 넣는다.
 
 - 재질 평가, 표면 복원, 환경광, 안개처럼 «표면이 어떻게 보이는가»를 정하는 코드는 **두 경로가 같은
   `.glsl` 함수를 쓴다.** 한쪽에만 넣거나 복사해 두 벌로 만들지 않는다.
@@ -187,7 +202,9 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `GpuLight` (`src/gfx/renderer.h`) | `Light` (`scene_types.glsl`) |
 | `GpuFluidCollider` `GpuFluidParams` `FluidPushConstants` (`src/gfx/fluid.h`) | `FluidCollider` `FluidParams` `FluidPushConstants` (`shaders/fluid_common.glsl`) |
 | `GpuRigidBody` `RigidPushConstants` (`src/gfx/rigid_body_gpu.h`) | `RigidBody` `RigidPushConstants` (`shaders/rigid_common.glsl`) |
+| `physics::Triangle` (`src/physics/rigid_body.h`) | `RigidTriangle` (`rigid_common.glsl`) |
 | `collideBoxBox` 등 접촉 생성 (`src/physics/rigid_body.cpp`) | `rigidCollide` (`shaders/rigid_common.glsl`) |
+| 모양 기하 `closestOn*Local` `probePointLocal` `closestOnTriangleSurface` (`src/physics/collider_shapes.h`) | 동명 함수 (`shaders/collider_shapes.glsl`) |
 | `physics::MAX_MANIFOLD_POINTS` (`src/physics/rigid_body.h`) | `RIGID_MAX_MANIFOLD` (`rigid_common.glsl`) |
 | `FluidSurfacePushConstants` (`src/gfx/fluid.h`) | 동명 블록 (`shaders/fluid_surface_common.glsl`) |
 | `FluidDrawPushConstants` (`src/gfx/renderer.cpp`) | 동명 블록 (`shaders/fluid_draw_common.glsl`) |
@@ -201,7 +218,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 강체 솔버 상수(`GRAVITY` `POSITION_CORRECTION` `PENETRATION_SLOP` `RESTITUTION_THRESHOLD`
 `POSITION_ITERATIONS`)는 `src/physics/rigid_body.h` 한 곳에만 두고 GPU 쪽은 푸시 상수로 실어 보낸다.
 두 벌로 두면 백엔드를 바꿀 때 거동이 갈린다.
-| `scene::ColliderShape` (`src/scene/scene.h`) | `FLUID_COLLIDER_*` (`fluid_common.glsl`) |
+| `scene::ColliderShape` (`src/scene/scene.h`) | `COLLIDER_SHAPE_*` (`collider_shapes.glsl`; `RIGID_SHAPE_*` `FLUID_COLLIDER_*` 는 그 별칭) |
 
 | `Options::debugMode`, `Renderer::debugMode` | `DEBUG_MODE_*` (`scene_types.glsl`) |
 | `DebugLineVertex` (`src/gfx/debug_lines.h`), `DebugLinePushConstants` (`renderer.cpp`) | 동명 구조체 (`shaders/debug_line_common.glsl`) |

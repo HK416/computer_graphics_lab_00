@@ -668,7 +668,7 @@ std::vector<Renderer::TargetView> Renderer::targetViews() const {
     bool raster = !pathTracing;
     bool occlusion = raster && occlusionCulling && (useMeshPath() || useComputeCulling);
     std::vector<TargetView> views{
-        {"표시 (업스케일)", {targets.present.view}, READ_ONLY, currentDisplayExtent},
+        {"표시 (Upscaling)", {targets.present.view}, READ_ONLY, currentDisplayExtent},
         {"색상 (HDR)", {targets.color.view}, READ_ONLY, render, nullptr, raster},
         {"경로 추적 누적", {targets.pathAccumulation.view}, GENERAL, render, nullptr, pathTracing},
         {"톤 매핑", {targets.tonemapped.view}, READ_ONLY, render, nullptr, !temporal},

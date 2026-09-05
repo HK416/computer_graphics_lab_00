@@ -88,6 +88,10 @@ RigidBodySimulator::~RigidBodySimulator() {
     for (Buffer& buffer : readbacks) {
         destroyBuffer(context, buffer);
     }
+    for (Buffer& buffer : triangleStagings) {
+        destroyBuffer(context, buffer);
+    }
+    destroyBuffer(context, triangleBuffer);
     for (VkPipeline pipeline : {integratePipeline, solvePipeline, finishPipeline}) {
         vkDestroyPipeline(context.device, pipeline, nullptr);
     }
@@ -142,6 +146,27 @@ void RigidBodySimulator::reserveBuffers(uint32_t count) {
         readbackCount[slot] = 0;
     }
     capacity = wanted;
+}
+
+void RigidBodySimulator::reserveTriangles(uint32_t count) {
+    if (count <= triangleCapacity) {
+        return;
+    }
+    uint32_t wanted = std::max(count, triangleCapacity * 2);
+    VkDeviceSize bytes = static_cast<VkDeviceSize>(wanted) * sizeof(physics::Triangle);
+    context.retireBuffer(triangleBuffer);
+    triangleBuffer = createBuffer(context,
+                                  bytes,
+                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                      VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                  MemoryLocation::DEVICE,
+                                  "강체 메쉬 삼각형");
+    for (Buffer& staging : triangleStagings) {
+        context.retireBuffer(staging);
+        staging = createBuffer(
+            context, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, MemoryLocation::HOST_WRITE, "강체 메쉬 삼각형 업로드");
+    }
+    triangleCapacity = wanted;
 }
 
 bool RigidBodySimulator::applyReadback(scene::Scene& scene, uint64_t completedFrames) {
@@ -225,6 +250,8 @@ void RigidBodySimulator::buildUpload() {
         target.halfExtents = glm::vec4{body.halfExtents, body.friction};
         target.shape = static_cast<uint32_t>(body.shape);
         target.flags = body.useGravity ? 1U : 0U;
+        target.triangleOffset = body.triangleOffset;
+        target.triangleCount = body.triangleCount;
     }
 }
 
@@ -249,7 +276,8 @@ bool RigidBodySimulator::sceneEdited() const {
         }
         // 나머지는 인스펙터가 정하는 값이다. 모양·질량·반발을 고친 것이 GPU 에 가려면 여기서 걸려야 한다.
         if (!nearlyEqual(want.inverseInertia, have.inverseInertia) ||
-            !nearlyEqual(want.halfExtents, have.halfExtents) || want.shape != have.shape || want.flags != have.flags) {
+            !nearlyEqual(want.halfExtents, have.halfExtents) || want.shape != have.shape || want.flags != have.flags ||
+            want.triangleOffset != have.triangleOffset || want.triangleCount != have.triangleCount) {
             return true;
         }
     }
@@ -269,7 +297,7 @@ void RigidBodySimulator::prepare(const scene::Scene& scene, uint32_t steps, floa
     if (&scene != readbackScene || scene.componentRevision() != readbackComponents) {
         invalidate();
     }
-    physics::collectRigidBodies(scene, scene::SimulationBackend::GPU, bodies);
+    physics::collectRigidBodies(scene, scene::SimulationBackend::GPU, bodies, triangles);
     readbackScene = &scene;
     readbackComponents = scene.componentRevision();
     if (bodies.empty()) {
@@ -277,6 +305,8 @@ void RigidBodySimulator::prepare(const scene::Scene& scene, uint32_t steps, floa
         return;
     }
     reserveBuffers(static_cast<uint32_t>(bodies.size()));
+    // 메쉬가 없어도 주소가 유효해야 한다. 삼각형 0 개면 셰이더가 읽지 않는다.
+    reserveTriangles(std::max<uint32_t>(1, static_cast<uint32_t>(triangles.size())));
 
     buildUpload();
     // 구성이 바뀌었거나 편집기가 손댔으면 GPU 상태를 버리고 장면 값으로 다시 시작한다.
@@ -301,9 +331,10 @@ void RigidBodySimulator::record(VkCommandBuffer commandBuffer, uint64_t frameInd
 
     // 지난 프레임의 마지막 명령은 bodyBuffers[0] → 되읽기 복사다. 아래 두 쓰기(업로드 복사, 적분
     // 디스패치)가 그것을 앞지르지 않게 막는다. 프레임을 넘는 WAR 이라 제출 순서만으로는 부족하다.
+    // 메쉬 삼각형 버퍼는 지난 프레임의 컴퓨트가 읽었으므로 그 단계도 앞선 쪽에 넣는다.
     VkMemoryBarrier2 entryBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-    entryBarrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-    entryBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    entryBarrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    entryBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
     entryBarrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     entryBarrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
     VkDependencyInfo entryDependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
@@ -325,6 +356,14 @@ void RigidBodySimulator::record(VkCommandBuffer commandBuffer, uint64_t frameInd
         dependency.memoryBarrierCount = 1;
         dependency.pMemoryBarriers = &barrier;
         vkCmdPipelineBarrier2(commandBuffer, &dependency);
+        // 메쉬 콜라이더 삼각형도 같은 배리어 아래서 올린다. 메쉬는 운동학이라 편집기가 손댔을 때만 온다.
+        if (!triangles.empty()) {
+            VkDeviceSize triangleBytes = static_cast<VkDeviceSize>(triangles.size()) * sizeof(physics::Triangle);
+            std::memcpy(triangleStagings[slot].mapped, triangles.data(), triangleBytes);
+            VkBufferCopy triangleRegion{0, 0, triangleBytes};
+            vkCmdCopyBuffer(commandBuffer, triangleStagings[slot].handle, triangleBuffer.handle, 1, &triangleRegion);
+            vkCmdPipelineBarrier2(commandBuffer, &dependency);
+        }
         uploadPending = false;
     }
 
@@ -340,6 +379,7 @@ void RigidBodySimulator::record(VkCommandBuffer commandBuffer, uint64_t frameInd
     push.positionCorrection = physics::POSITION_CORRECTION;
     push.penetrationSlop = physics::PENETRATION_SLOP;
     push.restitutionThreshold = physics::RESTITUTION_THRESHOLD;
+    push.triangles = triangleBuffer.address;
     auto dispatch = [&](VkPipeline pipeline) {
         push.bodiesIn = bodyBuffers[source].address;
         push.bodiesOut = bodyBuffers[source ^ 1U].address;

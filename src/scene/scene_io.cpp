@@ -55,7 +55,8 @@ LightType toLightType(const std::string& name) {
     return LightType::DIRECTIONAL;
 }
 
-constexpr std::array<const char*, 3> SHAPE_NAMES{"sphere", "box", "plane"};
+constexpr std::array<const char*, COLLIDER_SHAPE_COUNT> SHAPE_NAMES{
+    "sphere", "box", "plane", "cylinder", "capsule", "mesh"};
 constexpr std::array<const char*, 3> BACKEND_NAMES{"auto", "cpu", "gpu"};
 
 SimulationBackend toBackend(const std::string& name) {

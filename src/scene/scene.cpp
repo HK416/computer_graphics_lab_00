@@ -208,8 +208,24 @@ ColliderPose colliderPose(const RigidBody& body, const glm::mat4& world) {
     // 구는 한 배율만 받을 수 있어 가장 큰 축을 쓴다. 그러지 않으면 눌린 배율에서 콜라이더가 메쉬를
     // 뚫고 나온다.
     pose.radius = body.radius * std::max({transform.scale.x, transform.scale.y, transform.scale.z});
+    if (body.shape == ColliderShape::CYLINDER || body.shape == ColliderShape::CAPSULE) {
+        // 축이 Y 라 둥근 단면은 X·Z 배율만 받는다.
+        pose.radius = body.radius * std::max(transform.scale.x, transform.scale.z);
+    }
     pose.halfExtents = body.halfExtents * transform.scale;
+    pose.scale = transform.scale;
     return pose;
+}
+
+const ColliderMesh* Scene::colliderMesh(uint32_t index) const {
+    if (colliderMeshes == nullptr) {
+        return nullptr;
+    }
+    uint32_t mesh = meshOf(index);
+    if (mesh == INVALID_MESH || mesh >= colliderMeshes->size() || (*colliderMeshes)[mesh].empty()) {
+        return nullptr;
+    }
+    return &(*colliderMeshes)[mesh];
 }
 
 void Scene::refresh(core::JobSystem* jobs) {
