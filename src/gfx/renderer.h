@@ -57,6 +57,7 @@ inline constexpr uint32_t DEBUG_MODE_VELOCITY = 8;
 inline constexpr uint32_t DEBUG_MODE_CULL_PHASE = 9;
 inline constexpr uint32_t DEBUG_MODE_REFLECTION_RAW = 10;
 inline constexpr uint32_t DEBUG_MODE_REFLECTION = 11;
+inline constexpr uint32_t DEBUG_MODE_REFLECTION_FILTERED = 12;
 
 // 경로 추적이 그릴 수 있는 디버그 뷰인지. meshlet 과 LOD 는 하위 가속 구조가 메쉬 단위 LOD 0 이라
 // 개념 자체가 없고, 캐스케이드는 그림자 맵을 읽지 않으며, 모션 벡터는 경로 추적 프레임에 갱신되지
@@ -203,6 +204,15 @@ struct RenderTargets {
     uint32_t reflectionRawStorageSlot = 0;
     std::array<uint32_t, 2> reflectionHistorySlots{};
     std::array<uint32_t, 2> reflectionHistoryStorageSlots{};
+    // 디노이저: 휘도 모멘트·지난 깊이·노멀(rgba32f, 더블 버퍼)과 à-trous 중간 결과.
+    std::array<Image, 2> reflectionMoments;
+    Image reflectionFiltered;
+    std::array<uint32_t, 2> reflectionMomentsSlots{};
+    std::array<uint32_t, 2> reflectionMomentsStorageSlots{};
+    uint32_t reflectionFilteredSlot = 0;
+    uint32_t reflectionFilteredStorageSlot = 0;
+    // 반사 셰이더가 읽는 슬롯 묶음(ReflectSlots). 프레임 홀짝마다 하나. 슬롯을 배정할 때 채운다.
+    std::array<Buffer, 2> reflectSlotBuffers;
     // 반사 컴퓨트가 HDR 색상에 직접 더할 때 쓰는 rgba16f 스토리지 슬롯.
     uint32_t colorStorageSlot = 0;
 
@@ -483,6 +493,7 @@ private:
     VkPipelineLayout reflectionPipelineLayout = VK_NULL_HANDLE;
     VkPipeline reflectionTracePipeline = VK_NULL_HANDLE;
     VkPipeline reflectionResolvePipeline = VK_NULL_HANDLE;
+    VkPipeline reflectionFilterPipeline = VK_NULL_HANDLE;
     // 지난 프레임에 반사 히스토리를 남겼는지. 아니면 이번 해결은 히스토리를 버린다.
     bool reflectionHistoryValid = false;
     VkPipelineLayout bloomPipelineLayout = VK_NULL_HANDLE;

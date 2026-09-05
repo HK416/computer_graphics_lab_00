@@ -164,6 +164,14 @@ void Renderer::createRenderTargets() {
     targets.reflectionRaw = createImage(context, reflectionDesc, "반사 원본");
     targets.reflectionHistory[0] = createImage(context, reflectionDesc, "반사 누적 0");
     targets.reflectionHistory[1] = createImage(context, reflectionDesc, "반사 누적 1");
+    destroyImage(context, targets.reflectionFiltered);
+    targets.reflectionFiltered = createImage(context, reflectionDesc, "반사 필터");
+    ImageDesc momentsDesc = reflectionDesc;
+    momentsDesc.format = ACCUMULATION_FORMAT;
+    for (size_t i = 0; i < 2; ++i) {
+        destroyImage(context, targets.reflectionMoments[i]);
+        targets.reflectionMoments[i] = createImage(context, momentsDesc, i == 0 ? "반사 모멘트 0" : "반사 모멘트 1");
+    }
     reflectionHistoryValid = false;
 
     destroyImage(context, targets.pathAccumulation);
@@ -337,6 +345,20 @@ void Renderer::createRenderTargets() {
                 bindless.add(targets.reflectionHistory[i].view, linearSampler, VK_IMAGE_LAYOUT_GENERAL);
             targets.reflectionHistoryStorageSlots[i] =
                 bindless.addStorageImageRgba16(targets.reflectionHistory[i].view);
+            // 모멘트는 되짚은 자리를 점 샘플로 읽는다. 비트로 담은 노멀이 보간되면 깨진다.
+            targets.reflectionMomentsSlots[i] =
+                bindless.add(targets.reflectionMoments[i].view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+            targets.reflectionMomentsStorageSlots[i] = bindless.addStorageImageRgba(targets.reflectionMoments[i].view);
+        }
+        targets.reflectionFilteredSlot =
+            bindless.add(targets.reflectionFiltered.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        targets.reflectionFilteredStorageSlot = bindless.addStorageImageRgba16(targets.reflectionFiltered.view);
+        for (Buffer& buffer : targets.reflectSlotBuffers) {
+            buffer = createBuffer(context,
+                                  sizeof(ReflectSlots),
+                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                  MemoryLocation::HOST_WRITE,
+                                  "반사 슬롯");
         }
         targets.pathAccumulationStorageSlot = bindless.addStorageImageRgba(targets.pathAccumulation.view);
         targets.pathAccumulationSampledSlot =
@@ -359,6 +381,29 @@ void Renderer::createRenderTargets() {
                 bindless.add(targets.bloomMipViews[level], linearSampler, VK_IMAGE_LAYOUT_GENERAL);
         }
         targets.slotsAllocated = true;
+        // 반사 셰이더의 슬롯 묶음. 슬롯 번호는 처음 배정 뒤 바뀌지 않지만 뷰는 갈아 끼우므로 매번 다시 채워도 같다.
+        for (size_t parity = 0; parity < 2; ++parity) {
+            size_t write = parity;
+            size_t read = parity ^ 1;
+            ReflectSlots slots{};
+            slots.normalRoughness = targets.guideNormalSlot;
+            slots.weight = targets.guideSpecularAlbedoSlot;
+            slots.depth = targets.depthSlot;
+            slots.velocity = targets.velocitySlot;
+            slots.rawTexture = targets.reflectionRawSlot;
+            slots.rawStorage = targets.reflectionRawStorageSlot;
+            slots.historyTexture = targets.reflectionHistorySlots[read];
+            slots.historyStorage = targets.reflectionHistoryStorageSlots[write];
+            slots.historyCurrentTexture = targets.reflectionHistorySlots[write];
+            slots.momentsTexture = targets.reflectionMomentsSlots[read];
+            slots.momentsStorage = targets.reflectionMomentsStorageSlots[write];
+            slots.momentsCurrentTexture = targets.reflectionMomentsSlots[write];
+            slots.filteredTexture = targets.reflectionFilteredSlot;
+            slots.filteredStorage = targets.reflectionFilteredStorageSlot;
+            slots.colorStorage = targets.colorStorageSlot;
+            std::memcpy(targets.reflectSlotBuffers[parity].mapped, &slots, sizeof(slots));
+            vmaFlushAllocation(context.allocator, targets.reflectSlotBuffers[parity].allocation, 0, VK_WHOLE_SIZE);
+        }
     } else {
         bindless.update(targets.colorSlot, targets.color.view, postSampler);
         bindless.update(targets.accumulationSlot, targets.oitAccumulation.view, postSampler);
@@ -388,7 +433,16 @@ void Renderer::createRenderTargets() {
                             VK_IMAGE_LAYOUT_GENERAL);
             bindless.updateStorageImageRgba16(targets.reflectionHistoryStorageSlots[i],
                                               targets.reflectionHistory[i].view);
+            bindless.update(targets.reflectionMomentsSlots[i],
+                            targets.reflectionMoments[i].view,
+                            postSampler,
+                            VK_IMAGE_LAYOUT_GENERAL);
+            bindless.updateStorageImageRgba(targets.reflectionMomentsStorageSlots[i],
+                                            targets.reflectionMoments[i].view);
         }
+        bindless.update(
+            targets.reflectionFilteredSlot, targets.reflectionFiltered.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        bindless.updateStorageImageRgba16(targets.reflectionFilteredStorageSlot, targets.reflectionFiltered.view);
         bindless.updateStorageImageRgba(targets.pathAccumulationStorageSlot, targets.pathAccumulation.view);
         bindless.update(
             targets.pathAccumulationSampledSlot, targets.pathAccumulation.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
@@ -444,7 +498,9 @@ const char* Renderer::debugModeBlockedReason(uint32_t mode) const {
     if (settings.usePathTracing && rayTracer != nullptr && !pathTraceSupportsDebugMode(mode)) {
         return "경로 추적에는 이 값이 없어 셰이딩으로 그린다";
     }
-    if ((mode == DEBUG_MODE_REFLECTION_RAW || mode == DEBUG_MODE_REFLECTION) && !rayQueryShadowsAvailable()) {
+    if ((mode == DEBUG_MODE_REFLECTION_RAW || mode == DEBUG_MODE_REFLECTION ||
+         mode == DEBUG_MODE_REFLECTION_FILTERED) &&
+        !rayQueryShadowsAvailable()) {
         return "광선 질의가 없어 반사를 계산하지 않는다";
     }
     // mesh shader 경로는 meshlet 번호를 mesh 셰이더가 직접 넘기므로 gl_DrawID 가 필요 없다.

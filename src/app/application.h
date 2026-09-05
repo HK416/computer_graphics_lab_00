@@ -65,6 +65,8 @@ struct Options {
     // 높은 등급에서 자동 튜닝이 켜는 것도 막는다.
     bool reflections = false;
     bool reflectionsGiven = false;
+    // --no-denoise: 반사 디노이저를 끈다. 옛 누적 결과와 바이트로 견줄 때 쓴다.
+    bool reflectionDenoise = true;
     // 프레임마다 카메라를 이만큼(도) 궤도 회전한다. 정지 화면에서는 드러나지 않는 팝인을 재현한다.
     float orbitDegreesPerFrame = 0.0F;
     float triangleBudget = 0.0F;

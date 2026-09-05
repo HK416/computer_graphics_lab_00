@@ -64,6 +64,8 @@ int main(int argc, char* argv[]) {
         } else if (argument == "--no-reflections") {
             options.reflections = false;
             options.reflectionsGiven = true;
+        } else if (argument == "--no-denoise") {
+            options.reflectionDenoise = false;
         } else if (argument == "--no-colliders") {
             options.showColliders = false;
         } else if (argument == "--no-occlusion") {

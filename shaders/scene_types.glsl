@@ -233,9 +233,11 @@ struct DrawCommand {
 #define DEBUG_MODE_VELOCITY 8u
 // 두 패스 컬링에서 이 화소를 어느 패스가 그렸는지. 1차 초록, 2차 빨강, 오클루전 꺼짐 회색.
 #define DEBUG_MODE_CULL_PHASE 9u
-// 광선 반사. 원본은 이번 프레임 1표본, 누적은 시간축으로 섞은 결과. 반사 대상이 아닌 화소는 검다.
+// 광선 반사. 원본은 이번 프레임 1표본, 누적은 시간축으로 섞은 결과, 필터는 디노이저를 거친 결과(디노이저가
+// 꺼져 있으면 누적과 같다). 반사 대상이 아닌 화소는 검다.
 #define DEBUG_MODE_REFLECTION_RAW 10u
 #define DEBUG_MODE_REFLECTION 11u
+#define DEBUG_MODE_REFLECTION_FILTERED 12u
 
 // 두 패스 오클루전 컬링의 단계. 컬 컴퓨트·태스크 셰이더가 판정에 쓰고 프래그먼트가 디버그 뷰에 쓴다.
 #define CULL_PHASE_NONE 0u   // 오클루전 끔. 후보면 그린다.

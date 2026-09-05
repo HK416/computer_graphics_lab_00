@@ -1538,6 +1538,12 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         if (ImGui::SliderInt("누적 상한", &reflectionSamples, 1, 64)) {
             renderer.settings.reflectionMaxSamples = static_cast<uint32_t>(reflectionSamples);
         }
+        ImGui::Checkbox("Denoiser", &renderer.settings.reflectionDenoise);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "깊이·노멀로 히스토리를 검증하고, 매끈한 면은 히트 거리의 가상점으로 되짚고, 휘도 분산으로 "
+                "가중한 à-trous 필터를 세 번 돈다. 끄면 누적만 한다");
+        }
         ImGui::EndDisabled();
         ImGui::EndDisabled();
         if (rasterOnly) {
@@ -1808,7 +1814,8 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
                                                            "Motion Vector",
                                                            "Cull Pass",
                                                            "Reflection Raw",
-                                                           "Reflection Accumulated"};
+                                                           "Reflection Accumulated",
+                                                           "Reflection Filtered"};
         // Path Tracing이나 이 장치가 못 만드는 값은 개별로 잠그고 사유를 보인다.
         if (ImGui::BeginCombo("디버그 뷰", DEBUG_MODE_NAMES[renderer.settings.debugMode])) {
             for (uint32_t mode = 0; mode < IM_ARRAYSIZE(DEBUG_MODE_NAMES); ++mode) {

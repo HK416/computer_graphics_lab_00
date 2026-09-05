@@ -58,6 +58,9 @@ struct RenderSettings {
     float reflectionRoughnessCutoff = 0.6F;
     float reflectionIntensity = 1.0F;
     uint32_t reflectionMaxSamples = 16;
+    // 반사 디노이저: 깊이·노멀로 히스토리를 검증하고, 매끈한 면은 히트 거리의 가상점으로 되짚고, 휘도 분산으로
+    // 가중한 à-trous 를 세 번 돈다. 끄면 옛 누적만 한다(바이트 동일).
+    bool reflectionDenoise = true;
     // 장면 반지름에 대한 비율. 장면 크기가 제각각이라 절대 길이로 두지 않는다.
     float ssaoRadius = 0.04F;
     float ssaoIntensity = 1.0F;

@@ -36,6 +36,8 @@ void Renderer::createReflectionPipelines() {
     VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &info, nullptr, &reflectionTracePipeline));
     stage = 1;
     VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &info, nullptr, &reflectionResolvePipeline));
+    stage = 2;
+    VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &info, nullptr, &reflectionFilterPipeline));
     vkDestroyShaderModule(context.device, module, nullptr);
 }
 
@@ -87,7 +89,6 @@ void Renderer::recordReflectionPass(VkCommandBuffer commandBuffer, const Frame& 
                   VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
     size_t write = frameIndex & 1;
-    size_t read = write ^ 1;
     ReflectPushConstants pushConstants{};
     pushConstants.vertices = geometry.vertexBuffer.address;
     pushConstants.skinnedVertices = skinnedVertexBuffer.address;
@@ -99,19 +100,13 @@ void Renderer::recordReflectionPass(VkCommandBuffer commandBuffer, const Frame& 
     pushConstants.camera = frame.cameraBuffer.address;
     pushConstants.lights = frame.lightBuffer.address;
     pushConstants.fluidSurfaces = fluidSurfaceTables[frameIndex % FRAMES_IN_FLIGHT].address;
-    pushConstants.normalRoughnessTexture = targets.guideNormalSlot;
-    pushConstants.weightTexture = targets.guideSpecularAlbedoSlot;
-    pushConstants.depthTexture = targets.depthSlot;
-    pushConstants.velocityTexture = targets.velocitySlot;
-    pushConstants.rawTexture = targets.reflectionRawSlot;
-    pushConstants.rawStorage = targets.reflectionRawStorageSlot;
-    pushConstants.historyTexture = targets.reflectionHistorySlots[read];
-    pushConstants.historyStorage = targets.reflectionHistoryStorageSlots[write];
-    pushConstants.colorStorage = targets.colorStorageSlot;
+    pushConstants.slots = targets.reflectSlotBuffers[write].address;
     pushConstants.frameIndex = static_cast<uint32_t>(frameIndex);
     bool reset = !(reflectionHistoryValid && !temporalResetThisFrame);
+    bool denoise = settings.reflectionDenoise;
     pushConstants.samplesResetDebug = (std::min(std::max(settings.reflectionMaxSamples, 1U), 0xFFFFU)) |
-                                      (reset ? 1U << 16U : 0U) | (settings.debugMode << 20U);
+                                      (reset ? 1U << 16U : 0U) | (denoise ? 1U << 17U : 0U) |
+                                      (settings.debugMode << 20U);
 
     std::array<VkDescriptorSet, 2> sets{bindless.set(), rayTracer->accelerationSet()};
     vkCmdBindDescriptorSets(commandBuffer,
@@ -132,6 +127,27 @@ void Renderer::recordReflectionPass(VkCommandBuffer commandBuffer, const Frame& 
     memoryBarrier(VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, reflectionResolvePipeline);
     vkCmdDispatch(commandBuffer, groupsX, groupsY, 1);
+    if (denoise) {
+        // à-trous 세 번: 히스토리·모멘트 → 필터 이미지 → 원본 이미지(추적 결과는 다 읽었다) → 색상에 더함.
+        constexpr uint32_t LAST = 1U << 8U;
+        constexpr uint32_t FIRST = 1U << 9U;
+        constexpr uint32_t FROM_RAW = 1U << 10U;
+        const std::array<uint32_t, 3> STEPS{1U | FIRST, 2U, 4U | FROM_RAW | LAST};
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, reflectionFilterPipeline);
+        for (uint32_t step : STEPS) {
+            memoryBarrier(VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                          VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                              VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+            pushConstants.filterStep = step;
+            vkCmdPushConstants(commandBuffer,
+                               reflectionPipelineLayout,
+                               VK_SHADER_STAGE_COMPUTE_BIT,
+                               0,
+                               sizeof(pushConstants),
+                               &pushConstants);
+            vkCmdDispatch(commandBuffer, groupsX, groupsY, 1);
+        }
+    }
     reflectionHistoryValid = true;
 
     // 색상은 다시 첨부물로, 깊이도 다시 첨부물로. 반투명 패스가 둘 다 이어 쓴다.

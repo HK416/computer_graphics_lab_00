@@ -247,6 +247,28 @@ struct TonemapPushConstants {
 };
 
 // shaders/reflect.comp 의 푸시 상수와 배치가 같아야 한다.
+// 반사 컴퓨트의 bindless 슬롯 묶음. shaders/reflect.comp 의 ReflectSlots 와 배치가 같아야 한다. 푸시 상수가
+// 128 바이트에 꽉 차서 버퍼로 넘긴다. 히스토리·모멘트는 프레임 홀짝으로 읽는 쪽과 쓰는 쪽이 바뀌므로 홀짝마다
+// 버퍼 하나씩 둔다.
+struct ReflectSlots {
+    uint32_t normalRoughness;
+    uint32_t weight;
+    uint32_t depth;
+    uint32_t velocity;
+    uint32_t rawTexture;
+    uint32_t rawStorage;
+    uint32_t historyTexture;
+    uint32_t historyStorage;
+    uint32_t historyCurrentTexture;
+    uint32_t momentsTexture;
+    uint32_t momentsStorage;
+    uint32_t momentsCurrentTexture;
+    uint32_t filteredTexture;
+    uint32_t filteredStorage;
+    uint32_t colorStorage;
+};
+static_assert(sizeof(ReflectSlots) == 60, "반사 슬롯 배치가 셰이더와 어긋난다");
+
 struct ReflectPushConstants {
     VkDeviceAddress vertices;
     VkDeviceAddress skinnedVertices;
@@ -258,18 +280,12 @@ struct ReflectPushConstants {
     VkDeviceAddress camera;
     VkDeviceAddress lights;
     VkDeviceAddress fluidSurfaces;
-    uint32_t normalRoughnessTexture;
-    uint32_t weightTexture;
-    uint32_t depthTexture;
-    uint32_t velocityTexture;
-    uint32_t rawTexture;
-    uint32_t rawStorage;
-    uint32_t historyTexture;
-    uint32_t historyStorage;
-    uint32_t colorStorage;
+    VkDeviceAddress slots;
     uint32_t frameIndex;
-    // 128 바이트 한도라 셋을 묶는다: 하위 16비트 누적 상한, 비트 16 히스토리 버림, 비트 20 부터 디버그 모드.
+    // 셋을 묶는다: 하위 16비트 누적 상한, 비트 16 히스토리 버림, 비트 17 디노이저 켬, 비트 20 부터 디버그 모드.
     uint32_t samplesResetDebug;
+    // à-trous: 하위 8비트 보폭, 비트 8 마지막 반복, 비트 9 첫 반복, 비트 10 입력이 raw.
+    uint32_t filterStep;
 };
 static_assert(sizeof(ReflectPushConstants) <= 128, "푸시 상수는 규격이 보장하는 128 바이트 안에 있어야 한다");
 

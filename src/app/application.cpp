@@ -142,6 +142,7 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
         }
         settings.occlusionCulling = options.occlusionCulling;
         settings.useReflections = options.reflections;
+        settings.reflectionDenoise = options.reflectionDenoise;
         if (!options.meshShader) {
             settings.useMeshShader = false;
         }

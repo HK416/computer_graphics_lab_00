@@ -5,6 +5,7 @@
 #extension GL_EXT_ray_query : require
 
 #include "bindless.glsl"
+#include "exposure.glsl"
 #include "fluid_types.glsl"
 #include "fog.glsl"
 #include "lighting.glsl"
@@ -14,14 +15,49 @@
 #include "scene_types.glsl"
 #include "water_shading.glsl"
 
-// 광선 반사. 불투명 패스가 남긴 깊이·노멀·거칠기에서 픽셀마다 GGX 반사 방향 하나를 뽑아 광선
-// 질의로 추적하고(STAGE 0), 모션 벡터로 지난 프레임 결과를 되짚어 누적한 뒤 스페큘러 가중치를 곱해
-// HDR 색상에 더한다(STAGE 1). 히트 표면의 재질과 조명은 경로 추적 적중 셰이더와 같은 함수를 쓴다.
+// 광선 반사. 불투명 패스가 남긴 깊이·노멀·거칠기에서 픽셀마다 GGX 반사 방향 하나를 뽑아 광선 질의로
+// 추적하고(STAGE 0), 지난 프레임 결과를 되짚어 누적한 뒤(STAGE 1), 디노이저가 켜져 있으면 깊이·노멀·휘도
+// 가중 à-trous 필터를 세 번 돌려(STAGE 2) 스페큘러 가중치를 곱해 HDR 색상에 더한다. 히트 표면의 재질과
+// 조명은 경로 추적 적중 셰이더와 같은 함수를 쓴다.
+//
+// 디노이저(SVGF 계열)는 셋으로 이뤄진다. ① 되짚은 자리의 지난 깊이(클립 w)·노멀을 견줘 다른 표면이면
+// 히스토리를 버린다. ② 매끈한 면은 표면이 아니라 히트 거리만큼 뒤에 있는 가상점을 지난 시점으로 투영해
+// 되짚는다(반사상은 표면과 다르게 움직인다). ③ 휘도의 1·2차 모멘트를 함께 누적해 분산을 얻고, 그 분산으로
+// 휘도 가중을 조절하는 à-trous 를 돈다. 꺼져 있으면 ①②③ 모두 건너뛰어 옛 동작과 바이트로 같다.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(constant_id = 0) const uint STAGE = 0;
 
 // 경로 추적기와 같은 상위 가속 구조. 집합 1 로 묶여 있다.
 layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevel;
+
+// bindless 슬롯 묶음. 푸시 상수가 128 바이트에 꽉 차서 버퍼로 넘긴다. src/gfx/renderer_internal.h 의 ReflectSlots 와
+// 배치가 같아야 한다. 히스토리·모멘트는 프레임 홀짝으로 읽는 쪽과 쓰는 쪽이 바뀐다.
+struct ReflectSlots {
+    uint normalRoughness;
+    uint weight;
+    uint depth;
+    uint velocity;
+    // 이번 프레임 추적 결과(rgb 색, a 히트 거리). 추적이 쓰고 해결이 읽는다. 필터 둘째 반복의 출력으로도 쓴다.
+    uint rawTexture;
+    uint rawStorage;
+    // 누적 히스토리(rgb 색, a 표본 수). 지난 것을 읽고 이번 것을 쓴다. 필터 첫 반복이 이번 것을 읽는다.
+    uint historyTexture;
+    uint historyStorage;
+    uint historyCurrentTexture;
+    // 휘도 모멘트(x 1차, y 2차, z 지난 클립 w, w 8진법 노멀 비트). 지난 것을 읽고 이번 것을 쓴다.
+    uint momentsTexture;
+    uint momentsStorage;
+    uint momentsCurrentTexture;
+    // à-trous 중간 결과(rgb 색, a 분산).
+    uint filteredTexture;
+    uint filteredStorage;
+    // 반사를 더할 HDR 색상(rgba16f 스토리지).
+    uint colorStorage;
+};
+
+layout(buffer_reference, scalar) readonly buffer ReflectSlotsBuffer {
+    ReflectSlots item;
+};
 
 layout(push_constant) uniform ReflectPushConstants {
     VertexBuffer vertices;
@@ -35,21 +71,13 @@ layout(push_constant) uniform ReflectPushConstants {
     LightBuffer lights;
     // 유체마다의 물 표면 정보. 물 표면 인스턴스(FLUID_SURFACE_CUSTOM_INDEX)를 맞히면 여기서 정점과 재질을 읽는다.
     FluidSurfaceInfoBuffer fluidSurfaces;
-    uint normalRoughnessTexture;
-    uint weightTexture;
-    uint depthTexture;
-    uint velocityTexture;
-    // 이번 프레임 추적 결과. 추적이 쓰고 해결이 읽는다.
-    uint rawTexture;
-    uint rawStorage;
-    // 누적 히스토리. 지난 것을 읽고 이번 것을 쓴다. 알파에 쌓인 표본 수가 들어 있다.
-    uint historyTexture;
-    uint historyStorage;
-    // 반사를 더할 HDR 색상(rgba16f 스토리지).
-    uint colorStorage;
+    ReflectSlotsBuffer slots;
     uint frameIndex;
-    // 128 바이트 한도라 셋을 묶는다: 하위 16비트 누적 상한, 비트 16 히스토리 버림, 비트 20 부터 디버그 모드.
+    // 셋을 묶는다: 하위 16비트 누적 상한, 비트 16 히스토리 버림, 비트 17 디노이저 켬, 비트 20 부터 디버그 모드.
     uint samplesResetDebug;
+    // à-trous: 하위 8비트 보폭, 비트 8 마지막 반복(색상에 더함), 비트 9 첫 반복(히스토리·모멘트에서 읽음),
+    // 비트 10 입력이 raw(아니면 filtered).
+    uint filterStep;
 } push;
 
 uint reflectMaxSamples() {
@@ -57,6 +85,9 @@ uint reflectMaxSamples() {
 }
 bool reflectReset() {
     return (push.samplesResetDebug & (1u << 16u)) != 0u;
+}
+bool reflectDenoise() {
+    return (push.samplesResetDebug & (1u << 17u)) != 0u;
 }
 uint reflectDebugMode() {
     return push.samplesResetDebug >> 20u;
@@ -147,7 +178,10 @@ vec3 shadeHit(Camera camera, vec3 origin, vec3 direction, float hitDistance, uin
     return applyFog(camera, color, origin, direction, hitDistance);
 }
 
-vec3 traceReflection(Camera camera, vec3 origin, vec3 normal, vec3 direction, float roughness, inout uint seed) {
+// 미스는 이 거리로 친다. 시차 재투영이 하늘을 아주 먼 점으로 다루게 된다.
+const float MISS_DISTANCE = 1.0e4;
+
+vec3 traceReflection(Camera camera, vec3 origin, vec3 normal, vec3 direction, float roughness, inout uint seed, out float hitDistance) {
     rayQueryEXT query;
     // 단면 재질은 후면을 컬링해 래스터와 같은 면만 보이게 한다. 컷오프·반투명 재질은 가속 구조에
     // 불투명으로 올라가지 않아 후보로 온다.
@@ -182,16 +216,18 @@ vec3 traceReflection(Camera camera, vec3 origin, vec3 normal, vec3 direction, fl
 
     if (rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
         // 미스는 프리필터 큐브맵을 거칠기에 맞춰 읽는다. 스페큘러 IBL 이 보던 것과 같은 하늘이다.
+        hitDistance = MISS_DISTANCE;
         uvec4 environment = camera.environment;
         vec3 sky = sampleBindlessCubeLod(environment.y, direction, roughness * float(environment.w - 1u)).rgb;
         return applyFog(camera, sky, origin, direction, 1.0e30);
     }
+    hitDistance = rayQueryGetIntersectionTEXT(query, true);
     uint customIndex = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, true));
     if ((customIndex & FLUID_SURFACE_CUSTOM_INDEX) != 0u) {
         return shadeWaterHit(camera,
                              origin,
                              direction,
-                             rayQueryGetIntersectionTEXT(query, true),
+                             hitDistance,
                              customIndex,
                              uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, true)),
                              rayQueryGetIntersectionBarycentricsEXT(query, true),
@@ -200,19 +236,19 @@ vec3 traceReflection(Camera camera, vec3 origin, vec3 normal, vec3 direction, fl
     return shadeHit(camera,
                     origin,
                     direction,
-                    rayQueryGetIntersectionTEXT(query, true),
+                    hitDistance,
                     customIndex,
                     uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, true)),
                     rayQueryGetIntersectionBarycentricsEXT(query, true),
                     seed);
 }
 
-void traceStage(ivec2 pixel, ivec2 size) {
+void traceStage(ReflectSlots slots, ivec2 pixel, ivec2 size) {
     Camera camera = push.camera.item;
     vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
-    float depth = sampleBindless(push.depthTexture, uv).r;
-    vec4 normalRoughness = sampleBindless(push.normalRoughnessTexture, uv);
-    vec3 weight = sampleBindless(push.weightTexture, uv).rgb;
+    float depth = sampleBindless(slots.depth, uv).r;
+    vec4 normalRoughness = sampleBindless(slots.normalRoughness, uv);
+    vec3 weight = sampleBindless(slots.weight, uv).rgb;
 
     vec4 result = vec4(0.0);
     if (depth > 0.0 && any(greaterThan(weight, vec3(0.0)))) {
@@ -228,10 +264,12 @@ void traceStage(ivec2 pixel, ivec2 size) {
             // 표면 아래로 들어가는 표본은 거울 방향으로 대신한다. 가장자리에서 검은 점이 생기지 않는다.
             direction = reflect(-view, normal);
         }
-        // 반딧불이 표본이 누적을 오래 흔들지 않도록 잘라 낸다.
-        result.rgb = min(traceReflection(camera, position, normal, direction, roughness, seed), vec3(8.0));
+        // 반딧불이 표본이 누적을 오래 흔들지 않도록 잘라 낸다. 알파는 히트 거리(시차 재투영용).
+        float hitDistance;
+        result.rgb = min(traceReflection(camera, position, normal, direction, roughness, seed, hitDistance), vec3(8.0));
+        result.a = hitDistance;
     }
-    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(push.rawStorage)], pixel, result);
+    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.rawStorage)], pixel, result);
 }
 
 // 휘도와 색차를 나눠 가두면 밝은 반사가 색을 덜 물들인다. taau.comp 와 같은 식이다.
@@ -245,16 +283,28 @@ vec3 yCoCgToRgb(vec3 color) {
     return vec3(color.x + color.y - color.z, color.x + color.z, color.x - color.y - color.z);
 }
 
-void resolveStage(ivec2 pixel, ivec2 size) {
+bool insideUnit(vec2 uv) {
+    return all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)));
+}
+
+// 시점 깊이 대용으로 쓰는 클립 w. 지터는 xy 에만 들어가 w 는 흔들리지 않는다.
+float clipDepth(mat4 viewProjection, vec3 position) {
+    return (viewProjection * vec4(position, 1.0)).w;
+}
+
+void resolveStage(ReflectSlots slots, ivec2 pixel, ivec2 size) {
     Camera camera = push.camera.item;
     vec2 texel = 1.0 / vec2(size);
     vec2 uv = (vec2(pixel) + 0.5) * texel;
-    vec4 normalRoughness = sampleBindless(push.normalRoughnessTexture, uv);
-    vec3 weight = sampleBindless(push.weightTexture, uv).rgb;
-    vec3 current = sampleBindless(push.rawTexture, uv).rgb;
+    vec4 normalRoughness = sampleBindless(slots.normalRoughness, uv);
+    vec3 weight = sampleBindless(slots.weight, uv).rgb;
+    vec4 raw = sampleBindless(slots.rawTexture, uv);
+    vec3 current = raw.rgb;
+    bool denoise = reflectDenoise();
 
     if (all(equal(weight, vec3(0.0)))) {
-        imageStore(bindlessStorageImagesRgba16[nonuniformEXT(push.historyStorage)], pixel, vec4(0.0));
+        imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.historyStorage)], pixel, vec4(0.0));
+        imageStore(bindlessStorageImagesRgba[nonuniformEXT(slots.momentsStorage)], pixel, vec4(0.0));
         return;
     }
 
@@ -264,7 +314,7 @@ void resolveStage(ivec2 pixel, ivec2 size) {
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             vec2 tapUv = clamp(uv + vec2(x, y) * texel, vec2(0.0), vec2(1.0));
-            vec3 ycocg = rgbToYCoCg(sampleBindless(push.rawTexture, tapUv).rgb);
+            vec3 ycocg = rgbToYCoCg(sampleBindless(slots.rawTexture, tapUv).rgb);
             moment1 += ycocg;
             moment2 += ycocg * ycocg;
         }
@@ -272,37 +322,197 @@ void resolveStage(ivec2 pixel, ivec2 size) {
     vec3 mean = moment1 / 9.0;
     vec3 sigma = sqrt(max(moment2 / 9.0 - mean * mean, vec3(0.0)));
 
-    vec2 motion = sampleBindless(push.velocityTexture, uv).rg;
-    vec2 historyUv = uv + motion;
-    bool hasHistory = !reflectReset() && all(greaterThanEqual(historyUv, vec2(0.0))) &&
-                      all(lessThanEqual(historyUv, vec2(1.0)));
+    vec2 motion = sampleBindless(slots.velocity, uv).rg;
+    vec2 surfaceUv = uv + motion;
+    bool hasHistory = !reflectReset() && insideUnit(surfaceUv);
+    vec2 historyUv = surfaceUv;
+
+    float depth = sampleBindless(slots.depth, uv).r;
+    vec3 position = worldFromDepth(camera, uv, depth);
+    vec3 normal = normalize(normalRoughness.xyz);
+    float roughness = normalRoughness.w;
+    // 모멘트는 디노이저가 꺼져 있어도 이어 쌓는다. 그래야 켜는 순간 분산이 맞다(색에는 영향이 없다).
+    vec4 previousMoments = hasHistory ? sampleBindless(slots.momentsTexture, surfaceUv) : vec4(0.0);
+    if (denoise) {
+        // ① 되짚은 자리가 같은 표면인지. 지난 시점에서의 클립 w 와 노멀을 견준다.
+        if (hasHistory) {
+            float previousDepth = clipDepth(camera.previousViewProjection, position);
+            vec3 previousNormal = decodeUnitVector(floatBitsToUint(previousMoments.w));
+            bool sameSurface = previousMoments.z > 0.0 &&
+                               abs(previousDepth - previousMoments.z) < 0.05 * max(previousDepth, 1.0e-3) &&
+                               dot(previousNormal, normal) > 0.9;
+            hasHistory = sameSurface;
+        }
+        // ② 매끈한 면의 반사상은 표면 뒤 히트 거리만큼의 가상점처럼 움직인다. 거울일수록 가상점을 되짚고
+        //    거칠어질수록 표면을 되짚는다.
+        vec3 toSurface = position - camera.position.xyz;
+        float surfaceDistance = max(length(toSurface), 1.0e-4);
+        vec3 virtualPoint = camera.position.xyz + toSurface * (1.0 + raw.a / surfaceDistance);
+        vec4 virtualClip = camera.previousViewProjection * vec4(virtualPoint, 1.0);
+        if (virtualClip.w > 1.0e-4) {
+            vec2 virtualUv = (virtualClip.xy / virtualClip.w) * 0.5 + 0.5;
+            historyUv = mix(virtualUv, surfaceUv, smoothstep(0.0, 0.5, roughness));
+        }
+        hasHistory = hasHistory && insideUnit(historyUv);
+    }
 
     vec3 result = current;
     float samples = 1.0;
+    float lum = luminance(current);
+    float lumMoment1 = lum;
+    float lumMoment2 = lum * lum;
     if (hasHistory) {
-        vec4 history = sampleBindless(push.historyTexture, historyUv);
+        vec4 history = sampleBindless(slots.historyTexture, historyUv);
         vec3 clamped = clamp(rgbToYCoCg(history.rgb), mean - 1.25 * sigma, mean + 1.25 * sigma);
         // 거울에 가까울수록 히스토리를 짧게 쓴다. 시점이 바뀌면 반사가 바로 따라와야 한다.
-        //
-        // ponytail: 히트 거리로 반사의 시차를 되짚지 않는다. 카메라가 옆으로 움직이면 매끈한 면의
-        // 반사가 한두 프레임 끌린다. rawStorage 의 알파에 거리를 담아 가상 점을 재투영하면 된다.
-        float limit = mix(4.0, float(reflectMaxSamples()), normalRoughness.w);
+        float limit = mix(4.0, float(reflectMaxSamples()), roughness);
         samples = min(history.a + 1.0, limit);
         result = mix(yCoCgToRgb(clamped), current, 1.0 / samples);
+        // ③ 휘도 모멘트는 표면 자리의 것을 이어 쌓는다. 분산 = 2차 − 1차².
+        lumMoment1 = mix(previousMoments.x, lum, 1.0 / samples);
+        lumMoment2 = mix(previousMoments.y, lum * lum, 1.0 / samples);
     }
     result = max(result, vec3(0.0));
-    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(push.historyStorage)], pixel, vec4(result, samples));
+    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.historyStorage)], pixel, vec4(result, samples));
+    imageStore(bindlessStorageImagesRgba[nonuniformEXT(slots.momentsStorage)],
+               pixel,
+               vec4(lumMoment1,
+                    lumMoment2,
+                    clipDepth(camera.viewProjection, position),
+                    uintBitsToFloat(encodeUnitVector(normal))));
 
-    vec4 color = imageLoad(bindlessStorageImagesRgba16[nonuniformEXT(push.colorStorage)], pixel);
     uint debugMode = reflectDebugMode();
+    bool debugView = debugMode == DEBUG_MODE_REFLECTION_RAW || debugMode == DEBUG_MODE_REFLECTION;
+    if (denoise && !debugView) {
+        // 필터 마지막 반복이 더한다(«반사 필터» 디버그 뷰도 거기서 쓴다).
+        return;
+    }
+    vec4 color = imageLoad(bindlessStorageImagesRgba16[nonuniformEXT(slots.colorStorage)], pixel);
     if (debugMode == DEBUG_MODE_REFLECTION_RAW) {
         color.rgb = current;
-    } else if (debugMode == DEBUG_MODE_REFLECTION) {
+    } else if (debugMode == DEBUG_MODE_REFLECTION || debugMode == DEBUG_MODE_REFLECTION_FILTERED) {
+        // 디노이저가 꺼져 있으면 필터 결과는 누적과 같다.
         color.rgb = result;
     } else {
         color.rgb += result * weight * camera.jitter.w;
     }
-    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(push.colorStorage)], pixel, color);
+    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.colorStorage)], pixel, color);
+}
+
+// à-trous 입력. 첫 반복은 이번 프레임 히스토리와 모멘트에서, 그 뒤는 앞 반복이 쓴 중간 이미지에서 읽는다.
+vec4 filterInput(ReflectSlots slots, vec2 uv, bool first, bool fromRaw) {
+    if (first) {
+        vec4 history = sampleBindless(slots.historyCurrentTexture, uv);
+        vec4 moments = sampleBindless(slots.momentsCurrentTexture, uv);
+        float variance;
+        if (history.a >= 4.0) {
+            variance = max(moments.y - moments.x * moments.x, 0.0);
+        } else {
+            // 표본이 얕으면 시간축 분산이 뜻이 없다. 3x3 이웃의 휘도 분산으로 대신한다.
+            vec2 texel = push.camera.item.viewport.zw;
+            float sum = 0.0;
+            float sumSquared = 0.0;
+            for (int y = -1; y <= 1; ++y) {
+                for (int x = -1; x <= 1; ++x) {
+                    float l = luminance(sampleBindless(slots.historyCurrentTexture, uv + vec2(x, y) * texel).rgb);
+                    sum += l;
+                    sumSquared += l * l;
+                }
+            }
+            float mean = sum / 9.0;
+            variance = max(sumSquared / 9.0 - mean * mean, 0.0);
+        }
+        return vec4(history.rgb, variance);
+    }
+    return sampleBindless(fromRaw ? slots.rawTexture : slots.filteredTexture, uv);
+}
+
+void filterStage(ReflectSlots slots, ivec2 pixel, ivec2 size) {
+    uint debugMode = reflectDebugMode();
+    if (debugMode == DEBUG_MODE_REFLECTION_RAW || debugMode == DEBUG_MODE_REFLECTION) {
+        // 디버그 뷰는 해결 단계가 이미 색상에 썼다.
+        return;
+    }
+    Camera camera = push.camera.item;
+    int step = int(push.filterStep & 0xFFu);
+    bool last = (push.filterStep & 0x100u) != 0u;
+    bool first = (push.filterStep & 0x200u) != 0u;
+    bool fromRaw = (push.filterStep & 0x400u) != 0u;
+    vec2 texel = 1.0 / vec2(size);
+    vec2 uv = (vec2(pixel) + 0.5) * texel;
+
+    vec3 weight = sampleBindless(slots.weight, uv).rgb;
+    if (all(equal(weight, vec3(0.0)))) {
+        if (!last) {
+            imageStore(bindlessStorageImagesRgba16[nonuniformEXT((first || fromRaw) ? slots.filteredStorage : slots.rawStorage)],
+                       pixel,
+                       vec4(0.0));
+        }
+        return;
+    }
+
+    vec4 center = filterInput(slots, uv, first, fromRaw);
+    float depth = sampleBindless(slots.depth, uv).r;
+    float centerDepth = clipDepth(camera.viewProjection, worldFromDepth(camera, uv, depth));
+    vec3 centerNormal = normalize(sampleBindless(slots.normalRoughness, uv).xyz);
+    float centerLuminance = luminance(center.rgb);
+
+    // 휘도 가중의 분모는 분산을 3x3 가우시안으로 한 번 눌러 쓴다. 한 픽셀의 튀는 분산이 가중을 뒤집지 않는다.
+    float smoothedVariance = 0.0;
+    {
+        const float gaussian[3] = float[3](0.25, 0.5, 0.25);
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                vec2 tapUv = clamp(uv + vec2(x, y) * texel, vec2(0.0), vec2(1.0));
+                smoothedVariance += gaussian[x + 1] * gaussian[y + 1] * filterInput(slots, tapUv, first, fromRaw).a;
+            }
+        }
+    }
+    float luminanceScale = 4.0 * sqrt(max(smoothedVariance, 0.0)) + 1.0e-4;
+
+    const float kernel[5] = float[5](1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0);
+    vec3 sumColor = vec3(0.0);
+    float sumVariance = 0.0;
+    float sumWeight = 0.0;
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -2; x <= 2; ++x) {
+            ivec2 tap = pixel + ivec2(x, y) * step;
+            if (any(lessThan(tap, ivec2(0))) || any(greaterThanEqual(tap, size))) {
+                continue;
+            }
+            vec2 tapUv = (vec2(tap) + 0.5) * texel;
+            if (all(equal(sampleBindless(slots.weight, tapUv).rgb, vec3(0.0)))) {
+                continue;
+            }
+            vec4 tapValue = filterInput(slots, tapUv, first, fromRaw);
+            float tapDepth = clipDepth(camera.viewProjection, worldFromDepth(camera, tapUv, sampleBindless(slots.depth, tapUv).r));
+            vec3 tapNormal = normalize(sampleBindless(slots.normalRoughness, tapUv).xyz);
+
+            float depthWeight = exp(-abs(centerDepth - tapDepth) / (0.02 * centerDepth + 1.0e-4));
+            float normalWeight = pow(max(dot(centerNormal, tapNormal), 0.0), 128.0);
+            float luminanceWeight = exp(-abs(centerLuminance - luminance(tapValue.rgb)) / luminanceScale);
+            float w = kernel[x + 2] * kernel[y + 2] * depthWeight * normalWeight * luminanceWeight;
+            sumColor += w * tapValue.rgb;
+            sumVariance += w * w * tapValue.a;
+            sumWeight += w;
+        }
+    }
+    vec3 result = sumWeight > 0.0 ? sumColor / sumWeight : center.rgb;
+    float variance = sumWeight > 0.0 ? sumVariance / (sumWeight * sumWeight) : center.a;
+
+    if (last) {
+        vec4 color = imageLoad(bindlessStorageImagesRgba16[nonuniformEXT(slots.colorStorage)], pixel);
+        if (debugMode == DEBUG_MODE_REFLECTION_FILTERED) {
+            color.rgb = max(result, vec3(0.0));
+        } else {
+            color.rgb += max(result, vec3(0.0)) * weight * camera.jitter.w;
+        }
+        imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.colorStorage)], pixel, color);
+        return;
+    }
+    imageStore(bindlessStorageImagesRgba16[nonuniformEXT((first || fromRaw) ? slots.filteredStorage : slots.rawStorage)],
+               pixel,
+               vec4(result, variance));
 }
 
 void main() {
@@ -311,9 +521,12 @@ void main() {
     if (pixel.x >= size.x || pixel.y >= size.y) {
         return;
     }
+    ReflectSlots slots = push.slots.item;
     if (STAGE == 0u) {
-        traceStage(pixel, size);
+        traceStage(slots, pixel, size);
+    } else if (STAGE == 1u) {
+        resolveStage(slots, pixel, size);
     } else {
-        resolveStage(pixel, size);
+        filterStage(slots, pixel, size);
     }
 }

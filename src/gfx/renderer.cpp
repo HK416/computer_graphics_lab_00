@@ -155,6 +155,7 @@ Renderer::~Renderer() {
     vkDestroyPipelineLayout(context.device, skinPipelineLayout, nullptr);
     destroyBuffer(context, skinnedBoundsBuffer);
     destroyBuffer(context, skinnedVertexBuffer);
+    vkDestroyPipeline(context.device, reflectionFilterPipeline, nullptr);
     vkDestroyPipeline(context.device, reflectionResolvePipeline, nullptr);
     vkDestroyPipeline(context.device, reflectionTracePipeline, nullptr);
     vkDestroyPipelineLayout(context.device, reflectionPipelineLayout, nullptr);
@@ -216,6 +217,12 @@ Renderer::~Renderer() {
     destroyImage(context, targets.ssao);
     destroyImage(context, targets.ssaoRaw);
     destroyImage(context, targets.pathAccumulation);
+    destroyImage(context, targets.reflectionFiltered);
+    destroyImage(context, targets.reflectionMoments[1]);
+    destroyImage(context, targets.reflectionMoments[0]);
+    for (Buffer& buffer : targets.reflectSlotBuffers) {
+        destroyBuffer(context, buffer);
+    }
     destroyImage(context, targets.reflectionHistory[1]);
     destroyImage(context, targets.reflectionHistory[0]);
     destroyImage(context, targets.reflectionRaw);
@@ -482,6 +489,15 @@ void Renderer::recordCommands(Frame& frame,
                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT),
           storage(targets.reflectionHistory[1],
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT),
+          storage(targets.reflectionMoments[0],
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT),
+          storage(targets.reflectionMoments[1],
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT),
+          storage(targets.reflectionFiltered,
                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)},
          {},
