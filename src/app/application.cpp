@@ -827,7 +827,8 @@ void Application::saveScene(const std::filesystem::path& path) {
 
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
-    std::ofstream file(path);
+    // 바이너리 모드: Windows 텍스트 모드는 CRLF 로 써서 저장소의 LF 정책과 헤드리스 기준 파일 비교가 어긋난다.
+    std::ofstream file(path, std::ios::binary);
     if (!file) {
         spdlog::error("장면을 저장하지 못했습니다: {}", path.string());
         return;
