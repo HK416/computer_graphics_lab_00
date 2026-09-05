@@ -101,7 +101,9 @@ vec3 traceReflection(Camera camera, vec3 origin, vec3 normal, vec3 direction, fl
     // 단면 재질은 후면을 컬링해 래스터와 같은 면만 보이게 한다. 컷오프·반투명 재질은 가속 구조에
     // 불투명으로 올라가지 않아 후보로 온다.
     rayQueryInitializeEXT(
-        query, topLevel, gl_RayFlagsCullBackFacingTrianglesEXT, 0xFFu, origin + normal * 1.0e-3, 1.0e-4, direction, 1.0e4);
+        // 마스크 0xFE: 물 표면 인스턴스(0x01)는 지나간다. 여기는 인스턴스 배열로 재질을 찾는데 물 표면은
+        // 그 배열에 없다. ponytail: 래스터 반사는 물을 투명하게 본다.
+        query, topLevel, gl_RayFlagsCullBackFacingTrianglesEXT, 0xFEu, origin + normal * 1.0e-3, 1.0e-4, direction, 1.0e4);
     while (rayQueryProceedEXT(query)) {
         if (rayQueryGetIntersectionTypeEXT(query, false) != gl_RayQueryCandidateIntersectionTriangleEXT) {
             continue;

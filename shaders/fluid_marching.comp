@@ -59,11 +59,14 @@ void main() {
         ++count;
     }
     uint slot = atomicAdd(push.surfaceCounter.items[0], count);
+    // 가속 구조 구축용 삼각형 수도 같은 규칙으로 잡는다. count 와 slot 은 언제나 3 의 배수다.
+    atomicAdd(push.surfaceRange.items[0], count / 3u);
     if (slot + count > push.surfaceCapacity) {
         // 상한까지 자르면 «자리는 잡았지만 쓰지 않은» 칸이 남아 간접 그리기가 쓰레기를 읽는다.
         // 처음 넘친 자리로 자르면 그 아래는 모두 실제로 쓰인 칸이다. slot 은 언제나 3 의 배수라
         // 삼각형이 잘리지도 않는다.
         atomicMin(push.surfaceCounter.items[0], slot);
+        atomicMin(push.surfaceRange.items[0], slot / 3u);
         return;
     }
 

@@ -33,21 +33,21 @@ struct PathTracePushConstants {
     VkDeviceAddress lods;
     VkDeviceAddress camera;
     VkDeviceAddress lights;
+    VkDeviceAddress fluidSurfaces;
     uint32_t accumulationImage;
     uint32_t velocityImage;
     uint32_t frameIndex;
     uint32_t sampleCount;
-    uint32_t maxBounces;
-    uint32_t samplesPerFrame;
+    // 128 바이트 한도 때문에 작은 값은 둘씩 16비트로 묶는다. 이유는 pathtrace_common.glsl 쪽 주석 참조.
+    uint32_t bouncesAndSamples; // 하위 최대 바운스, 상위 프레임당 표본
     uint32_t flags;
     float radianceClamp;
     float skyIntensity;
-    uint32_t debugMode;
-    // 안내 버퍼 슬롯을 둘씩 16비트로 묶는다. 이유는 pathtrace_common.glsl 쪽 주석 참조.
+    uint32_t debugModeAndDepthSlot; // 하위 디버그 모드, 상위 안내 깊이 슬롯
     uint32_t guideAlbedoSlots;
     uint32_t guideNormalRoughnessSlots;
-    uint32_t guideDepthSlot;
 };
+static_assert(sizeof(PathTracePushConstants) <= 128, "경로 추적 푸시 상수는 규격이 보장하는 128 바이트 안이어야 한다");
 
 constexpr uint32_t PATH_FLAG_NEXT_EVENT = 1;
 constexpr uint32_t PATH_FLAG_RUSSIAN_ROULETTE = 2;
@@ -79,6 +79,10 @@ RayTracer::~RayTracer() {
     for (AccelerationStructure& structure : skinnedBottomLevels) {
         destroyStructure(structure);
     }
+    for (DynamicBottomLevel& dynamic : dynamicBottomLevels) {
+        destroyStructure(dynamic.structure);
+        destroyBuffer(context, dynamic.scratch);
+    }
     destroyBuffer(context, shaderBindingTable);
     destroyBuffer(context, scratchBuffer);
     destroyBuffer(context, skinnedScratchBuffer);
@@ -101,6 +105,11 @@ void RayTracer::loadFunctions() {
         reinterpret_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(load("vkGetAccelerationStructureBuildSizesKHR"));
     cmdBuildAccelerationStructures =
         reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(load("vkCmdBuildAccelerationStructuresKHR"));
+    // 간접 구축은 기능 게이트다. 장치가 지원하지 않으면 진입점이 없고, 그러면 물 표면을 올리지 않는다.
+    if (context.caps.accelerationStructureIndirectBuild) {
+        cmdBuildAccelerationStructuresIndirect = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresIndirectKHR>(
+            load("vkCmdBuildAccelerationStructuresIndirectKHR"));
+    }
     getStructureAddress = reinterpret_cast<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
         load("vkGetAccelerationStructureDeviceAddressKHR"));
     createRayTracingPipelines =
@@ -460,6 +469,109 @@ void RayTracer::updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
     vkCmdPipelineBarrier2(commandBuffer, &dependency);
 }
 
+namespace {
+
+// 동적 구조의 지오메트리 서술. 준비(크기 계산)와 구축이 같은 서술을 써야 크기가 맞는다.
+VkAccelerationStructureGeometryKHR
+dynamicTriangles(VkDeviceAddress vertices, uint32_t vertexStride, uint32_t maxTriangles) {
+    VkAccelerationStructureGeometryTrianglesDataKHR triangles{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};
+    triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    triangles.vertexData.deviceAddress = vertices;
+    triangles.vertexStride = vertexStride;
+    triangles.maxVertex = maxTriangles * 3 - 1;
+    triangles.indexType = VK_INDEX_TYPE_NONE_KHR;
+    VkAccelerationStructureGeometryKHR geometry{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    geometry.geometry.triangles = triangles;
+    // 물은 알파가 없다. 불투명으로 올려 임의 적중 셰이더가 돌지 않게 한다.
+    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    return geometry;
+}
+
+} // namespace
+
+VkDeviceAddress RayTracer::ensureDynamicBottomLevel(uint32_t key, uint32_t maxTriangles) {
+    if (maxTriangles == 0) {
+        return 0;
+    }
+    if (dynamicBottomLevels.size() <= key) {
+        dynamicBottomLevels.resize(key + 1);
+    }
+    DynamicBottomLevel& dynamic = dynamicBottomLevels[key];
+    if (dynamic.structure.handle != VK_NULL_HANDLE && dynamic.maxTriangles == maxTriangles) {
+        return dynamic.structure.address;
+    }
+    // 크기는 정점 주소와 무관하다. 상한 삼각형 수로 재어 두고 프레임마다 그 안에서 세운다.
+    VkAccelerationStructureGeometryKHR geometry = dynamicTriangles(0, sizeof(float) * 4, maxTriangles);
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries = &geometry;
+    VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    getBuildSizes(context.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &maxTriangles, &sizes);
+
+    retireStructure(dynamic.structure);
+    dynamic.structure =
+        createStructure(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, sizes.accelerationStructureSize);
+    reserveScratch(dynamic.scratch, std::max<VkDeviceSize>(sizes.buildScratchSize, 256), "물 표면 가속 구조 스크래치");
+    dynamic.maxTriangles = maxTriangles;
+    return dynamic.structure.address;
+}
+
+void RayTracer::buildDynamicBottomLevel(VkCommandBuffer commandBuffer,
+                                        uint32_t key,
+                                        VkDeviceAddress vertices,
+                                        uint32_t vertexStride,
+                                        uint32_t maxTriangles,
+                                        VkDeviceAddress rangeAddress) {
+    if (key >= dynamicBottomLevels.size() || dynamicBottomLevels[key].structure.handle == VK_NULL_HANDLE) {
+        return;
+    }
+    DynamicBottomLevel& dynamic = dynamicBottomLevels[key];
+    VkAccelerationStructureGeometryKHR geometry = dynamicTriangles(vertices, vertexStride, maxTriangles);
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries = &geometry;
+    buildInfo.dstAccelerationStructure = dynamic.structure.handle;
+    buildInfo.scratchData.deviceAddress = dynamic.scratch.address;
+
+    barrierBeforeBuild(commandBuffer);
+    if (indirectBuildAvailable()) {
+        // 삼각형 수는 rangeAddress 의 VkAccelerationStructureBuildRangeInfoKHR 에서 읽는다. 마칭 컴퓨트가 채운 값이다.
+        uint32_t stride = sizeof(VkAccelerationStructureBuildRangeInfoKHR);
+        const uint32_t* maxPrimitiveCounts = &maxTriangles;
+        cmdBuildAccelerationStructuresIndirect(
+            commandBuffer, 1, &buildInfo, &rangeAddress, &stride, &maxPrimitiveCounts);
+    } else {
+        // 상한 개수로 세운다. 쓰지 않은 꼬리는 0 으로 지워진 퇴화 삼각형이라 광선이 맞히지 않는다.
+        // ponytail: 실제 삼각형 수와 무관하게 늘 상한만큼 구축한다. 프레임당 65536 삼각형 빠른 구축이다.
+        VkAccelerationStructureBuildRangeInfoKHR range{};
+        range.primitiveCount = maxTriangles;
+        const VkAccelerationStructureBuildRangeInfoKHR* rangePointer = &range;
+        cmdBuildAccelerationStructures(commandBuffer, 1, &buildInfo, &rangePointer);
+    }
+
+    // 상위 구조가 이 결과를 읽는다.
+    VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    barrier.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    barrier.dstAccessMask =
+        VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+}
+
 void RayTracer::reserveInstances(uint32_t frameSlot, uint32_t count) {
     if (instanceBuffers.size() <= frameSlot) {
         instanceBuffers.resize(frameSlot + 1);
@@ -759,6 +871,7 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
                       VkDeviceAddress instanceAddress,
                       VkDeviceAddress lightAddress,
                       VkDeviceAddress skinnedVertexAddress,
+                      VkDeviceAddress fluidSurfaceAddress,
                       uint32_t accumulationImage,
                       uint32_t velocityImage,
                       uint32_t frameIndex,
@@ -775,21 +888,20 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
     pushConstants.lods = geometry.lodBuffer.address;
     pushConstants.camera = cameraAddress;
     pushConstants.lights = lightAddress;
+    pushConstants.fluidSurfaces = fluidSurfaceAddress;
     pushConstants.accumulationImage = accumulationImage;
     pushConstants.velocityImage = velocityImage;
     pushConstants.frameIndex = frameIndex;
     pushConstants.sampleCount = sampleCount;
-    pushConstants.maxBounces = options.maxBounces;
-    pushConstants.samplesPerFrame = options.samplesPerFrame;
+    pushConstants.bouncesAndSamples = (options.maxBounces & 0xFFFFU) | (options.samplesPerFrame << 16);
     pushConstants.flags = (options.nextEventEstimation ? PATH_FLAG_NEXT_EVENT : 0U) |
                           (options.russianRoulette ? PATH_FLAG_RUSSIAN_ROULETTE : 0U) |
                           (guides.write ? PATH_FLAG_WRITE_GUIDES : 0U);
     pushConstants.radianceClamp = options.radianceClamp;
     pushConstants.skyIntensity = options.skyIntensity;
-    pushConstants.debugMode = options.debugMode;
+    pushConstants.debugModeAndDepthSlot = (options.debugMode & 0xFFFFU) | (guides.depth << 16);
     pushConstants.guideAlbedoSlots = (guides.diffuseAlbedo & 0xFFFFU) | (guides.specularAlbedo << 16);
     pushConstants.guideNormalRoughnessSlots = (guides.normal & 0xFFFFU) | (guides.roughness << 16);
-    pushConstants.guideDepthSlot = guides.depth;
 
     std::array<VkDescriptorSet, 2> sets{bindless.set(), descriptorSet};
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline);

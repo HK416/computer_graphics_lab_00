@@ -260,6 +260,8 @@ Capabilities queryCapabilities(const FeatureChain& f,
     caps.accelerationStructure = f.accel.accelerationStructure == VK_TRUE;
     caps.rayTracingPipeline = caps.accelerationStructure && f.rayTracing.rayTracingPipeline == VK_TRUE;
     caps.rayQuery = caps.accelerationStructure && f.rayQuery.rayQuery == VK_TRUE;
+    caps.accelerationStructureIndirectBuild =
+        caps.accelerationStructure && f.accel.accelerationStructureIndirectBuild == VK_TRUE;
     caps.drawIndirectCount = f.v12.drawIndirectCount == VK_TRUE;
     caps.pipelineStatistics = f.features2.features.pipelineStatisticsQuery == VK_TRUE;
     caps.depthClamp = f.features2.features.depthClamp == VK_TRUE;
@@ -600,6 +602,7 @@ Context::Context(SDL_Window* window) {
     enabled.mesh.meshShader = caps.meshShader ? VK_TRUE : VK_FALSE;
     enabled.mesh.taskShader = caps.taskShader ? VK_TRUE : VK_FALSE;
     enabled.accel.accelerationStructure = caps.accelerationStructure ? VK_TRUE : VK_FALSE;
+    enabled.accel.accelerationStructureIndirectBuild = caps.accelerationStructureIndirectBuild ? VK_TRUE : VK_FALSE;
     enabled.rayTracing.rayTracingPipeline = caps.rayTracingPipeline ? VK_TRUE : VK_FALSE;
     enabled.rayQuery.rayQuery = caps.rayQuery ? VK_TRUE : VK_FALSE;
 

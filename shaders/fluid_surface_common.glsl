@@ -17,6 +17,8 @@ layout(push_constant, scalar) uniform FluidSurfacePushConstants {
     FluidSurfaceVertexBuffer surfaceVertices;
     // [0] 이 정점 수. 마칭이 원자 덧셈으로 자리를 잡는다.
     CounterBuffer surfaceCounter;
+    // [0] 이 삼각형 수(VkAccelerationStructureBuildRangeInfoKHR.primitiveCount). 하위 가속 구조 간접 구축이 읽는다.
+    CounterBuffer surfaceRange;
     uint surfaceResolution;
     uint surfaceCapacity;
     float surfaceIso;

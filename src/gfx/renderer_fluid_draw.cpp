@@ -2,6 +2,7 @@
 // Renderer 의 멤버 함수 정의만 나눠 담은 번역 단위다. 선언은 renderer.h 하나에 있다.
 
 #include "gfx/renderer_internal.h"
+#include "physics/marching_cubes.h"
 
 namespace gfx {
 
@@ -380,11 +381,36 @@ void Renderer::recordFluidPass(VkCommandBuffer commandBuffer,
     // CPU 백엔드는 매핑된 버퍼에 직접 쓴다. TLAS 인스턴스 버퍼도 호스트에서 보이는 자리다.
     void* tlasMapped = tlasAddress != 0 ? rayTracer->instanceBufferMapped(slot) : nullptr;
 
+    // 물 표면 정보 표. 적중 셰이더가 유체 번호로 찾으므로 유체 수만큼 잡는다.
+    uint32_t fluidCount = fluid->fluidCount();
+    if (fluidCount > fluidSurfaceTableCapacity) {
+        for (Buffer& buffer : fluidSurfaceTables) {
+            context.retireBuffer(buffer);
+            buffer = createBuffer(context,
+                                  static_cast<VkDeviceSize>(fluidCount) * sizeof(GpuFluidSurfaceInfo),
+                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                  MemoryLocation::HOST_WRITE,
+                                  "물 표면 정보");
+        }
+        fluidSurfaceTableCapacity = fluidCount;
+    }
+    auto* surfaceTable = static_cast<GpuFluidSurfaceInfo*>(fluidSurfaceTables[slot].mapped);
+    constexpr uint32_t SURFACE_MAX_TRIANGLES = FLUID_MAX_SURFACE_VERTICES / 3;
+
     uint32_t base = 0;
     for (uint32_t f = 0; f < batches.fluidDraws.count; ++f) {
         uint32_t count = fluid->particleCount(f);
+        if (surfaceTable != nullptr && f < fluidCount) {
+            surfaceTable[f] = GpuFluidSurfaceInfo{};
+        }
         if (count == 0) {
             continue;
+        }
+        // 표면 모드면 입자 구 대신 물 표면 하위 구조 하나를 TLAS 에 올린다.
+        bool surface = fluid->surfaceActive(f);
+        VkDeviceAddress surfaceBlas = 0;
+        if (surface && tlasAddress != 0) {
+            surfaceBlas = rayTracer->ensureDynamicBottomLevel(f, SURFACE_MAX_TRIANGLES);
         }
         if (fluid->onCpu(f)) {
             fluid->writeCpuInstances(f,
@@ -396,6 +422,7 @@ void Renderer::recordFluidPass(VkCommandBuffer commandBuffer,
                                      base,
                                      sphereBlas,
                                      fluidSphereMesh,
+                                     surfaceBlas,
                                      temporalResetThisFrame);
         } else {
             fluid->record(commandBuffer,
@@ -409,14 +436,29 @@ void Renderer::recordFluidPass(VkCommandBuffer commandBuffer,
                           base,
                           sphereBlas,
                           fluidSphereMesh,
+                          surfaceBlas,
                           temporalResetThisFrame);
         }
         // 표면은 시뮬레이션이 끝난 위치로 만든다. 둘 다 여기서 해야 장면 패스가 읽기 전에 준비된다.
-        if (fluid->surfaceActive(f)) {
+        if (surface) {
             if (fluid->onCpu(f)) {
                 fluid->buildCpuSurface(slot, f, scene);
             } else {
                 fluid->recordSurface(commandBuffer, slot, f, scene);
+            }
+            if (surfaceBlas != 0) {
+                rayTracer->buildDynamicBottomLevel(commandBuffer,
+                                                   f,
+                                                   fluid->surfaceVertexAddress(slot, f),
+                                                   sizeof(physics::SurfaceVertex),
+                                                   SURFACE_MAX_TRIANGLES,
+                                                   fluid->surfaceRangeAddress(slot, f));
+            }
+            if (surfaceTable != nullptr && f < fluidCount) {
+                const scene::Fluid& settings = scene.fluids[f];
+                surfaceTable[f].vertices = fluid->surfaceVertexAddress(slot, f);
+                surfaceTable[f].waterColor = glm::vec4{settings.waterColor, settings.surfaceRoughness};
+                surfaceTable[f].absorption = glm::vec4{settings.absorption, settings.thicknessScale};
             }
         }
         base += count;

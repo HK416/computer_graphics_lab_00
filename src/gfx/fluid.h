@@ -102,15 +102,35 @@ struct FluidSurfacePushConstants {
     VkDeviceAddress surfaceField = 0;
     VkDeviceAddress surfaceVertices = 0;
     VkDeviceAddress surfaceCounter = 0;
+    // 하위 가속 구조 간접 구축이 읽는 VkAccelerationStructureBuildRangeInfoKHR. [0] 이 삼각형 수.
+    VkDeviceAddress surfaceRange = 0;
     uint32_t surfaceResolution = 0;
     uint32_t surfaceCapacity = 0;
     float surfaceIso = 0.5F;
     uint32_t pad0 = 0;
 };
-static_assert(sizeof(FluidSurfacePushConstants) == 72, "유체 표면 푸시 상수 배치가 셰이더와 어긋난다");
+static_assert(sizeof(FluidSurfacePushConstants) == 80, "유체 표면 푸시 상수 배치가 셰이더와 어긋난다");
 
 inline constexpr uint32_t FLUID_FLAG_RESET_HISTORY = 1U;
 inline constexpr uint32_t FLUID_FLAG_WRITE_TLAS = 2U;
+// 입자 대신 물 표면 하나를 TLAS 인스턴스로 쓴다. 유체 번호는 flags 의 상위 비트(FLUID_FLAG_INDEX_SHIFT)에 싣는다.
+inline constexpr uint32_t FLUID_FLAG_SURFACE_TLAS = 4U;
+inline constexpr uint32_t FLUID_FLAG_INDEX_SHIFT = 8U;
+// 물 표면 TLAS 인스턴스의 customIndex 표식(비트 23). 적중 셰이더가 인스턴스 배열 대신 FluidSurfaceInfo 를 찾는다.
+inline constexpr uint32_t FLUID_SURFACE_CUSTOM_INDEX = 0x800000U;
+// 물 표면 인스턴스의 광선 마스크. 그림자 광선(마스크 0xFE)은 물을 지나가고 카메라·바운스 광선(0xFF)만 맞힌다.
+inline constexpr uint32_t FLUID_SURFACE_RAY_MASK = 0x01U;
+
+// shaders/fluid_types.glsl 의 FluidSurfaceInfo 와 배치가 같아야 한다(scalar). 경로 추적 적중 셰이더가 유체
+// 번호로 찾아 물 표면 정점과 재질을 읽는다.
+struct GpuFluidSurfaceInfo {
+    VkDeviceAddress vertices = 0;
+    // rgb 물 색, w 표면 거칠기.
+    glm::vec4 waterColor{0.0F};
+    // rgb 흡수 계수(1/m), w 두께 배율.
+    glm::vec4 absorption{0.0F};
+};
+static_assert(sizeof(GpuFluidSurfaceInfo) == 40, "물 표면 정보 배치가 셰이더와 어긋난다");
 
 // GPU 컴퓨트 SPH. 입자 상태는 GPU 에만 있고 장면의 Fluid 부품은 설정만 갖는다. 서브스텝마다 해시 격자를
 // 원자 카운터로 다시 짓고(잠금 없음), 밀도·압력, 힘·적분·충돌을 돈 뒤 프레임 끝에 입자마다 그리기
@@ -148,6 +168,7 @@ public:
                            uint32_t tlasBase,
                            VkDeviceAddress sphereBlas,
                            uint32_t sphereMesh,
+                           VkDeviceAddress surfaceBlas,
                            bool resetHistory);
     // 유체 index 를 표면으로 그리는지. 부품 설정이 표면이고 정점 버퍼가 서 있어야 참이다.
     bool surfaceActive(uint32_t index) const;
@@ -155,6 +176,8 @@ public:
     // 프레임마다 한 벌이라 지난 프레임이 아직 그리고 있는 것을 덮어쓰지 않는다.
     VkDeviceAddress surfaceVertexAddress(uint32_t frameSlot, uint32_t index) const;
     VkBuffer surfaceDrawBuffer(uint32_t frameSlot, uint32_t index) const;
+    // 간접 구축용 범위 구조체(삼각형 수)의 주소. surfaceActive 가 참일 때만 의미가 있다.
+    VkDeviceAddress surfaceRangeAddress(uint32_t frameSlot, uint32_t index) const;
 
     uint32_t fluidCount() const { return static_cast<uint32_t>(states.size()); }
     // 부품이 더 달라고 해도 이보다 많이 뿌리지 않는다. 하드웨어 프로파일이 정한다.
@@ -179,6 +202,8 @@ public:
                 uint32_t tlasBase,
                 VkDeviceAddress sphereBlas,
                 uint32_t sphereMesh,
+                // 0 이 아니면 입자 대신 물 표면 하위 구조 하나를 TLAS 인스턴스로 쓴다.
+                VkDeviceAddress surfaceBlas,
                 bool resetHistory);
 
     // 유체 index 의 물 표면을 만든다. GPU 백엔드는 컴퓨트 두 패스, CPU 백엔드는 작업 큐로 같은 표를
@@ -200,6 +225,8 @@ private:
         Buffer surfaceField;
         std::array<Buffer, FLUID_FRAMES> surfaceVertices;
         std::array<Buffer, FLUID_FRAMES> surfaceDrawArgs;
+        // 하위 가속 구조 간접 구축이 읽는 삼각형 수. 마칭이 drawArgs 와 함께 채운다.
+        std::array<Buffer, FLUID_FRAMES> surfaceRanges;
         uint32_t surfaceResolution = 0;
         uint32_t surfaceCapacity = 0;
         bool surfaceReady = false;

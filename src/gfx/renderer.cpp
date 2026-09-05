@@ -193,6 +193,9 @@ Renderer::~Renderer() {
         vkDestroyCommandPool(context.device, frame.commandPool, nullptr);
     }
     destroyBuffer(context, captureBuffer);
+    for (Buffer& buffer : fluidSurfaceTables) {
+        destroyBuffer(context, buffer);
+    }
     for (VkImageView view : targets.hzbMipViews) {
         vkDestroyImageView(context.device, view, nullptr);
     }

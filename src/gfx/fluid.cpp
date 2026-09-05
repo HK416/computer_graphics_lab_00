@@ -228,6 +228,9 @@ void FluidSimulator::ensureSurface(State& state, const scene::Fluid& settings) {
             for (Buffer& buffer : state.surfaceDrawArgs) {
                 context.retireBuffer(buffer);
             }
+            for (Buffer& buffer : state.surfaceRanges) {
+                context.retireBuffer(buffer);
+            }
             state.surfaceResolution = 0;
             state.surfaceCapacity = 0;
         }
@@ -243,6 +246,9 @@ void FluidSimulator::ensureSurface(State& state, const scene::Fluid& settings) {
         context.retireBuffer(buffer);
     }
     for (Buffer& buffer : state.surfaceDrawArgs) {
+        context.retireBuffer(buffer);
+    }
+    for (Buffer& buffer : state.surfaceRanges) {
         context.retireBuffer(buffer);
     }
     state.surfaceResolution = resolution;
@@ -261,21 +267,31 @@ void FluidSimulator::ensureSurface(State& state, const scene::Fluid& settings) {
     // 연산을 거는 자리라 장치 메모리여야 한다(호스트에서 보이는 메모리에 걸면 매우 느리다).
     // CPU 백엔드는 호스트가 직접 채운다.
     for (uint32_t slot = 0; slot < FLUID_FRAMES; ++slot) {
-        state.surfaceVertices[slot] = createBuffer(context,
-                                                   vertexBytes,
-                                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                                   state.cpu ? MemoryLocation::HOST_WRITE : MemoryLocation::DEVICE,
-                                                   "물 표면 정점");
+        state.surfaceVertices[slot] =
+            createBuffer(context,
+                         vertexBytes,
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                         state.cpu ? MemoryLocation::HOST_WRITE : MemoryLocation::DEVICE,
+                         "물 표면 정점");
         state.surfaceDrawArgs[slot] = createBuffer(
             context,
             sizeof(VkDrawIndirectCommand),
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             state.cpu ? MemoryLocation::HOST_WRITE : MemoryLocation::DEVICE,
             "물 표면 그리기 인자");
+        // 하위 가속 구조 간접 구축이 읽는 삼각형 수. 첫 칸이 primitiveCount 고 나머지는 0 이다.
+        state.surfaceRanges[slot] = createBuffer(
+            context,
+            sizeof(VkAccelerationStructureBuildRangeInfoKHR),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            state.cpu ? MemoryLocation::HOST_WRITE : MemoryLocation::DEVICE,
+            "물 표면 삼각형 수");
         if (state.cpu) {
             // GPU 경로는 recordSurface 가 프레임마다 채운다.
             *static_cast<VkDrawIndirectCommand*>(state.surfaceDrawArgs[slot].mapped) =
                 VkDrawIndirectCommand{0, 1, 0, 0};
+            *static_cast<VkAccelerationStructureBuildRangeInfoKHR*>(state.surfaceRanges[slot].mapped) =
+                VkAccelerationStructureBuildRangeInfoKHR{0, 0, 0, 0};
         }
     }
 }
@@ -376,6 +392,7 @@ void FluidSimulator::writeCpuInstances(uint32_t index,
                                        uint32_t tlasBase,
                                        VkDeviceAddress sphereBlas,
                                        uint32_t sphereMesh,
+                                       VkDeviceAddress surfaceBlas,
                                        bool resetHistory) {
     State& state = states[index];
     if (!state.cpu || state.count == 0 || instances == nullptr) {
@@ -401,7 +418,21 @@ void FluidSimulator::writeCpuInstances(uint32_t index,
     float radius = params.particleRadius;
     auto* target = static_cast<GpuInstance*>(instances);
     auto* tlas = static_cast<VkAccelerationStructureInstanceKHR*>(tlasInstances);
-    bool writeTlas = tlas != nullptr && sphereBlas != 0;
+    bool writeTlas = tlas != nullptr && sphereBlas != 0 && surfaceBlas == 0;
+    if (tlas != nullptr && surfaceBlas != 0) {
+        // 표면 모드: 첫 칸에 물 표면 구조 하나, 나머지 칸은 비활성(구조 주소 0). GPU 경로(fluid_instances.comp)와
+        // 같은 규칙이다.
+        std::fill_n(tlas + tlasBase, state.count, VkAccelerationStructureInstanceKHR{});
+        VkAccelerationStructureInstanceKHR& entry = tlas[tlasBase];
+        entry.transform.matrix[0][0] = 1.0F;
+        entry.transform.matrix[1][1] = 1.0F;
+        entry.transform.matrix[2][2] = 1.0F;
+        entry.instanceCustomIndex = FLUID_SURFACE_CUSTOM_INDEX | index;
+        entry.mask = FLUID_SURFACE_RAY_MASK;
+        // 물 안에서 나가는 광선이 뒷면을 맞혀야 하므로 컬링을 끈다.
+        entry.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        entry.accelerationStructureReference = surfaceBlas;
+    }
 
     jobs.parallelFor(state.count, 256, [&](uint32_t begin, uint32_t end) {
         for (uint32_t i = begin; i < end; ++i) {
@@ -510,6 +541,7 @@ void FluidSimulator::record(VkCommandBuffer commandBuffer,
                             uint32_t tlasBase,
                             VkDeviceAddress sphereBlas,
                             uint32_t sphereMesh,
+                            VkDeviceAddress surfaceBlas,
                             bool resetHistory) {
     State& state = states[index];
     // CPU 백엔드는 writeCpuInstances 가 이미 인스턴스를 써 두었다.
@@ -544,8 +576,10 @@ void FluidSimulator::record(VkCommandBuffer commandBuffer,
     push.tlasBase = tlasBase;
     push.sphereMesh = sphereMesh;
     push.dt = dt;
-    push.blasLow = static_cast<uint32_t>(sphereBlas & 0xFFFFFFFFULL);
-    push.blasHigh = static_cast<uint32_t>(sphereBlas >> 32U);
+    // 표면이 TLAS 에 오르면 입자 구 대신 그 구조 주소를 싣는다.
+    VkDeviceAddress tlasBlas = surfaceBlas != 0 ? surfaceBlas : sphereBlas;
+    push.blasLow = static_cast<uint32_t>(tlasBlas & 0xFFFFFFFFULL);
+    push.blasHigh = static_cast<uint32_t>(tlasBlas >> 32U);
     auto setBuffers = [&](uint32_t in, uint32_t out) {
         push.positionsIn = state.positions[in].address;
         push.positionsOut = state.positions[out].address;
@@ -604,7 +638,9 @@ void FluidSimulator::record(VkCommandBuffer commandBuffer,
     // 프레임 끝: 입자마다 인스턴스를 쓴다. 다시 뿌린 프레임은 지난 위치가 없다.
     setBuffers(state.current, state.current ^ 1U);
     push.flags = (resetHistory || emitted ? FLUID_FLAG_RESET_HISTORY : 0U) |
-                 (tlasInstances != 0 && sphereBlas != 0 ? FLUID_FLAG_WRITE_TLAS : 0U);
+                 (tlasInstances != 0 && tlasBlas != 0 ? FLUID_FLAG_WRITE_TLAS : 0U) |
+                 (tlasInstances != 0 && surfaceBlas != 0 ? FLUID_FLAG_SURFACE_TLAS : 0U) |
+                 (index << FLUID_FLAG_INDEX_SHIFT);
     dispatch(instancesPipeline);
 
     // 인스턴스는 그림자·장면·컬링·광선 경로가, TLAS 인스턴스는 가속 구조 구축이 읽는다.
@@ -629,6 +665,10 @@ VkDeviceAddress FluidSimulator::surfaceVertexAddress(uint32_t frameSlot, uint32_
 
 VkBuffer FluidSimulator::surfaceDrawBuffer(uint32_t frameSlot, uint32_t index) const {
     return index < states.size() ? states[index].surfaceDrawArgs[frameSlot % FLUID_FRAMES].handle : VK_NULL_HANDLE;
+}
+
+VkDeviceAddress FluidSimulator::surfaceRangeAddress(uint32_t frameSlot, uint32_t index) const {
+    return index < states.size() ? states[index].surfaceRanges[frameSlot % FLUID_FRAMES].address : 0;
 }
 
 void FluidSimulator::recordSurface(VkCommandBuffer commandBuffer,
@@ -657,10 +697,13 @@ void FluidSimulator::recordSurface(VkCommandBuffer commandBuffer,
     gridPush.cellParticles = state.cellParticles.address;
     gridPush.previousRendered = state.previousRendered.address;
     gridPush.particleCount = state.count;
-    // 지난 프레임이 이 슬롯의 인자를 읽고 있었을 수 있다. 채우기 전에 그것이 끝났음을 못 박는다.
+    // 지난 프레임이 이 슬롯의 인자를 읽고 있었을 수 있다(간접 그리기, 정점 셰이더, 가속 구조 구축). 채우기
+    // 전에 그것이 끝났음을 못 박는다.
     memoryBarrier(commandBuffer,
-                  VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
-                  VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+                  VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                      VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                  VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                      VK_ACCESS_2_SHADER_READ_BIT,
                   VK_PIPELINE_STAGE_2_CLEAR_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                   VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     vkCmdFillBuffer(commandBuffer, state.cellCounts.handle, 0, VK_WHOLE_SIZE, 0);
@@ -669,6 +712,10 @@ void FluidSimulator::recordSurface(VkCommandBuffer commandBuffer,
     vkCmdFillBuffer(commandBuffer, drawArgs, 0, sizeof(uint32_t), 0);
     vkCmdFillBuffer(commandBuffer, drawArgs, sizeof(uint32_t), sizeof(uint32_t), 1);
     vkCmdFillBuffer(commandBuffer, drawArgs, 2 * sizeof(uint32_t), 2 * sizeof(uint32_t), 0);
+    vkCmdFillBuffer(commandBuffer, state.surfaceRanges[frameSlot].handle, 0, VK_WHOLE_SIZE, 0);
+    // 정점 버퍼의 쓰지 않는 꼬리는 0 이어야 한다. 간접 구축이 없는 장치는 하위 가속 구조를 상한 개수로 세우는데,
+    // 지난 프레임의 정점이 남아 있으면 옛 물이 광선에 맞는다. 3 MB 채우기라 GPU 에서는 값이 안 나간다.
+    vkCmdFillBuffer(commandBuffer, state.surfaceVertices[frameSlot].handle, 0, VK_WHOLE_SIZE, 0);
     memoryBarrier(commandBuffer,
                   VK_PIPELINE_STAGE_2_CLEAR_BIT,
                   VK_ACCESS_2_TRANSFER_WRITE_BIT,
@@ -692,6 +739,7 @@ void FluidSimulator::recordSurface(VkCommandBuffer commandBuffer,
     push.surfaceField = state.surfaceField.address;
     push.surfaceVertices = state.surfaceVertices[frameSlot].address;
     push.surfaceCounter = state.surfaceDrawArgs[frameSlot].address;
+    push.surfaceRange = state.surfaceRanges[frameSlot].address;
     push.surfaceResolution = state.surfaceResolution;
     push.surfaceCapacity = state.surfaceCapacity;
     push.surfaceIso = settings.surfaceIso;
@@ -713,12 +761,14 @@ void FluidSimulator::recordSurface(VkCommandBuffer commandBuffer,
     uint32_t cellGroups = (state.surfaceResolution + FLUID_SURFACE_GROUP_SIZE - 1) / FLUID_SURFACE_GROUP_SIZE;
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, marchingPipeline);
     vkCmdDispatch(commandBuffer, cellGroups, cellGroups, cellGroups);
-    // 정점은 정점 셰이더가 주소로 읽고, 개수는 간접 그리기가 읽는다.
+    // 정점은 정점 셰이더와 하위 가속 구조 구축이 읽고, 개수는 간접 그리기와 간접 구축이 읽는다.
     memoryBarrier(commandBuffer,
                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                  VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-                  VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
+                  VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+                      VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                  VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT |
+                      VK_ACCESS_2_SHADER_READ_BIT);
 }
 
 void FluidSimulator::buildCpuSurface(uint32_t frameSlot, uint32_t index, const scene::Scene& scene) {
@@ -744,8 +794,13 @@ void FluidSimulator::buildCpuSurface(uint32_t frameSlot, uint32_t index, const s
                                                 vertices,
                                                 state.surfaceCapacity,
                                                 &jobs);
+    // GPU 경로와 같은 이유로 꼬리를 0 으로 지운다(recordSurface 참조).
+    std::memset(
+        vertices + written, 0, static_cast<size_t>(state.surfaceCapacity - written) * sizeof(physics::SurfaceVertex));
     *static_cast<VkDrawIndirectCommand*>(state.surfaceDrawArgs[frameSlot].mapped) =
         VkDrawIndirectCommand{written, 1, 0, 0};
+    *static_cast<VkAccelerationStructureBuildRangeInfoKHR*>(state.surfaceRanges[frameSlot].mapped) =
+        VkAccelerationStructureBuildRangeInfoKHR{written / 3, 0, 0, 0};
 }
 
 } // namespace gfx

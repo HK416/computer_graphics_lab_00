@@ -27,6 +27,12 @@
 #define FLUID_FLAG_RESET_HISTORY 1u
 // 상위 가속 구조 인스턴스도 쓴다. 광선 기능이 켜져 있고 구의 하위 구조가 있을 때만 선다.
 #define FLUID_FLAG_WRITE_TLAS 2u
+// 입자 대신 물 표면 하나를 TLAS 인스턴스로 쓴다. 유체 번호는 flags >> FLUID_FLAG_INDEX_SHIFT.
+#define FLUID_FLAG_SURFACE_TLAS 4u
+#define FLUID_FLAG_INDEX_SHIFT 8u
+// 물 표면 TLAS 인스턴스의 customIndex 표식(비트 23)과 광선 마스크. src/gfx/fluid.h 와 같다.
+#define FLUID_SURFACE_CUSTOM_INDEX 0x800000u
+#define FLUID_SURFACE_RAY_MASK 0x01u
 
 // 강체 하나. data0.xyz 반쪽 크기(원기둥·캡슐은 y 가 반높이), w 반지름. world/inverseWorld 로 지역
 // 공간에서 판정한다(collider_shapes.glsl). 메쉬 콜라이더는 넘어오지 않는다.
@@ -81,6 +87,19 @@ layout(buffer_reference, scalar) buffer FluidFieldBuffer {
 };
 layout(buffer_reference, scalar) buffer FluidSurfaceVertexBuffer {
     FluidSurfaceVertex items[];
+};
+
+// 유체 하나의 물 표면 정보. src/gfx/fluid.h 의 GpuFluidSurfaceInfo 와 배치가 같아야 한다(scalar).
+// 경로 추적 적중 셰이더가 customIndex 의 유체 번호로 찾는다.
+struct FluidSurfaceInfo {
+    FluidSurfaceVertexBuffer vertices;
+    // rgb 물 색, w 표면 거칠기.
+    vec4 waterColor;
+    // rgb 흡수 계수(1/m), w 두께 배율.
+    vec4 absorption;
+};
+layout(buffer_reference, scalar) readonly buffer FluidSurfaceInfoBuffer {
+    FluidSurfaceInfo items[];
 };
 
 layout(buffer_reference, scalar) readonly buffer FluidParamsBuffer {

@@ -679,6 +679,9 @@ private:
     std::vector<PassHook> passHooks;
     // 이번 프레임 유체 패스가 상위 가속 구조 인스턴스 버퍼 앞쪽에 써 둔 입자 수.
     uint32_t fluidTlasPrepended = 0;
+    // 유체마다의 물 표면 정보(GpuFluidSurfaceInfo). 경로 추적 적중 셰이더가 읽는다. 프레임마다 한 벌.
+    std::array<Buffer, FRAMES_IN_FLIGHT> fluidSurfaceTables;
+    uint32_t fluidSurfaceTableCapacity = 0;
     VkPipelineLayout hzbPipelineLayout = VK_NULL_HANDLE;
     VkPipeline hzbPipeline = VK_NULL_HANDLE;
     // meshlet 가시성 비트. 프레임을 넘어 살아남으므로 프레임별 버퍼가 아니다. 낡은 비트는 1차

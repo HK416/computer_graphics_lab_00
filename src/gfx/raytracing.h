@@ -86,6 +86,21 @@ public:
     void updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
                                   const Buffer& skinnedVertices,
                                   const std::vector<SkinnedInstance>& skinned);
+    // GPU 가 만든 비인덱스 삼각형 목록(물 표면)의 하위 가속 구조. 삼각형 수는 CPU 가 모른다. 장치가 간접 구축을
+    // 지원하면 rangeAddress 의 VkAccelerationStructureBuildRangeInfoKHR 에서 읽고, 아니면(NVIDIA) 상한 개수로
+    // 세운다 — 그때는 정점 버퍼의 쓰지 않은 꼬리가 0(퇴화 삼각형)이어야 하므로 마칭이 버퍼를 먼저 지운다.
+    bool indirectBuildAvailable() const { return cmdBuildAccelerationStructuresIndirect != nullptr; }
+    // key 번째 동적 구조를 maxTriangles 크기로 준비하고 주소를 돌려준다. 인스턴스가 이 주소를 가리킬 수 있게
+    // 구축보다 먼저 부른다. 같은 크기면 자리를 그대로 쓴다.
+    VkDeviceAddress ensureDynamicBottomLevel(uint32_t key, uint32_t maxTriangles);
+    // key 번째 동적 구조를 세운다. vertices 는 위치가 앞에 오는 stride 바이트 정점, rangeAddress 는 삼각형 수가
+    // 든 범위 구조체. 정점을 만든 컴퓨트 뒤, updateTopLevel 앞에 온다.
+    void buildDynamicBottomLevel(VkCommandBuffer commandBuffer,
+                                 uint32_t key,
+                                 VkDeviceAddress vertices,
+                                 uint32_t vertexStride,
+                                 uint32_t maxTriangles,
+                                 VkDeviceAddress rangeAddress);
     // 장면 인스턴스로 상위 가속 구조를 다시 만든다. 매 프레임 호출해도 된다.
     // instanceSlots 는 오브젝트 인덱스 -> 그리기 인스턴스 슬롯. 적중 셰이더가 인스턴스 배열을
     // 이 번호로 찾으므로 buildDrawCommands 가 만든 것과 반드시 같아야 한다.
@@ -114,6 +129,8 @@ public:
                VkDeviceAddress instanceAddress,
                VkDeviceAddress lightAddress,
                VkDeviceAddress skinnedVertexAddress,
+               // 유체마다의 물 표면 정보(FluidSurfaceInfo). 0 이면 물 표면이 없다.
+               VkDeviceAddress fluidSurfaceAddress,
                uint32_t accumulationImage,
                // 화면 UV 모션 벡터를 쓸 rg16f 스토리지 슬롯.
                uint32_t velocityImage,
@@ -154,6 +171,13 @@ private:
     bool bottomLevelBuilt = false;
     // 스킨 인스턴스마다 하나. 포즈가 바뀔 때마다 같은 자리에 다시 세운다.
     std::vector<AccelerationStructure> skinnedBottomLevels;
+    // 동적(물 표면) 구조. 키마다 구조·스크래치·크기 근거를 둔다.
+    struct DynamicBottomLevel {
+        AccelerationStructure structure;
+        Buffer scratch;
+        uint32_t maxTriangles = 0;
+    };
+    std::vector<DynamicBottomLevel> dynamicBottomLevels;
     AccelerationStructure topLevel;
     // 구축 입력은 CPU 가 기록 시점에 채우므로 진행 중인 프레임 수만큼 나눠 둬야 한다. 하나만
     // 두면 지난 프레임의 구축이 아직 읽는 중에 덮어쓰게 된다.
@@ -179,6 +203,7 @@ private:
     PFN_vkDestroyAccelerationStructureKHR destroyAccelerationStructure = nullptr;
     PFN_vkGetAccelerationStructureBuildSizesKHR getBuildSizes = nullptr;
     PFN_vkCmdBuildAccelerationStructuresKHR cmdBuildAccelerationStructures = nullptr;
+    PFN_vkCmdBuildAccelerationStructuresIndirectKHR cmdBuildAccelerationStructuresIndirect = nullptr;
     PFN_vkGetAccelerationStructureDeviceAddressKHR getStructureAddress = nullptr;
     PFN_vkCreateRayTracingPipelinesKHR createRayTracingPipelines = nullptr;
     PFN_vkGetRayTracingShaderGroupHandlesKHR getShaderGroupHandles = nullptr;

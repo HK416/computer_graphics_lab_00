@@ -74,7 +74,7 @@ vec3 nextEventEstimation(Surface surface, inout uint seed) {
     shadowVisibility = 0.0;
     traceRayEXT(topLevel,
                 PATH_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-                0xFF,
+                PATH_SHADOW_RAY_MASK,
                 0,
                 0,
                 1,
@@ -108,7 +108,7 @@ float firstLightVisibility(vec3 position, vec3 normal) {
         shadowVisibility = 0.0;
         traceRayEXT(topLevel,
                     PATH_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-                    0xFF,
+                    PATH_SHADOW_RAY_MASK,
                     0,
                     0,
                     1,
@@ -152,6 +152,35 @@ vec3 sampleBsdf(Surface surface, inout uint seed, out vec3 direction) {
     return (vec3(1.0) - fresnel) * (1.0 - surface.metallic) * surface.albedo / (1.0 - specularProbability);
 }
 
+// 물 표면의 다음 방향. 유전체(굴절률 1.33)의 프레넬 비중으로 반사와 굴절 가운데 하나를 고른다. 두 로브를
+// 확률로 고르고 그 확률로 나누므로 가중치는 1 이다. 반사는 거칠기대로 GGX 반값 벡터를 흔들고, 굴절은
+// 완전 매끈하게 꺾는다. 안에서 나가며 전반사가 나면 반사만 남는다.
+//
+// ponytail: 굴절에 거칠기를 넣지 않았다(물은 거의 매끈하다). 굴절률 변화에 따른 복사 휘도 배율(eta²)도
+// 카메라 경로 한 번에 들어갔다 나오므로 상쇄되어 생략했다.
+vec3 sampleWater(Surface surface, bool entering, inout uint seed, out vec3 direction) {
+    const float IOR_WATER = 1.33;
+    float eta = entering ? 1.0 / IOR_WATER : IOR_WATER;
+    // 매질 경계의 F0 = ((n1-n2)/(n1+n2))² ≈ 0.02.
+    float f0 = 0.02;
+    float cosine = max(dot(surface.normal, surface.view), 1e-4);
+    float fresnel = f0 + (1.0 - f0) * pow(1.0 - cosine, 5.0);
+    vec3 refracted = refract(-surface.view, surface.normal, eta);
+    bool totalInternal = dot(refracted, refracted) < 1e-8;
+    float reflectProbability = totalInternal ? 1.0 : clamp(fresnel, 0.02, 0.98);
+
+    if (randomFloat(seed) < reflectProbability) {
+        vec3 halfway = sampleGgxHalfVector(surface.normal, surface.roughness, seed);
+        direction = reflect(-surface.view, halfway);
+        if (dot(surface.normal, direction) <= 0.0) {
+            return vec3(0.0);
+        }
+        return vec3(fresnel / reflectProbability);
+    }
+    direction = refracted;
+    return vec3((1.0 - fresnel) / (1.0 - reflectProbability));
+}
+
 vec3 tracePath(vec3 origin, vec3 direction, inout uint seed, out PrimaryHit primary) {
     vec3 radiance = vec3(0.0);
     vec3 throughput = vec3(1.0);
@@ -166,13 +195,26 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed, out PrimaryHit prim
     primary.visibility = -1.0;
     bool useNextEvent = (pathTrace.flags & PATH_FLAG_NEXT_EVENT) != 0u;
     bool useRoulette = (pathTrace.flags & PATH_FLAG_RUSSIAN_ROULETTE) != 0u;
+    // 물 속을 지나는 구간. 다음 표면까지의 거리만큼 Beer-Lambert 로 먹인다.
+    bool insideWater = false;
+    vec3 waterAbsorption = vec3(0.0);
 
-    for (uint bounce = 0; bounce < pathTrace.maxBounces; ++bounce) {
+    // 물 표면 통과(굴절·반사)는 바운스 예산을 먹지 않는다. 물에 들어가 나오는 데만 두 번이 들어 셋으로는 바닥이
+    // 까맣게 남기 때문이다. 대신 물 사건 수를 따로 세어 갇힌 경로를 끊는다.
+    const uint MAX_WATER_EVENTS = 8u;
+    uint waterEvents = 0u;
+    bool primaryCaptured = false;
+
+    for (uint bounce = 0; bounce < pathMaxBounces() && waterEvents < MAX_WATER_EVENTS;) {
         traceRayEXT(topLevel, PATH_RAY_FLAGS, 0xFF, 0, 0, 0, origin, 1e-3, direction, 1e4, 0);
+
+        if (insideWater && !payload.missed) {
+            throughput *= exp(-waterAbsorption * payload.hitDistance);
+        }
 
         if (payload.missed) {
             radiance += throughput * skyRadiance(direction);
-            if (bounce == 0u) {
+            if (!primaryCaptured) {
                 primary.velocity = skyVelocity(direction);
             }
             break;
@@ -189,7 +231,8 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed, out PrimaryHit prim
         radiance += throughput * payload.emissive;
 
         // 1차 히트만 건져 둔다. 다음 바운스가 페이로드를 덮어쓰기 때문이다.
-        if (bounce == 0u) {
+        if (!primaryCaptured) {
+            primaryCaptured = true;
             primary.normal = payload.normal;
             primary.albedo = payload.albedo;
             primary.uv = payload.uv;
@@ -199,19 +242,37 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed, out PrimaryHit prim
             vec4 clip = pathTrace.camera.item.viewProjection * vec4(payload.position, 1.0);
             primary.ndcDepth = clip.w > 0.0 ? clip.z / clip.w : 0.0;
             primary.velocity = screenVelocity(payload.position, payload.previousPosition);
-            if (pathTrace.debugMode == DEBUG_MODE_SHADOW) {
+            if (pathDebugMode() == DEBUG_MODE_SHADOW) {
                 primary.visibility = firstLightVisibility(surface.position, surface.normal);
             }
         }
 
-        if (useNextEvent) {
-            radiance += throughput * nextEventEstimation(surface, seed);
-        }
-
         vec3 nextDirection;
-        vec3 weight = sampleBsdf(surface, seed, nextDirection);
-        if (weight == vec3(0.0)) {
-            break;
+        vec3 weight;
+        if (payload.water) {
+            // 물 표면은 순수 스페큘러라 다음 사건 추정을 건너뛴다. 진행 방향으로 들어가는지 나가는지를 가르고
+            // 법선을 광선 쪽으로 세운다.
+            bool entering = dot(surface.normal, direction) < 0.0;
+            if (!entering) {
+                surface.normal = -surface.normal;
+            }
+            weight = sampleWater(surface, entering, seed, nextDirection);
+            if (weight == vec3(0.0)) {
+                break;
+            }
+            // 굴절했으면 매질이 바뀐다. 반사면 그대로다.
+            if (dot(nextDirection, surface.normal) < 0.0) {
+                insideWater = entering;
+                waterAbsorption = payload.absorption;
+            }
+        } else {
+            if (useNextEvent) {
+                radiance += throughput * nextEventEstimation(surface, seed);
+            }
+            weight = sampleBsdf(surface, seed, nextDirection);
+            if (weight == vec3(0.0)) {
+                break;
+            }
         }
         throughput *= weight;
 
@@ -226,6 +287,11 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed, out PrimaryHit prim
 
         origin = surface.position;
         direction = nextDirection;
+        if (payload.water) {
+            ++waterEvents;
+        } else {
+            ++bounce;
+        }
     }
     return radiance;
 }
@@ -233,7 +299,7 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed, out PrimaryHit prim
 // mesh.frag 의 debugColor 와 같은 그림이 나오도록 맞춘다. 경로 추적에 없는 모드(meshlet, LOD,
 // 캐스케이드, 모션 벡터)는 편집기가 고를 수 없게 막아 두었다.
 vec3 debugColor(PrimaryHit primary) {
-    switch (pathTrace.debugMode) {
+    switch (pathDebugMode()) {
     case DEBUG_MODE_NORMAL:
         return normalize(primary.normal) * 0.5 + 0.5;
     case DEBUG_MODE_UV:
@@ -261,7 +327,7 @@ void main() {
     uint seed = pcgHash(uint(pixel.x) + uint(pixel.y) * gl_LaunchSizeEXT.x + pathTrace.frameIndex * 9781u);
 
     Camera camera = pathTrace.camera.item;
-    uint samplesPerFrame = max(pathTrace.samplesPerFrame, 1u);
+    uint samplesPerFrame = max(pathSamplesPerFrame(), 1u);
     vec3 radiance = vec3(0.0);
     PrimaryHit primary;
 
@@ -294,7 +360,7 @@ void main() {
 
     // 디버그 뷰는 셰이딩 대신 중간 값을 그린다. 매 프레임 같은 값이 쌓이므로 톤 매핑이 표본 수로
     // 나눠도 그 값 그대로 남는다. 아무것도 못 맞힌 화소는 래스터 경로와 맞춰 하늘을 그대로 둔다.
-    if (pathTrace.debugMode != DEBUG_MODE_SHADED && primary.hitDistance >= 0.0) {
+    if (pathDebugMode() != DEBUG_MODE_SHADED && primary.hitDistance >= 0.0) {
         radiance = debugColor(primary);
     }
 
@@ -326,7 +392,7 @@ void main() {
         imageStore(bindlessStorageImages[nonuniformEXT(highSlot(pathTrace.guideNormalRoughnessSlots))],
                    pixel,
                    vec4(hit ? primary.roughness : 1.0, 0.0, 0.0, 0.0));
-        imageStore(bindlessStorageImages[nonuniformEXT(pathTrace.guideDepthSlot)],
+        imageStore(bindlessStorageImages[nonuniformEXT(pathGuideDepthSlot())],
                    pixel,
                    vec4(hit ? primary.ndcDepth : 0.0, 0.0, 0.0, 0.0));
     }

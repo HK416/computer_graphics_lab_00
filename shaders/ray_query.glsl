@@ -14,7 +14,9 @@ float rayQueryVisibility(accelerationStructureEXT topLevel, vec3 position, vec3 
     rayQueryInitializeEXT(query,
                           topLevel,
                           gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
-                          0xFFu,
+                          // 물 표면 인스턴스(마스크 0x01)는 지나간다. 래스터의 물은 반투명으로 그려지므로 그림자를
+                          // 던지지 않는 편이 맞다.
+                          0xFEu,
                           origin,
                           1.0e-4,
                           toLight,

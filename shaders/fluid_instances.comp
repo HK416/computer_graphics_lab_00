@@ -41,14 +41,30 @@ void main() {
 
     if ((push.flags & FLUID_FLAG_WRITE_TLAS) != 0u) {
         TlasInstance tlas;
-        tlas.row0 = vec4(radius, 0.0, 0.0, position.x);
-        tlas.row1 = vec4(0.0, radius, 0.0, position.y);
-        tlas.row2 = vec4(0.0, 0.0, radius, position.z);
-        // 적중 셰이더가 인스턴스 배열을 찾는 번호. 마스크 0xFF.
-        tlas.customIndexMask = (slot & 0xFFFFFFu) | (0xFFu << 24u);
-        tlas.sbtOffsetFlags = 0u;
-        tlas.blasLow = push.blasLow;
-        tlas.blasHigh = push.blasHigh;
+        if ((push.flags & FLUID_FLAG_SURFACE_TLAS) != 0u) {
+            // 표면 모드: 첫 칸에 물 표면 구조 하나(세계 공간 정점이라 단위 변환), 나머지 칸은 비활성(구조 주소 0).
+            // customIndex 는 유체 번호에 표식을 얹은 것이고, 마스크는 그림자 광선이 지나가도록 좁힌다.
+            // 물 안에서 나가는 광선이 뒷면을 맞혀야 하므로 컬링을 끈다(플래그 1 = FACING_CULL_DISABLE).
+            bool first = i == 0u;
+            tlas.row0 = vec4(first ? 1.0 : 0.0, 0.0, 0.0, 0.0);
+            tlas.row1 = vec4(0.0, first ? 1.0 : 0.0, 0.0, 0.0);
+            tlas.row2 = vec4(0.0, 0.0, first ? 1.0 : 0.0, 0.0);
+            tlas.customIndexMask = first ? ((FLUID_SURFACE_CUSTOM_INDEX | (push.flags >> FLUID_FLAG_INDEX_SHIFT)) |
+                                            (FLUID_SURFACE_RAY_MASK << 24u))
+                                         : 0u;
+            tlas.sbtOffsetFlags = first ? (1u << 24u) : 0u;
+            tlas.blasLow = first ? push.blasLow : 0u;
+            tlas.blasHigh = first ? push.blasHigh : 0u;
+        } else {
+            tlas.row0 = vec4(radius, 0.0, 0.0, position.x);
+            tlas.row1 = vec4(0.0, radius, 0.0, position.y);
+            tlas.row2 = vec4(0.0, 0.0, radius, position.z);
+            // 적중 셰이더가 인스턴스 배열을 찾는 번호. 마스크 0xFF.
+            tlas.customIndexMask = (slot & 0xFFFFFFu) | (0xFFu << 24u);
+            tlas.sbtOffsetFlags = 0u;
+            tlas.blasLow = push.blasLow;
+            tlas.blasHigh = push.blasHigh;
+        }
         push.tlasInstances.items[push.tlasBase + i] = tlas;
     }
 }

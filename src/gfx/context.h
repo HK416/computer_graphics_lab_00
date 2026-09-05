@@ -21,6 +21,9 @@ struct Capabilities {
     bool accelerationStructure = false;
     bool rayTracingPipeline = false;
     bool rayQuery = false;
+    // 하위 가속 구조의 삼각형 수를 장치 버퍼에서 읽어 세울 수 있는지(간접 구축). GPU 가 만든 물 표면을
+    // 광선 경로에 올리는 데 쓴다. 없으면 물 표면은 Path Tracing 에 보이지 않는다.
+    bool accelerationStructureIndirectBuild = false;
     // 간접 그리기 개수를 GPU 버퍼에서 읽어 압축 드로우가 가능한지. 없으면 고정 개수로 디스패치하고
     // 컬링된 드로우는 instanceCount 를 0 으로 기록한다.
     bool drawIndirectCount = false;
