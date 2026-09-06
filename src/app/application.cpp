@@ -331,7 +331,10 @@ void Application::registerBuiltinModels() {
     for (uint32_t i = 0; i < count; ++i) {
         auto primitive = static_cast<asset::Primitive>(i);
         asset::Model model = asset::makePrimitive(primitive);
-        asset::buildLodHierarchy(model.meshes[0], &jobs);
+        // 천 격자는 정점이 매 프레임 움직여 단순화 단계의 오차 구가 뜻을 잃는다(항등 변환에 월드 정점이라 더욱).
+        // 0단계 하나만 두어 LOD 선정이 정점을 합쳤다 나눴다 하지 않게 한다.
+        asset::buildLodHierarchy(
+            model.meshes[0], &jobs, nullptr, asset::clothPrimitiveResolution(primitive) != 0 ? 1U : 0U);
         uint32_t registered = registerModel(std::filesystem::path{asset::primitiveAssetName(primitive)}, model, true);
         primitiveMeshes[i] = loadedModels[registered].meshBase;
     }

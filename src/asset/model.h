@@ -252,7 +252,12 @@ void skinMatrices(const Skeleton& skeleton,
 // 정점 캐시와 오버드로를 최적화한 뒤 meshlet 으로 나누고, 단계별로 묶어 단순화해 LOD DAG 를 만든다.
 // 정점 버퍼는 그대로 두고, meshlet 마다 쓰는 정점 번호 목록과 LOD 단계별로 이어진 인덱스 버퍼를 만든다.
 // progress 를 주면 lodWorkEstimate(mesh) 만큼을 그룹 단위로 나눠 더한다. 총량은 부르는 쪽이 미리 잡는다.
-void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs = nullptr, LoadProgress* progress = nullptr);
+// maxLevels 가 0 이 아니면 그 단계 수에서 멈춘다. 1 이면 단순화 없이 0단계 meshlet 만 만든다 — 천처럼 정점이 매
+// 프레임 움직여 단순화 오차 구가 뜻을 잃는 메쉬가 쓴다.
+void buildLodHierarchy(Mesh& mesh,
+                       core::JobSystem* jobs = nullptr,
+                       LoadProgress* progress = nullptr,
+                       uint32_t maxLevels = 0);
 
 // buildLodHierarchy 가 progress 에 더하는 총량. 단계마다 절반씩 줄어드는 인덱스 수의 합을 어림한 값이다.
 uint64_t lodWorkEstimate(const Mesh& mesh);

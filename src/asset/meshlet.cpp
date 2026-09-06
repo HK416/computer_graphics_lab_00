@@ -155,7 +155,7 @@ uint64_t lodWorkEstimate(const Mesh& mesh) {
     return static_cast<uint64_t>(mesh.indices.size()) * 3;
 }
 
-void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs, LoadProgress* progress) {
+void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs, LoadProgress* progress, uint32_t maxLevels) {
     // 이 메쉬가 진행률에 더하는 몫은 어림값과 정확히 같아야 한다. 덜 쓰면 끝에서 메우고, 더 쓰면
     // (단순화에 실패한 그룹이 많아 단계마다 절반으로 줄지 않을 때) 어림값에서 자른다. 그래야 메쉬
     // 여럿이 총량 하나를 나눠 쓸 때 한 메쉬가 남의 몫까지 채우지 않는다.
@@ -188,7 +188,8 @@ void buildLodHierarchy(Mesh& mesh, core::JobSystem* jobs, LoadProgress* progress
     levels.push_back(splitIntoMeshlets(indices, canonical, 0));
     reportWork(indices.size());
 
-    for (uint32_t level = 1; level < MAX_LOD_LEVELS; ++level) {
+    uint32_t levelLimit = maxLevels == 0 ? MAX_LOD_LEVELS : std::min(maxLevels, MAX_LOD_LEVELS);
+    for (uint32_t level = 1; level < levelLimit; ++level) {
         std::vector<BuildMeshlet>& previous = levels.back();
         if (previous.size() <= 1) {
             break;

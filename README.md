@@ -500,6 +500,9 @@ CPU 백엔드는 표본마다 입자 전부를 훑으므로 격자 해상도가 
   그대로 보인다. 월드 공간에서 풀므로 그리기·TLAS 인스턴스 변환은 항등이다.
 - 진행은 유체처럼 프레임 시간(1/30 초 상한)을 서브스텝으로 나눈다. 헤드리스에서는 돌지 않는다(상태가 장면에
   없어 관측할 것이 없다).
+- 천 격자는 **LOD 가 0단계 하나뿐**이다(`buildLodHierarchy` 의 `maxLevels` 1). 단순화 단계의 오차 구는 정지
+  자세 기준이라 정점이 매 프레임 움직이면 뜻을 잃고, 항등 변환에 월드 정점이라 더욱 어긋나, LOD 선정이 굵은
+  단계와 고운 단계를 오가며 정점이 합쳐졌다 나뉘는 것처럼 보였다.
 
 ```sh
 ./build/release/cg_lab --open tests/scenes/cloth_gpu.json --play --screenshot gpu.png --screenshot-frame 120
