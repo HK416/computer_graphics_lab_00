@@ -64,6 +64,8 @@ public:
     void setModelCollector(std::function<void()> collector) { modelCollector = std::move(collector); }
     // 플러그인이 «렌더 설정» 창 끝에 자기 절을 그리는 훅. 애플리케이션이 잇는다.
     void setPluginSettings(std::function<void()> settings) { pluginSettings = std::move(settings); }
+    // 플러그인이 자기 도킹 창을 그리는 훅. 콘솔 뒤에 불린다.
+    void setPluginWindows(std::function<void()> windows) { pluginWindows = std::move(windows); }
     // «렌더 설정» 창의 접는 절 머리. 검색어가 있으면 이름이 맞는 절만 펼쳐 보인다. 플러그인 ui() 가 쓴다.
     bool settingsSection(const char* name);
     // 되돌리기 기록 어딘가가 이 모델의 메쉬나 애니메이터를 가리키는지. 그렇다면 아직 해제하면 안 된다.
@@ -167,6 +169,7 @@ private:
     std::function<void(const std::filesystem::path&)> sceneOpener;
     std::function<void()> modelCollector;
     std::function<void()> pluginSettings;
+    std::function<void()> pluginWindows;
     std::filesystem::path sceneRoot;
     std::vector<std::filesystem::path> sceneFiles;
     std::filesystem::path pendingSceneSave;

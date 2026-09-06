@@ -284,7 +284,8 @@ MoltenVK(macOS)에는 mesh shader 와 광선 추적이 없어 고전 경로만 �
   등록한다. 이미지 사용은 `reads`/`writes`/`leaves` 로 선언하고 **노드 안에 `imageBarrier` 를 새로 쓰지 않는다.** 층·밉
   단위 전이만 예외이고, 그때는 `leaves` 로 남긴 상태를 알린다. 조건은 `enabled` 로 두고 노드 자체는 늘 등록한다.
 - **새 기능은 `app::Plugin`** 으로 붙이고 `Application::registerPlugins` 에 등록한다. 편집기 절은 `ui()` 에서
-  `editor->settingsSection("이름")` 으로 연다. `Services` 의 gfx·editor 멤버는 포인터고 `--headless` 에서 null 이다 —
+  `editor->settingsSection("이름")` 으로 연다. 독립 도킹 창이 필요하면 `window()` 에서 `ImGui::Begin` 으로 열고,
+  기본 배치에 넣으려면 `editor_internal.h` 의 `WINDOW_*` 에 같은 이름을 더한다(프로파일러가 그 예다). `Services` 의 gfx·editor 멤버는 포인터고 `--headless` 에서 null 이다 —
   `build`/`update` 는 쓰기 전에 살피고, `ui` 는 편집기가 있을 때만 불린다. `editor/` 는 `app::` 를 보지 않는다 — 플러그인 → 편집기 교환은 Editor 의 공개
   상태 필드·콜백으로만.
 - **Vulkan 실패는 복구하지 않는다.** `VK_CHECK(...)`(`src/gfx/vk_check.h`) 또는 `core::fatal(...)` 로

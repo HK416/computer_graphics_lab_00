@@ -42,5 +42,7 @@ inline constexpr const char* WINDOW_INSPECTOR = "인스펙터";
 inline constexpr const char* WINDOW_SCENE = "장면";
 inline constexpr const char* WINDOW_CONSOLE = "콘솔";
 inline constexpr const char* WINDOW_SETTINGS = "렌더 설정";
+// 플러그인이 여는 창. 이름은 ProfilerPlugin::window 의 리터럴과 같아야 기본 배치에 도킹된다.
+inline constexpr const char* WINDOW_PROFILER = "프로파일러";
 
 } // namespace editor

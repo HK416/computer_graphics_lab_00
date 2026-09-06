@@ -165,6 +165,7 @@ void Editor::buildDockspace(scene::SceneManager& scenes, const gfx::GeometryStor
         ImGui::DockBuilderDockWindow(WINDOW_HIERARCHY, left);
         ImGui::DockBuilderDockWindow(WINDOW_INSPECTOR, right);
         ImGui::DockBuilderDockWindow(WINDOW_CONSOLE, bottom);
+        ImGui::DockBuilderDockWindow(WINDOW_PROFILER, bottom);
         ImGui::DockBuilderDockWindow(WINDOW_SCENE, center);
         ImGui::DockBuilderFinish(dockspaceId);
     }
@@ -240,6 +241,9 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
     buildSceneView(scenes.active());
     buildRenderSettings(scenes.active(), deltaSeconds);
     buildConsole();
+    if (pluginWindows) {
+        pluginWindows();
+    }
     buildLoadOverlay();
     focusSelected(scenes.active(), geometry);
 

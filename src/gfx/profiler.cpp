@@ -90,11 +90,14 @@ void GpuProfiler::collect() {
         }
         zone.name = recorded[i].name;
         zone.depth = recorded[i].depth;
+        zone.cpuSampleMilliseconds = recorded[i].cpuMilliseconds;
         zone.cpuMilliseconds = smoothMilliseconds(zone.cpuMilliseconds, recorded[i].cpuMilliseconds, smoothing);
         uint32_t query = recorded[i].query;
         zone.hasGpu = haveGpu && query != INVALID_PROFILER_ZONE;
+        zone.gpuSampleMilliseconds = 0.0F;
         if (zone.hasGpu) {
             float sample = timestampMilliseconds(results[query * 2], results[query * 2 + 1], period, validBits);
+            zone.gpuSampleMilliseconds = sample;
             zone.gpuMilliseconds = smoothMilliseconds(zone.gpuMilliseconds, sample, smoothing);
         }
     }

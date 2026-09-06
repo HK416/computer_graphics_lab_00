@@ -208,6 +208,12 @@ void Application::registerPlugins() {
                 plugin->ui(frame);
             }
         });
+        editorUi->setPluginWindows([this] {
+            Services frame = services();
+            for (std::unique_ptr<Plugin>& plugin : plugins) {
+                plugin->window(frame);
+            }
+        });
     }
 }
 

@@ -44,6 +44,9 @@ struct Plugin {
     }
     // 편집기 «렌더 설정» 창 안의 절. editor->settingsSection 으로 접는 머리를 만든다. 편집기가 있을 때만 불린다.
     virtual void ui(Services& services) { (void)services; }
+    // 편집기의 도킹 창. ui() 와 달리 «렌더 설정» 창 밖에서 불리므로 ImGui::Begin 으로 자기 창을 연다.
+    // 편집기가 있을 때만 불린다.
+    virtual void window(Services& services) { (void)services; }
 };
 
 } // namespace app

@@ -21,8 +21,12 @@ struct ProfilerZone {
     // 리터럴 포인터만 담는다. 복사도 비교도 하지 않는다.
     const char* name = nullptr;
     uint32_t depth = 0;
+    // 평활한 값. 표에 보여 준다.
     float cpuMilliseconds = 0.0F;
     float gpuMilliseconds = 0.0F;
+    // 평활 전 이번 프레임 표본. 추이 그래프가 쓴다.
+    float cpuSampleMilliseconds = 0.0F;
+    float gpuSampleMilliseconds = 0.0F;
     bool hasGpu = false;
 };
 
