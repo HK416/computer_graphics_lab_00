@@ -10,6 +10,7 @@
 #include <optional>
 #include <vector>
 
+#include <glm/gtc/quaternion.hpp>
 #include <SDL3/SDL.h>
 #include <spdlog/spdlog.h>
 
@@ -195,6 +196,35 @@ Services Application::services() {
 }
 
 // 등록 순서가 곧 프레임 안의 호출 순서다.
+// 재생 중이면 활성 카메라 부품의 세계 변환을 장면 카메라에 옮긴다. 편집기 시점 값(yaw/pitch/궤도 중심)을 그대로
+// 덮어쓰고, 재생을 멈출 때 편집기가 스냅샷으로 되돌린다. 카메라는 앞(-Z)을 본다.
+void Application::applyActiveCamera(scene::Scene& scene) {
+    if (!scene.simulating) {
+        return;
+    }
+    int32_t index = scene.activeCameraObject();
+    if (index < 0) {
+        return;
+    }
+    const scene::CameraComponent& component =
+        scene.cameraComponents[static_cast<size_t>(scene.objects[static_cast<size_t>(index)].cameraComponent)];
+    glm::mat4 world = scene.worldMatrix(static_cast<uint32_t>(index));
+    glm::vec3 position = glm::vec3(world[3]);
+    glm::vec3 forward = -glm::vec3(world[2]);
+    if (glm::dot(forward, forward) < 1.0e-8F) {
+        return;
+    }
+    forward = glm::normalize(forward);
+    scene::Camera& camera = scene.camera;
+    camera.position = position;
+    camera.yawDegrees = glm::degrees(std::atan2(forward.z, forward.x));
+    camera.pitchDegrees = glm::degrees(std::asin(std::clamp(forward.y, -1.0F, 1.0F)));
+    camera.fovYDegrees = component.fovYDegrees;
+    camera.nearPlane = component.nearPlane;
+    // 궤도 모드는 위치를 대상과 거리에서 다시 만들므로 대상을 앞쪽에 둔다.
+    camera.target = position + forward * camera.distance;
+}
+
 void Application::registerPlugins() {
     plugins.push_back(std::make_unique<PhysicsPlugin>());
     plugins.push_back(std::make_unique<FluidPlugin>());
@@ -1046,6 +1076,7 @@ void Application::run() {
             // 애니메이션은 그리기 전에 진행시켜야 이번 프레임의 조인트 행렬이 올라간다.
             scenes.active().update(deltaSeconds, &jobs);
         }
+        applyActiveCamera(scenes.active());
         // 플러그인 갱신. 물리 스텝이 여기서 돈다(app/plugins).
         {
             Services shared = services();

@@ -1,0 +1,331 @@
+{
+ "ambient": {
+  "color": [
+   1.0,
+   1.0,
+   1.0
+  ],
+  "intensity": 0.15
+ },
+ "animators": [],
+ "camera": {
+  "mode": "orbit",
+  "target": [
+   0.0,
+   1.0,
+   0.0
+  ],
+  "distance": 4.2,
+  "pitch": -4.0,
+  "yaw": -90.0,
+  "fovY": 45.0,
+  "near": 0.05,
+  "moveSpeed": 2.0,
+  "position": [
+   0.0,
+   1.0,
+   4.2
+  ]
+ },
+ "environment": {
+  "ground": [
+   0.1599999964237213,
+   0.14000000059604645,
+   0.11999999731779099
+  ],
+  "hdr": "",
+  "horizon": [
+   0.6200000047683716,
+   0.7200000286102295,
+   0.8600000143051147
+  ],
+  "intensity": 1.0,
+  "sunColor": [
+   1.0,
+   0.949999988079071,
+   0.8500000238418579
+  ],
+  "sunIntensity": 1.0,
+  "useHdr": false,
+  "yaw": 0.0,
+  "zenith": [
+   0.18000000715255737,
+   0.3199999928474426,
+   0.6200000047683716
+  ]
+ },
+ "fluids": [],
+ "lights": [
+  {
+   "type": "point",
+   "color": [
+    1.0,
+    0.95,
+    0.85
+   ],
+   "intensity": 2.0,
+   "range": 8.0,
+   "innerCone": 20.0,
+   "outerCone": 30.0,
+   "size": [
+    2.0,
+    2.0
+   ],
+   "castsShadow": true
+  }
+ ],
+ "models": [
+  "CornellBox.glb"
+ ],
+ "name": "코넬 플라이스루",
+ "objects": [
+  {
+   "light": 0,
+   "name": "천장 점광",
+   "parent": -1,
+   "position": [
+    0.0,
+    1.85,
+    0.0
+   ],
+   "rotation": [
+    -0.4082179069519043,
+    -0.23456971347332,
+    -0.10938165336847305,
+    0.8754260540008545
+   ],
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "visible": true
+  },
+  {
+   "name": "CornellBox",
+   "parent": -1,
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation": [
+    0.0,
+    0.0,
+    0.0,
+    1.0
+   ],
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "visible": true
+  },
+  {
+   "mesh": 0,
+   "model": 0,
+   "name": "CornellBox",
+   "parent": 1,
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation": [
+    0.0,
+    0.0,
+    0.0,
+    1.0
+   ],
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "visible": true
+  },
+  {
+   "mesh": 1,
+   "model": 0,
+   "name": "CornellBox",
+   "parent": 1,
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation": [
+    0.0,
+    0.0,
+    0.0,
+    1.0
+   ],
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "visible": true
+  },
+  {
+   "mesh": 2,
+   "model": 0,
+   "name": "CornellBox",
+   "parent": 1,
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation": [
+    0.0,
+    0.0,
+    0.0,
+    1.0
+   ],
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "visible": true
+  },
+  {
+   "name": "플라이스루 카메라",
+   "parent": -1,
+   "position": [
+    0.0,
+    1.0,
+    3.2
+   ],
+   "rotation": [
+    0.0,
+    -0.0,
+    -0.0,
+    1.0
+   ],
+   "scale": [
+    1,
+    1,
+    1
+   ],
+   "visible": true,
+   "cameraComponent": 0,
+   "cameraPath": 0
+  }
+ ],
+ "post": {
+  "adaptationSpeed": 2.0,
+  "autoExposure": false,
+  "bloomIntensity": 0.6000000238418579,
+  "bloomKnee": 0.5,
+  "bloomScatter": 0.699999988079071,
+  "bloomThreshold": 1.0,
+  "exposureMaxEv": 12.0,
+  "exposureMinEv": -4.0,
+  "fogColor": [
+   0.6200000047683716,
+   0.699999988079071,
+   0.800000011920929
+  ],
+  "fogDensity": 0.0,
+  "fogFalloff": 0.5,
+  "fogHeight": 0.0
+ },
+ "rigidBodies": [],
+ "version": 6,
+ "cameraComponents": [
+  {
+   "fovY": 50.0,
+   "near": 0.05,
+   "active": true
+  }
+ ],
+ "cameraPaths": [
+  {
+   "duration": 8.0,
+   "loop": true,
+   "keys": [
+    {
+     "position": [
+      0.0,
+      1.0,
+      3.2
+     ],
+     "rotation": [
+      0.0,
+      -0.0,
+      -0.0,
+      1.0
+     ]
+    },
+    {
+     "position": [
+      2.7713,
+      1.5196,
+      1.6
+     ],
+     "rotation": [
+      -0.06963,
+      0.49838,
+      0.0402,
+      0.86322
+     ]
+    },
+    {
+     "position": [
+      2.7713,
+      0.4804,
+      -1.6
+     ],
+     "rotation": [
+      0.0402,
+      0.86322,
+      -0.06963,
+      0.49838
+     ]
+    },
+    {
+     "position": [
+      0.0,
+      1.0,
+      -3.2
+     ],
+     "rotation": [
+      0.0,
+      1.0,
+      -0.0,
+      0.0
+     ]
+    },
+    {
+     "position": [
+      -2.7713,
+      1.5196,
+      -1.6
+     ],
+     "rotation": [
+      0.0402,
+      0.86322,
+      0.06963,
+      -0.49838
+     ]
+    },
+    {
+     "position": [
+      -2.7713,
+      0.4804,
+      1.6
+     ],
+     "rotation": [
+      0.06963,
+      -0.49838,
+      0.0402,
+      0.86322
+     ]
+    }
+   ]
+  }
+ ]
+}

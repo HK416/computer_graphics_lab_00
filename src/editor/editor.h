@@ -89,6 +89,7 @@ private:
     void createEmptyObject(scene::Scene& active, int parent);
     void createMeshObject(scene::Scene& active, const gfx::GeometryStore& geometry, uint32_t meshIndex, int parent);
     void createLightObject(scene::Scene& active, scene::LightType type, int parent);
+    void createCameraObject(scene::Scene& active, int parent);
     void newScene(scene::SceneManager& scenes);
     // 장면을 닫고 그 되돌리기 기록을 지운다. 마지막 장면·재생 중인 장면은 닫지 않는다.
     void closeScene(scene::SceneManager& scenes, size_t index);

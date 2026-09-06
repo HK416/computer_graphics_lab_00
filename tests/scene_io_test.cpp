@@ -104,6 +104,19 @@ scene::Scene makeScene() {
     volume.probes = 12;
     volume.enabled = false;
     scene.attachDdgiVolume(1, volume);
+    scene::CameraComponent camera;
+    camera.fovYDegrees = 35.0F;
+    camera.active = true;
+    scene.attachCameraComponent(1, camera);
+    scene::CameraPath path;
+    path.duration = 7.5F;
+    path.loop = false;
+    scene::CameraKey key;
+    key.position = glm::vec3{1.0F, 2.0F, 3.0F};
+    path.keys.push_back(key);
+    key.position = glm::vec3{4.0F, 5.0F, 6.0F};
+    path.keys.push_back(key);
+    scene.attachCameraPath(1, path);
     return scene;
 }
 
@@ -173,6 +186,13 @@ int main() {
     assert(std::abs(loaded.scene.forceFields[0].falloff - 0.5F) < 1e-5F);
     assert(loaded.scene.ddgiVolumes.size() == 1 && loaded.scene.objects[1].ddgiVolume == 0);
     assert(loaded.scene.ddgiVolumes[0].probes == 12 && !loaded.scene.ddgiVolumes[0].enabled);
+    assert(loaded.scene.cameraComponents.size() == 1 && loaded.scene.objects[1].cameraComponent == 0);
+    assert(std::abs(loaded.scene.cameraComponents[0].fovYDegrees - 35.0F) < 1e-5F &&
+           loaded.scene.cameraComponents[0].active);
+    assert(loaded.scene.cameraPaths.size() == 1 && loaded.scene.objects[1].cameraPath == 0);
+    assert(loaded.scene.cameraPaths[0].keys.size() == 2 && !loaded.scene.cameraPaths[0].loop);
+    assert(std::abs(loaded.scene.cameraPaths[0].duration - 7.5F) < 1e-5F);
+    assert(std::abs(loaded.scene.cameraPaths[0].keys[1].position.y - 5.0F) < 1e-5F);
 
     // 부품이 없던 옛 판(1) 파일도 그대로 읽힌다.
     scene::SceneFile old = scene::readScene(R"({"version":1,"name":"옛 장면","objects":[{"name":"a"}]})");

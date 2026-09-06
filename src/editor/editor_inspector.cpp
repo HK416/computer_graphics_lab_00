@@ -391,6 +391,58 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         ImGui::TextDisabled("천·유체·입자가 읽는다. 강체는 읽지 않는다");
     }
 
+    if (object.cameraComponent >= 0 && object.cameraComponent < static_cast<int>(active.cameraComponents.size()) &&
+        componentHeader("Camera", &scene::Object::cameraComponent)) {
+        scene::CameraComponent& camera = active.cameraComponents[static_cast<size_t>(object.cameraComponent)];
+        ImGui::Checkbox("활성", &camera.active);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("재생 중 활성인 첫 카메라가 장면을 본다. 멈추면 편집기 시점으로 돌아온다");
+        }
+        ImGui::SliderFloat("시야각", &camera.fovYDegrees, 10.0F, 150.0F, "%.0f°");
+        ImGui::DragFloat("근평면", &camera.nearPlane, 0.005F, 0.001F, 10.0F, "%.3f");
+        if (ImGui::Button("지금 시점을 여기로")) {
+            object.transform.position = active.camera.position;
+            object.transform.rotation = glm::quatLookAt(active.camera.forward(), glm::vec3{0.0F, 1.0F, 0.0F});
+            camera.fovYDegrees = active.camera.fovYDegrees;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("이 카메라로 보기")) {
+            glm::mat4 world = active.worldMatrix(objectIndex);
+            glm::vec3 forward = glm::normalize(-glm::vec3(world[2]));
+            active.camera.position = glm::vec3(world[3]);
+            active.camera.yawDegrees = glm::degrees(std::atan2(forward.z, forward.x));
+            active.camera.pitchDegrees = glm::degrees(std::asin(std::clamp(forward.y, -1.0F, 1.0F)));
+            active.camera.fovYDegrees = camera.fovYDegrees;
+            active.camera.target = active.camera.position + forward * active.camera.distance;
+        }
+    }
+
+    if (object.cameraPath >= 0 && object.cameraPath < static_cast<int>(active.cameraPaths.size()) &&
+        componentHeader("Camera Path", &scene::Object::cameraPath)) {
+        scene::CameraPath& path = active.cameraPaths[static_cast<size_t>(object.cameraPath)];
+        ImGui::DragFloat("길이", &path.duration, 0.1F, 0.1F, 600.0F, "%.1f s");
+        ImGui::SameLine();
+        ImGui::Checkbox("반복", &path.loop);
+        ImGui::Text("키 %zu개", path.keys.size());
+        if (ImGui::Button("지금 시점으로 키 추가")) {
+            scene::CameraKey key;
+            key.position = active.camera.position;
+            key.rotation = glm::quatLookAt(active.camera.forward(), glm::vec3{0.0F, 1.0F, 0.0F});
+            path.keys.push_back(key);
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(path.keys.empty());
+        if (ImGui::Button("마지막 키 지우기")) {
+            path.keys.pop_back();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("모두 지우기")) {
+            path.keys.clear();
+        }
+        ImGui::EndDisabled();
+        ImGui::TextDisabled("재생 중 이 오브젝트가 키를 따라 움직인다. 카메라 부품과 같이 붙이면 플라이스루다");
+    }
+
     if (object.ddgiVolume >= 0 && object.ddgiVolume < static_cast<int>(active.ddgiVolumes.size()) &&
         componentHeader("DDGI Volume", &scene::Object::ddgiVolume)) {
         scene::DdgiVolume& volume = active.ddgiVolumes[static_cast<size_t>(object.ddgiVolume)];
@@ -561,6 +613,18 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         ImGui::BeginDisabled(object.ddgiVolume >= 0);
         if (ImGui::MenuItem("DDGI Volume")) {
             active.attachDdgiVolume(objectIndex);
+        }
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(object.cameraComponent >= 0);
+        if (ImGui::MenuItem("Camera")) {
+            scene::CameraComponent camera;
+            camera.active = active.activeCameraObject() < 0;
+            active.attachCameraComponent(objectIndex, camera);
+        }
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(object.cameraPath >= 0);
+        if (ImGui::MenuItem("Camera Path")) {
+            active.attachCameraPath(objectIndex);
         }
         ImGui::EndDisabled();
         ImGui::BeginDisabled(object.cloth >= 0);

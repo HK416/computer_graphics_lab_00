@@ -284,6 +284,23 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
     }
     document["ddgiVolumes"] = ddgiVolumes;
 
+    json cameraComponents = json::array();
+    for (const CameraComponent& camera : scene.cameraComponents) {
+        cameraComponents.push_back(
+            {{"fovY", camera.fovYDegrees}, {"near", camera.nearPlane}, {"active", camera.active}});
+    }
+    document["cameraComponents"] = cameraComponents;
+
+    json cameraPaths = json::array();
+    for (const CameraPath& path : scene.cameraPaths) {
+        json keys = json::array();
+        for (const CameraKey& key : path.keys) {
+            keys.push_back({{"position", toJson(key.position)}, {"rotation", toJson(key.rotation)}});
+        }
+        cameraPaths.push_back({{"duration", path.duration}, {"loop", path.loop}, {"keys", keys}});
+    }
+    document["cameraPaths"] = cameraPaths;
+
     json objects = json::array();
     for (uint32_t objectIndex = 0; objectIndex < scene.objects.size(); ++objectIndex) {
         const Object& object = scene.objects[objectIndex];
@@ -324,6 +341,12 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
         }
         if (object.ddgiVolume >= 0) {
             entry["ddgiVolume"] = object.ddgiVolume;
+        }
+        if (object.cameraComponent >= 0) {
+            entry["cameraComponent"] = object.cameraComponent;
+        }
+        if (object.cameraPath >= 0) {
+            entry["cameraPath"] = object.cameraPath;
         }
         objects.push_back(std::move(entry));
     }
@@ -506,6 +529,27 @@ SceneFile readScene(const std::string& text) {
         file.scene.ddgiVolumes.push_back(volume);
     }
 
+    for (const json& entry : document.value("cameraComponents", json::array())) {
+        CameraComponent camera;
+        camera.fovYDegrees = std::clamp(entry.value("fovY", camera.fovYDegrees), 1.0F, 179.0F);
+        camera.nearPlane = std::max(entry.value("near", camera.nearPlane), 1.0e-4F);
+        camera.active = entry.value("active", camera.active);
+        file.scene.cameraComponents.push_back(camera);
+    }
+
+    for (const json& entry : document.value("cameraPaths", json::array())) {
+        CameraPath path;
+        path.duration = std::max(entry.value("duration", path.duration), 0.0F);
+        path.loop = entry.value("loop", path.loop);
+        for (const json& keyEntry : entry.value("keys", json::array())) {
+            CameraKey key;
+            key.position = toVec3(keyEntry.value("position", json{}), glm::vec3{0.0F});
+            key.rotation = toQuat(keyEntry.value("rotation", json{}));
+            path.keys.push_back(key);
+        }
+        file.scene.cameraPaths.push_back(path);
+    }
+
     for (const json& entry : document.value("cloths", json::array())) {
         Cloth cloth;
         cloth.backend = toBackend(entry.value("backend", std::string{"auto"}));
@@ -548,6 +592,8 @@ SceneFile readScene(const std::string& text) {
         object.cloth = handle(entry.value("cloth", -1), file.scene.cloths.size());
         object.forceField = handle(entry.value("forceField", -1), file.scene.forceFields.size());
         object.ddgiVolume = handle(entry.value("ddgiVolume", -1), file.scene.ddgiVolumes.size());
+        object.cameraComponent = handle(entry.value("cameraComponent", -1), file.scene.cameraComponents.size());
+        object.cameraPath = handle(entry.value("cameraPath", -1), file.scene.cameraPaths.size());
         auto skin = entry.value("skin", -1);
         file.scene.objects.push_back(std::move(object));
         file.objectModels.push_back(entry.value("model", -1));

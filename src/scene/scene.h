@@ -313,6 +313,38 @@ struct DdgiVolume {
     bool operator==(const DdgiVolume&) const = default;
 };
 
+// 카메라 부품. 오브젝트 위치에서 앞(-Z)을 본다. active 인 첫 카메라가 재생 중 장면 카메라를 맡는다(편집기 시점은
+// 재생을 멈추면 되돌아온다). 시야각·근평면만 갖고 나머지는 오브젝트 변환이다.
+struct CameraComponent {
+    float fovYDegrees = 60.0F;
+    float nearPlane = 0.05F;
+    bool active = true;
+
+    bool operator==(const CameraComponent&) const = default;
+};
+
+// 카메라 경로의 키. 세계 공간 위치와 회전(앞은 -Z).
+struct CameraKey {
+    glm::vec3 position{0.0F};
+    glm::quat rotation{1.0F, 0.0F, 0.0F, 0.0F};
+
+    bool operator==(const CameraKey&) const = default;
+};
+
+// 카메라 경로 부품. 재생 중 duration 초에 걸쳐 키를 지나가며 오브젝트의 지역 변환을 세계 공간 키로 덮어쓴다(뿌리
+// 오브젝트에 붙이는 것을 전제한다). 위치는 Catmull-Rom, 회전은 구면 보간이고 키는 시간을 고르게 나눠 갖는다.
+// 카메라 부품과 같은 오브젝트에 붙이면 플라이스루가 된다.
+struct CameraPath {
+    std::vector<CameraKey> keys;
+    float duration = 5.0F;
+    bool loop = true;
+
+    bool operator==(const CameraPath&) const = default;
+};
+
+// 경로 위 시각 t(초)의 위치·회전. 키가 없으면 항등, 하나면 그 키다. loop 면 duration 으로 감고 아니면 끝에서 멈춘다.
+CameraKey evaluateCameraPath(const CameraPath& path, float seconds);
+
 struct Object {
     std::string name;
     // 부모 기준 지역 변환. 세계 변환은 Scene::worldMatrix 가 부모를 거슬러 올라가 만든다.
@@ -330,6 +362,8 @@ struct Object {
     int32_t cloth = -1;
     int32_t forceField = -1;
     int32_t ddgiVolume = -1;
+    int32_t cameraComponent = -1;
+    int32_t cameraPath = -1;
 
     bool operator==(const Object&) const = default;
 };
@@ -395,6 +429,8 @@ struct SceneSnapshot {
     std::vector<Cloth> cloths;
     std::vector<ForceField> forceFields;
     std::vector<DdgiVolume> ddgiVolumes;
+    std::vector<CameraComponent> cameraComponents;
+    std::vector<CameraPath> cameraPaths;
     glm::vec3 ambientColor{0.25F};
     float ambientIntensity = 1.0F;
     Environment environment;
@@ -416,6 +452,8 @@ struct Scene {
     std::vector<Cloth> cloths;
     std::vector<ForceField> forceFields;
     std::vector<DdgiVolume> ddgiVolumes;
+    std::vector<CameraComponent> cameraComponents;
+    std::vector<CameraPath> cameraPaths;
     Camera camera;
     // 재생 중인지. 참일 때만 물리가 돌고, 편집기는 되돌리기 기록을 멈춘다. 저장하지 않는다.
     bool simulating = false;
@@ -441,6 +479,11 @@ struct Scene {
     // 대입한다. 훅을 하나라도 빠뜨리면 화면이 조용히 틀리는데, 비교는 빠뜨릴 수가 없다.
     // 덤으로 오브젝트별 더티 플래그가 나와 그림자 시점 무효화에 그대로 쓰인다.
     void refresh(core::JobSystem* jobs = nullptr);
+
+    // 재생 중 흐른 시간(초). 카메라 경로가 읽는다. 재생을 시작할 때 0 으로 돌린다.
+    float playbackSeconds = 0.0F;
+    // 활성인 첫 카메라 부품의 오브젝트. 없으면 -1.
+    int32_t activeCameraObject() const;
 
     // 마지막 refresh 에서 무엇이든 바뀌었으면 증가한다. 소비자는 자기가 본 값과 비교만 하면 된다.
     uint64_t revision() const { return anyRevision; }
@@ -488,6 +531,8 @@ struct Scene {
     int32_t attachCloth(uint32_t index, const Cloth& cloth = {});
     int32_t attachForceField(uint32_t index, const ForceField& field = {});
     int32_t attachDdgiVolume(uint32_t index, const DdgiVolume& volume = {});
+    int32_t attachCameraComponent(uint32_t index, const CameraComponent& camera = {});
+    int32_t attachCameraPath(uint32_t index, const CameraPath& path = {});
     // 부품을 뗀다. 아무도 가리키지 않게 된 부품은 배열에서 빠지고 첨자가 다시 맞춰진다.
     void detachComponent(uint32_t index, int32_t Object::* handle);
     // 오브젝트에 붙은 T 부품. 없거나 첨자가 범위 밖이면 nullptr. 첨자를 손으로 가드하는 관용구를 대신한다.
@@ -549,6 +594,8 @@ template <typename SceneType, typename F> void forEachComponentKind(SceneType& s
     f(scene.cloths, &Object::cloth);
     f(scene.forceFields, &Object::forceField);
     f(scene.ddgiVolumes, &Object::ddgiVolume);
+    f(scene.cameraComponents, &Object::cameraComponent);
+    f(scene.cameraPaths, &Object::cameraPath);
 }
 
 // 부품 타입 → Object 의 첨자 멤버와 Scene 의 배열.
@@ -568,6 +615,8 @@ CG_LAB_COMPONENT_SLOT(ParticleSystem, particleSystem, particleSystems);
 CG_LAB_COMPONENT_SLOT(Cloth, cloth, cloths);
 CG_LAB_COMPONENT_SLOT(ForceField, forceField, forceFields);
 CG_LAB_COMPONENT_SLOT(DdgiVolume, ddgiVolume, ddgiVolumes);
+CG_LAB_COMPONENT_SLOT(CameraComponent, cameraComponent, cameraComponents);
+CG_LAB_COMPONENT_SLOT(CameraPath, cameraPath, cameraPaths);
 #undef CG_LAB_COMPONENT_SLOT
 
 template <typename T> T* Scene::component(uint32_t index) {

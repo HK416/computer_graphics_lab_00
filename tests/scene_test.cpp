@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cstdio>
 
+#include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "scene/scene.h"
@@ -27,6 +28,31 @@ glm::vec3 origin(const scene::Scene& scene, uint32_t index) {
 } // namespace
 
 int main() {
+    // 카메라 경로. 키에서는 키 위치, 직선 세 점의 가운데 구간 중간은 가운데 두 키의 중점, 감으면 길이가 0 으로
+    // 돌아온다.
+    {
+        scene::CameraPath path;
+        for (float x : {0.0F, 1.0F, 2.0F, 3.0F}) {
+            scene::CameraKey key;
+            key.position = glm::vec3{x, 0.0F, 0.0F};
+            path.keys.push_back(key);
+        }
+        path.duration = 4.0F;
+        path.loop = false;
+        assert(glm::length(scene::evaluateCameraPath(path, 0.0F).position - glm::vec3{0.0F}) < 1e-5F);
+        assert(glm::length(scene::evaluateCameraPath(path, 4.0F / 3.0F).position - glm::vec3{1.0F, 0.0F, 0.0F}) <
+               1e-4F);
+        assert(glm::length(scene::evaluateCameraPath(path, 2.0F).position - glm::vec3{1.5F, 0.0F, 0.0F}) < 1e-4F &&
+               "등간격 직선의 구간 중간은 중점");
+        assert(glm::length(scene::evaluateCameraPath(path, 9.0F).position - glm::vec3{3.0F, 0.0F, 0.0F}) < 1e-5F &&
+               "감지 않으면 끝에서 멈춘다");
+        path.loop = true;
+        assert(glm::length(scene::evaluateCameraPath(path, 4.0F).position - glm::vec3{0.0F}) < 1e-4F &&
+               "감으면 처음으로");
+        scene::CameraPath empty;
+        assert(scene::evaluateCameraPath(empty, 1.0F).position == glm::vec3{0.0F});
+    }
+
     scene::Scene scene = makeChain();
 
     // 세계 변환은 부모를 거슬러 올라가며 누적된다.

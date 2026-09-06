@@ -158,6 +158,33 @@ void Scene::update(float deltaSeconds, core::JobSystem* jobs) {
             updateAnimator(index);
         }
     }
+
+    // 카메라 경로. 재생 중에만 흐르고, 경로가 붙은 오브젝트의 지역 변환을 세계 공간 키로 덮어쓴다. 편집기가 재생을
+    // 멈출 때 스냅샷으로 되돌리므로 원래 변환은 잃지 않는다.
+    if (!simulating) {
+        return;
+    }
+    playbackSeconds += deltaSeconds;
+    for (Object& object : objects) {
+        int32_t slot = object.cameraPath;
+        if (slot < 0 || static_cast<size_t>(slot) >= cameraPaths.size() ||
+            cameraPaths[static_cast<size_t>(slot)].keys.empty()) {
+            continue;
+        }
+        CameraKey key = evaluateCameraPath(cameraPaths[static_cast<size_t>(slot)], playbackSeconds);
+        // 키는 세계 공간이다. 부모가 있으면 부모 기준 지역 변환으로 되돌려 넣는다.
+        if (object.parent >= 0 && static_cast<size_t>(object.parent) < objects.size()) {
+            glm::mat4 parentInverse = glm::inverse(worldMatrix(static_cast<uint32_t>(object.parent)));
+            glm::mat4 local =
+                parentInverse * (glm::translate(glm::mat4{1.0F}, key.position) * glm::mat4_cast(key.rotation));
+            Transform decomposed = Transform::fromMatrix(local);
+            object.transform.position = decomposed.position;
+            object.transform.rotation = decomposed.rotation;
+            continue;
+        }
+        object.transform.position = key.position;
+        object.transform.rotation = key.rotation;
+    }
 }
 
 // 오브젝트마다의 깊이를 정하고 깊이 순으로 늘어놓는다. 부모를 따라 올라가며 이미 정해진 조상을
@@ -424,6 +451,8 @@ SceneSnapshot Scene::capture() const {
     snapshot.cloths = cloths;
     snapshot.forceFields = forceFields;
     snapshot.ddgiVolumes = ddgiVolumes;
+    snapshot.cameraComponents = cameraComponents;
+    snapshot.cameraPaths = cameraPaths;
     snapshot.ambientColor = ambientColor;
     snapshot.ambientIntensity = ambientIntensity;
     snapshot.environment = environment;
@@ -447,6 +476,8 @@ void Scene::restore(const SceneSnapshot& snapshot) {
     cloths = snapshot.cloths;
     forceFields = snapshot.forceFields;
     ddgiVolumes = snapshot.ddgiVolumes;
+    cameraComponents = snapshot.cameraComponents;
+    cameraPaths = snapshot.cameraPaths;
     ambientColor = snapshot.ambientColor;
     ambientIntensity = snapshot.ambientIntensity;
     environment = snapshot.environment;
@@ -458,6 +489,7 @@ bool Scene::differsFrom(const SceneSnapshot& snapshot) const {
         lights != snapshot.lights || rigidBodies != snapshot.rigidBodies || fluids != snapshot.fluids ||
         particleSystems != snapshot.particleSystems || cloths != snapshot.cloths ||
         forceFields != snapshot.forceFields || ddgiVolumes != snapshot.ddgiVolumes ||
+        cameraComponents != snapshot.cameraComponents || cameraPaths != snapshot.cameraPaths ||
         ambientColor != snapshot.ambientColor || ambientIntensity != snapshot.ambientIntensity ||
         !(environment == snapshot.environment) || !(post == snapshot.post)) {
         return true;
@@ -546,6 +578,66 @@ int32_t Scene::attachForceField(uint32_t index, const ForceField& field) {
 
 int32_t Scene::attachDdgiVolume(uint32_t index, const DdgiVolume& volume) {
     return attachComponent(objects, ddgiVolumes, index, &Object::ddgiVolume, volume);
+}
+
+int32_t Scene::attachCameraComponent(uint32_t index, const CameraComponent& camera) {
+    return attachComponent(objects, cameraComponents, index, &Object::cameraComponent, camera);
+}
+
+int32_t Scene::attachCameraPath(uint32_t index, const CameraPath& path) {
+    return attachComponent(objects, cameraPaths, index, &Object::cameraPath, path);
+}
+
+int32_t Scene::activeCameraObject() const {
+    for (uint32_t index = 0; index < objects.size(); ++index) {
+        int32_t slot = objects[index].cameraComponent;
+        if (slot >= 0 && static_cast<size_t>(slot) < cameraComponents.size() &&
+            cameraComponents[static_cast<size_t>(slot)].active && visibleInTree(index)) {
+            return static_cast<int32_t>(index);
+        }
+    }
+    return -1;
+}
+
+CameraKey evaluateCameraPath(const CameraPath& path, float seconds) {
+    if (path.keys.empty()) {
+        return CameraKey{};
+    }
+    if (path.keys.size() == 1 || path.duration <= 0.0F) {
+        return path.keys.front();
+    }
+    auto count = static_cast<int>(path.keys.size());
+    // 구간 수: 감으면 마지막 키에서 첫 키로 돌아오는 구간이 하나 더 있다.
+    int segments = path.loop ? count : count - 1;
+    float u = seconds / path.duration;
+    if (path.loop) {
+        u -= std::floor(u);
+    } else {
+        u = std::clamp(u, 0.0F, 1.0F);
+    }
+    float scaled = u * static_cast<float>(segments);
+    int segment = std::min(static_cast<int>(std::floor(scaled)), segments - 1);
+    float t = scaled - static_cast<float>(segment);
+    auto keyAt = [&](int i) -> const CameraKey& {
+        if (path.loop) {
+            return path.keys[static_cast<size_t>(((i % count) + count) % count)];
+        }
+        return path.keys[static_cast<size_t>(std::clamp(i, 0, count - 1))];
+    };
+    const CameraKey& p0 = keyAt(segment - 1);
+    const CameraKey& p1 = keyAt(segment);
+    const CameraKey& p2 = keyAt(segment + 1);
+    const CameraKey& p3 = keyAt(segment + 2);
+    // Catmull-Rom(장력 0.5). 키에서는 정확히 키 위치를 지난다.
+    float t2 = t * t;
+    float t3 = t2 * t;
+    glm::vec3 position = 0.5F * ((2.0F * p1.position) + (-p0.position + p2.position) * t +
+                                 (2.0F * p0.position - 5.0F * p1.position + 4.0F * p2.position - p3.position) * t2 +
+                                 (-p0.position + 3.0F * p1.position - 3.0F * p2.position + p3.position) * t3);
+    CameraKey result;
+    result.position = position;
+    result.rotation = glm::slerp(glm::normalize(p1.rotation), glm::normalize(p2.rotation), t);
+    return result;
 }
 
 void Scene::detachComponent(uint32_t index, int32_t Object::* handle) {

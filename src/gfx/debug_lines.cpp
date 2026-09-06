@@ -181,6 +181,67 @@ void buildDebugLines(const scene::Scene& scene, const DebugLineOptions& options,
             }
         }
 
+        // 카메라 부품: 앞(-Z)으로 벌어지는 작은 절두체. 활성이면 밝다.
+        if (options.fluidBounds && object.cameraComponent >= 0 &&
+            static_cast<size_t>(object.cameraComponent) < scene.cameraComponents.size()) {
+            const scene::CameraComponent& camera = scene.cameraComponents[static_cast<size_t>(object.cameraComponent)];
+            glm::vec3 eye = glm::vec3(world[3]);
+            auto unit = [](glm::vec3 v) {
+                return glm::length(v) > 1.0e-6F ? glm::normalize(v) : glm::vec3{0.0F, 1.0F, 0.0F};
+            };
+            glm::vec3 forward = unit(-glm::vec3(world[2]));
+            glm::vec3 up = unit(glm::vec3(world[1]));
+            glm::vec3 right = unit(glm::vec3(world[0]));
+            float depth = 0.5F;
+            float halfHeight = depth * std::tan(glm::radians(camera.fovYDegrees) * 0.5F);
+            float halfWidth = halfHeight * 16.0F / 9.0F;
+            glm::vec3 center = eye + forward * depth;
+            std::array<glm::vec3, 4> corners{center + up * halfHeight - right * halfWidth,
+                                             center + up * halfHeight + right * halfWidth,
+                                             center - up * halfHeight + right * halfWidth,
+                                             center - up * halfHeight - right * halfWidth};
+            uint32_t color = camera.active ? DEBUG_COLOR_CAMERA : DEBUG_COLOR_COLLIDER;
+            for (size_t i = 0; i < corners.size(); ++i) {
+                line(out, eye, corners[i], color);
+                line(out, corners[i], corners[(i + 1) % corners.size()], color);
+            }
+        }
+
+        // 카메라 경로: 키를 잇는 Catmull-Rom 곡선과 키마다의 작은 십자.
+        if (options.fluidBounds && object.cameraPath >= 0 &&
+            static_cast<size_t>(object.cameraPath) < scene.cameraPaths.size()) {
+            const scene::CameraPath& path = scene.cameraPaths[static_cast<size_t>(object.cameraPath)];
+            if (path.keys.size() >= 2 && path.duration > 0.0F) {
+                constexpr uint32_t STEPS_PER_KEY = 12;
+                auto steps = static_cast<uint32_t>(path.keys.size()) * STEPS_PER_KEY;
+                glm::vec3 previous = scene::evaluateCameraPath(path, 0.0F).position;
+                for (uint32_t step = 1; step <= steps; ++step) {
+                    float seconds = path.duration * static_cast<float>(step) / static_cast<float>(steps);
+                    if (!path.loop && step == steps) {
+                        seconds = path.duration;
+                    }
+                    glm::vec3 point = scene::evaluateCameraPath(path, seconds).position;
+                    line(out, previous, point, DEBUG_COLOR_CAMERA);
+                    previous = point;
+                }
+            }
+            for (const scene::CameraKey& key : path.keys) {
+                constexpr float CROSS = 0.08F;
+                line(out,
+                     key.position - glm::vec3{CROSS, 0.0F, 0.0F},
+                     key.position + glm::vec3{CROSS, 0.0F, 0.0F},
+                     DEBUG_COLOR_CAMERA);
+                line(out,
+                     key.position - glm::vec3{0.0F, CROSS, 0.0F},
+                     key.position + glm::vec3{0.0F, CROSS, 0.0F},
+                     DEBUG_COLOR_CAMERA);
+                line(out,
+                     key.position - glm::vec3{0.0F, 0.0F, CROSS},
+                     key.position + glm::vec3{0.0F, 0.0F, CROSS},
+                     DEBUG_COLOR_CAMERA);
+            }
+        }
+
         // DDGI 볼륨. 위치 ± 배율의 축 정렬 상자. 꺼진 것도 그린다(자리를 잡는 중일 수 있다).
         if (options.fluidBounds && object.ddgiVolume >= 0 &&
             static_cast<size_t>(object.ddgiVolume) < scene.ddgiVolumes.size()) {

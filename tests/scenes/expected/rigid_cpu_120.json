@@ -27,6 +27,8 @@
     ],
     "yaw": -90.0
   },
+  "cameraComponents": [],
+  "cameraPaths": [],
   "cloths": [],
   "ddgiVolumes": [],
   "environment": {
@@ -363,5 +365,5 @@
       "useGravity": true
     }
   ],
-  "version": 5
+  "version": 6
 }

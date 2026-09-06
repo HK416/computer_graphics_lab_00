@@ -231,6 +231,9 @@ void Editor::buildCreateItems(scene::Scene& active, const gfx::GeometryStore& ge
         }
         ImGui::EndMenu();
     }
+    if (ImGui::MenuItem("카메라")) {
+        deferred = [this, &active, parent] { createCameraObject(active, parent); };
+    }
     if (ImGui::BeginMenu("조명")) {
         constexpr std::array<const char*, 4> LIGHT_NAMES{"방향광", "점광", "스폿광", "영역광"};
         for (uint32_t type = 0; type < LIGHT_NAMES.size(); ++type) {
@@ -274,6 +277,25 @@ void Editor::createMeshObject(scene::Scene& active,
     active.objects.push_back(std::move(object));
     auto index = static_cast<uint32_t>(active.objects.size() - 1);
     active.attachMeshRenderer(index, meshIndex);
+    selectOnly(static_cast<int>(index));
+}
+
+// 지금 보는 시점에 카메라 부품 오브젝트를 만든다. 앞(-Z)이 시선과 같게 돌린다.
+void Editor::createCameraObject(scene::Scene& active, int parent) {
+    scene::Object object;
+    object.name = "카메라";
+    object.parent = parent;
+    object.transform.position = active.camera.position;
+    object.transform.rotation = glm::quatLookAt(active.camera.forward(), glm::vec3{0.0F, 1.0F, 0.0F});
+    active.objects.push_back(object);
+    auto index = static_cast<uint32_t>(active.objects.size()) - 1;
+    scene::CameraComponent camera;
+    camera.fovYDegrees = active.camera.fovYDegrees;
+    camera.nearPlane = active.camera.nearPlane;
+    // 이미 활성 카메라가 있으면 새 것은 꺼 둔다. 활성은 하나만 뜻이 있다.
+    camera.active = active.activeCameraObject() < 0;
+    active.attachCameraComponent(index, camera);
+    active.markStructureDirty();
     selectOnly(static_cast<int>(index));
 }
 
@@ -412,6 +434,7 @@ void Editor::closeScene(scene::SceneManager& scenes, size_t index) {
 }
 
 void Editor::startSimulation(scene::SceneManager& scenes) {
+    scenes.active().playbackSeconds = 0.0F;
     scene::Scene& active = scenes.active();
     if (active.simulating) {
         return;

@@ -239,6 +239,7 @@ private:
     // 플러그인에 넘기는 참조 묶음. 모든 멤버가 만들어진 뒤에만 부른다.
     Services services();
     void registerPlugins();
+    void applyActiveCamera(scene::Scene& scene);
 };
 
 } // namespace app

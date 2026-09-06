@@ -14,7 +14,8 @@ namespace scene {
 // 3: Bloom 임계값·무릎·번짐. bloomIntensity 의 뜻이 «섞는 비율»에서 «더하는 세기»로 바뀌었다.
 // 4: 힘 마당 부품(forceFields).
 // 5: DDGI 볼륨 부품(ddgiVolumes).
-inline constexpr uint32_t SCENE_FILE_VERSION = 5;
+// 6: 카메라 부품(cameraComponents)과 카메라 경로(cameraPaths).
+inline constexpr uint32_t SCENE_FILE_VERSION = 6;
 
 // 저장할 때 전역 메쉬 인덱스를 (모델, 모델 안의 메쉬) 로 나누는 데 쓰는 표.
 struct ModelTable {
