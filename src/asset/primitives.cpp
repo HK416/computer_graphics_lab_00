@@ -69,13 +69,15 @@ Material makeMaterial(const char* name, glm::vec3 color, float roughness) {
 // 유체 입자가 쓰는 색이기도 하다. 구 계열은 이 색을 지킨다.
 const glm::vec3 SPHERE_COLOR{0.35F, 0.55F, 0.9F};
 const glm::vec3 NEUTRAL_COLOR{0.78F, 0.78F, 0.78F};
+const glm::vec3 CLOTH_COLOR{0.85F, 0.35F, 0.3F};
 
 // XZ 평면의 사각형. 법선은 +Y 뿐이라 아래에서 보면 사라진다(Unity 의 Plane 과 같다).
 //
-// 8x8 로 나누는 이유는 meshlet 한 장(정점 64, 삼각형 124)을 넘겨 meshlet 컬링과 LOD 가 실제로
-// 돌게 하기 위해서다. 4x4 는 정점 25 라 meshlet 하나로 끝나 아무것도 나뉘지 않는다.
-void buildPlane(Builder& builder) {
-    constexpr uint32_t SEGMENTS = 8;
+// 평면을 8x8 로 나누는 이유는 meshlet 한 장(정점 64, 삼각형 124)을 넘겨 meshlet 컬링과 LOD 가 실제로
+// 돌게 하기 위해서다. 4x4 는 정점 25 라 meshlet 하나로 끝나 아무것도 나뉘지 않는다. 천 격자는 분할 수가
+// 곧 시뮬레이션 해상도라 16·32·64 를 따로 둔다.
+void buildPlane(Builder& builder, uint32_t segments) {
+    const uint32_t SEGMENTS = segments;
     for (uint32_t z = 0; z <= SEGMENTS; ++z) {
         for (uint32_t x = 0; x <= SEGMENTS; ++x) {
             float u = static_cast<float>(x) / static_cast<float>(SEGMENTS);
@@ -423,6 +425,9 @@ const std::array<Definition, static_cast<size_t>(Primitive::COUNT)> DEFINITIONS{
     Definition{"콘", "<builtin:cone>", "콘", NEUTRAL_COLOR, 0.5F},
     Definition{"캡슐", "<builtin:capsule>", "캡슐", NEUTRAL_COLOR, 0.5F},
     Definition{"토러스", "<builtin:torus>", "토러스", NEUTRAL_COLOR, 0.5F},
+    Definition{"천 격자 16×16", "<builtin:cloth16>", "천", CLOTH_COLOR, 0.8F},
+    Definition{"천 격자 32×32", "<builtin:cloth32>", "천", CLOTH_COLOR, 0.8F},
+    Definition{"천 격자 64×64", "<builtin:cloth64>", "천", CLOTH_COLOR, 0.8F},
 };
 
 const Definition& definitionOf(Primitive primitive) {
@@ -476,7 +481,12 @@ Model makePrimitive(Primitive primitive) {
     builder.mesh.materialIndex = 0;
     switch (primitive) {
     case Primitive::PLANE:
-        buildPlane(builder);
+        buildPlane(builder, 8);
+        break;
+    case Primitive::CLOTH_16:
+    case Primitive::CLOTH_32:
+    case Primitive::CLOTH_64:
+        buildPlane(builder, clothPrimitiveResolution(primitive));
         break;
     case Primitive::BOX:
         buildBox(builder);
@@ -508,8 +518,36 @@ Model makePrimitive(Primitive primitive) {
     Model model;
     model.name = definition.assetName;
     model.materials.push_back(makeMaterial(definition.materialName, definition.color, definition.roughness));
+    // 천은 뒤집히고 접히므로 양면이다. 래스터는 컬링을 끄고 광선은 뒷면 컬링을 끈다.
+    model.materials.back().doubleSided = clothPrimitiveResolution(primitive) != 0;
     model.meshes.push_back(std::move(builder.mesh));
     return model;
+}
+
+uint32_t clothPrimitiveResolution(Primitive primitive) {
+    switch (primitive) {
+    case Primitive::CLOTH_16:
+        return 16;
+    case Primitive::CLOTH_32:
+        return 32;
+    case Primitive::CLOTH_64:
+        return 64;
+    default:
+        return 0;
+    }
+}
+
+Primitive clothPrimitiveFor(uint32_t resolution) {
+    switch (resolution) {
+    case 16:
+        return Primitive::CLOTH_16;
+    case 32:
+        return Primitive::CLOTH_32;
+    case 64:
+        return Primitive::CLOTH_64;
+    default:
+        return Primitive::COUNT;
+    }
 }
 
 } // namespace asset

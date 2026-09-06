@@ -1,0 +1,74 @@
+#version 460
+
+#include "cloth_common.glsl"
+
+#ifdef CLOTH_RAY_QUERY
+#include "ray_query.glsl"
+// 경로 추적기와 같은 상위 가속 구조. 집합 1 로 묶여 있다.
+layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevel;
+#endif
+
+// 서브스텝의 마지막 패스. 콜라이더 도형(fluid_integrate.comp 와 같은 최근접점)과 임의 메쉬(광선 질의)에서 두께만큼
+// 띄우고, 닿았으면 접선 이동을 마찰만큼 죽인 뒤 속도와 위치를 확정한다. physics/cloth.cpp 의 마무리와 같은 순서다.
+layout(local_size_x = CLOTH_GROUP_SIZE) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.vertexCount) {
+        return;
+    }
+    vec4 current = push.positions.items[i];
+    if (current.w <= 0.0) {
+        return;
+    }
+    ClothParams params = push.params.item;
+    float thickness = params.thicknessFriction.x;
+    vec3 position = push.predicted.items[i].xyz;
+    vec3 contactNormal = vec3(0.0);
+
+    for (uint c = 0u; c < params.colliderCount; ++c) {
+        FluidCollider collider = params.colliders[c];
+        vec3 local = (collider.inverseWorld * vec4(position, 1.0)).xyz;
+        SurfacePoint surface = closestOnColliderLocal(collider.type, collider.data0.w, collider.data0.xyz, local);
+        if (surface.distance < thickness) {
+            contactNormal = normalize(mat3(collider.world) * surface.normal);
+            position = (collider.world * vec4(surface.point, 1.0)).xyz + contactNormal * thickness;
+        }
+    }
+
+#ifdef CLOTH_RAY_QUERY
+    if ((push.flags & CLOTH_FLAG_RAY_QUERY) != 0u) {
+        // 지난 위치에서 예측 위치로 광선을 쏜다. 두께만큼 더 멀리 보아 표면 앞에서 멈춘다. 자기 자신(천)은 마스크로
+        // 지나간다. 뒷면도 맞힌다(천이 메쉬 안쪽에서 시작했으면 바깥으로 밀려 나온다).
+        vec3 travel = position - current.xyz;
+        float distance = length(travel);
+        if (distance > 1.0e-6) {
+            vec3 direction = travel / distance;
+            rayQueryEXT query;
+            rayQueryInitializeEXT(query,
+                                  topLevel,
+                                  gl_RayFlagsOpaqueEXT,
+                                  CLOTH_SELF_RAY_MASK,
+                                  current.xyz,
+                                  0.0,
+                                  direction,
+                                  distance + thickness);
+            rayQueryProceedEXT(query);
+            if (rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+                float hit = rayQueryGetIntersectionTEXT(query, true);
+                position = current.xyz + direction * max(hit - thickness, 0.0);
+                // 맞힌 방향을 접촉 법선으로 삼는다. 면 법선을 읽으려면 정점 버퍼가 더 필요해 광선 방향으로 갈음한다.
+                contactNormal = -direction;
+            }
+        }
+    }
+#endif
+
+    if (contactNormal != vec3(0.0)) {
+        vec3 motion = position - current.xyz;
+        vec3 tangential = motion - contactNormal * dot(motion, contactNormal);
+        position -= tangential * params.thicknessFriction.y;
+    }
+    push.velocities.items[i] = vec4((position - current.xyz) / push.dt, 0.0);
+    push.positions.items[i] = vec4(position, current.w);
+}

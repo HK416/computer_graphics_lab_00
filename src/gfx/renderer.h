@@ -14,6 +14,7 @@
 #include <glm/vec4.hpp>
 #include <vulkan/vulkan.h>
 
+#include "gfx/cloth.h"
 #include "gfx/debug_lines.h"
 #include "gfx/environment.h"
 #include "gfx/fluid.h"
@@ -92,6 +93,8 @@ struct ShadowView {
     bool directional = false;
 };
 
+inline constexpr uint32_t NO_CLOTH = 0xFFFFFFFFU;
+
 // 스킨 컴퓨트 디스패치 하나. 오브젝트 하나가 자기 구간을 통째로 변형한다. destinationOffset 은
 // 반쪽 안의 상대 위치라, 지난 프레임 목록과 같으면 현재 반쪽 내용이 그대로 유효하다.
 struct SkinDispatch {
@@ -105,6 +108,8 @@ struct SkinDispatch {
     uint32_t meshletOffset;
     uint32_t meshletCount;
     uint32_t boundsOffset;
+    // 천 부품이면 그 번호. 스킨 컴퓨트 대신 천 시뮬레이터가 이 구간을 채운다. 아니면 NO_CLOTH.
+    uint32_t cloth = NO_CLOTH;
 
     bool operator==(const SkinDispatch&) const = default;
 };
@@ -360,6 +365,14 @@ public:
     // 입자가 장면과 부딪힐 수 있는지(광선 질의 변종 + 가속 구조). 편집기가 «충돌» 항목을 잠그는 데 쓴다.
     bool particleCollisionAvailable() const {
         return particles != nullptr && particles->collisionAvailable() && rayQueryShadowsAvailable();
+    }
+    // 천 부품 index 가 지금 CPU 에서 도는지·돌 수 있는지. 편집기가 상태를 보여 주는 데 쓴다.
+    bool clothOnCpu(uint32_t index) const { return cloth != nullptr && cloth->onCpu(index); }
+    bool clothActive(uint32_t index) const { return cloth != nullptr && cloth->active(index); }
+    bool clothGpuAvailable() const { return cloth != nullptr && cloth->gpuAvailable(); }
+    // GPU 천이 임의 메쉬와 부딪힐 수 있는지(광선 질의 변종 + 가속 구조).
+    bool clothMeshCollisionAvailable() const {
+        return cloth != nullptr && cloth->meshCollisionAvailable() && rayQueryShadowsAvailable();
     }
     // 플러그인이 렌더 그래프에 패스를 끼우는 훅. recordCommands 가 자기 노드를 다 넣은 뒤 등록 순서대로 부른다.
     // 훅은 graph.addAfter(앵커, 노드) 로 끼운다. 앵커 이름은 recordCommands 의 노드 이름이다.
@@ -686,6 +699,10 @@ private:
     std::unique_ptr<FluidSimulator> fluid;
     // 유체마다 용기의 경계 구. 그림자 시점 컬링이 쓴다.
     std::vector<glm::vec4> fluidBounds;
+    // XPBD 천. 장면의 천 부품마다 상태를 들고, 스킨 패스 안에서 변형 정점 버퍼에 쓴다.
+    std::unique_ptr<ClothSimulator> cloth;
+    // 이번 프레임에 정점이 바뀐 천이 있는지. buildDrawCommands 가 정하고 장면 변경으로 친다.
+    bool clothActiveThisFrame = false;
     // GPU 입자. 장면의 입자 부품마다 상태를 들고, 스프라이트 패스가 그린다.
     std::unique_ptr<ParticleSimulator> particles;
     // 이번 프레임에 그릴 입자가 있는지. buildDrawCommands 가 정한다.

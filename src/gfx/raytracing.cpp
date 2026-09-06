@@ -14,6 +14,7 @@
 
 #include "core/error.h"
 #include "gfx/bindless.h"
+#include "gfx/cloth.h"
 #include "gfx/context.h"
 #include "gfx/geometry.h"
 #include "gfx/uploader.h"
@@ -643,14 +644,17 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
             blasAddress = skinnedBottomLevels[skinnedSlot].address;
         }
 
-        glm::mat4 model = glm::transpose(sceneToTrace.world(index));
+        // 천은 월드 공간에서 풀어 변형 정점에 이미 월드 위치가 들어 있다. 그리기 인스턴스처럼 변환은 항등이다.
+        bool worldSpaceVertices = sceneToTrace.objects[index].cloth >= 0 && skinnedSlot != NO_SKINNED_BLAS;
+        glm::mat4 model = worldSpaceVertices ? glm::mat4{1.0F} : glm::transpose(sceneToTrace.world(index));
 
         VkAccelerationStructureInstanceKHR instance{};
         std::memcpy(&instance.transform, &model, sizeof(VkTransformMatrixKHR));
         // 적중 셰이더가 인스턴스 배열을 찾는 번호. 그리기 인스턴스는 버킷 순서로 채워지므로
         // 장면 순서로 매기면 어긋난다. buildDrawCommands 가 만든 슬롯을 그대로 쓴다.
         instance.instanceCustomIndex = instanceSlots[index];
-        instance.mask = 0xFF;
+        // 천은 자기 충돌 광선(CLOTH_SELF_RAY_MASK 만 켠 마스크)이 지나가도록 그 비트를 내린다.
+        instance.mask = sceneToTrace.objects[index].cloth >= 0 ? (0xFFU & ~CLOTH_SELF_RAY_MASK) : 0xFFU;
         // 래스터가 vkCmdSetCullMode 로 하는 것과 같은 판단이다. 양면 재질만 컬링을 끈다.
         instance.flags = 0;
         if (geometry.material(geometry.mesh(mesh).materialIndex).doubleSided) {

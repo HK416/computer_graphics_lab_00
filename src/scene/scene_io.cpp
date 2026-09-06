@@ -247,6 +247,26 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
     }
     document["particleSystems"] = particleSystems;
 
+    json cloths = json::array();
+    for (const Cloth& cloth : scene.cloths) {
+        constexpr std::array<const char*, 3> PIN_NAMES{"none", "topEdge", "twoCorners"};
+        cloths.push_back({{"backend", BACKEND_NAMES[static_cast<size_t>(cloth.backend)]},
+                          {"resolution", cloth.resolution},
+                          {"mass", cloth.mass},
+                          {"stretchCompliance", cloth.stretchCompliance},
+                          {"shearCompliance", cloth.shearCompliance},
+                          {"bendCompliance", cloth.bendCompliance},
+                          {"damping", cloth.damping},
+                          {"substeps", cloth.substeps},
+                          {"iterations", cloth.iterations},
+                          {"pin", PIN_NAMES[std::min(static_cast<size_t>(cloth.pin), PIN_NAMES.size() - 1)]},
+                          {"thickness", cloth.thickness},
+                          {"friction", cloth.friction},
+                          {"gravity", toJson(cloth.gravity)},
+                          {"wind", toJson(cloth.wind)}});
+    }
+    document["cloths"] = cloths;
+
     json objects = json::array();
     for (uint32_t objectIndex = 0; objectIndex < scene.objects.size(); ++objectIndex) {
         const Object& object = scene.objects[objectIndex];
@@ -278,6 +298,9 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
         }
         if (object.particleSystem >= 0) {
             entry["particleSystem"] = object.particleSystem;
+        }
+        if (object.cloth >= 0) {
+            entry["cloth"] = object.cloth;
         }
         objects.push_back(std::move(entry));
     }
@@ -440,6 +463,28 @@ SceneFile readScene(const std::string& text) {
         file.scene.particleSystems.push_back(system);
     }
 
+    for (const json& entry : document.value("cloths", json::array())) {
+        Cloth cloth;
+        cloth.backend = toBackend(entry.value("backend", std::string{"auto"}));
+        // 내장 격자는 16·32·64 뿐이다. 다른 값은 가장 가까운 것으로 접는다.
+        uint32_t resolution = entry.value("resolution", cloth.resolution);
+        cloth.resolution = resolution <= 16 ? 16U : (resolution <= 32 ? 32U : 64U);
+        cloth.mass = std::max(entry.value("mass", cloth.mass), 1.0e-3F);
+        cloth.stretchCompliance = std::max(entry.value("stretchCompliance", cloth.stretchCompliance), 0.0F);
+        cloth.shearCompliance = std::max(entry.value("shearCompliance", cloth.shearCompliance), 0.0F);
+        cloth.bendCompliance = std::max(entry.value("bendCompliance", cloth.bendCompliance), 0.0F);
+        cloth.damping = entry.value("damping", cloth.damping);
+        cloth.substeps = std::clamp(entry.value("substeps", cloth.substeps), 1U, 16U);
+        cloth.iterations = std::clamp(entry.value("iterations", cloth.iterations), 1U, 32U);
+        std::string pin = entry.value("pin", std::string{"topEdge"});
+        cloth.pin = pin == "none" ? ClothPin::NONE : (pin == "twoCorners" ? ClothPin::TWO_CORNERS : ClothPin::TOP_EDGE);
+        cloth.thickness = std::max(entry.value("thickness", cloth.thickness), 0.0F);
+        cloth.friction = std::clamp(entry.value("friction", cloth.friction), 0.0F, 1.0F);
+        cloth.gravity = toVec3(entry.value("gravity", json{}), cloth.gravity);
+        cloth.wind = toVec3(entry.value("wind", json{}), cloth.wind);
+        file.scene.cloths.push_back(cloth);
+    }
+
     // 손으로 고친 파일이나 깨진 파일이 배열 밖을 가리킬 수 있다. 없는 부품은 안 붙은 것으로 본다.
     auto handle = [](int32_t value, size_t size) {
         return value >= 0 && static_cast<size_t>(value) < size ? value : -1;
@@ -457,6 +502,7 @@ SceneFile readScene(const std::string& text) {
         object.rigidBody = handle(entry.value("rigidBody", -1), file.scene.rigidBodies.size());
         object.fluid = handle(entry.value("fluid", -1), file.scene.fluids.size());
         object.particleSystem = handle(entry.value("particleSystem", -1), file.scene.particleSystems.size());
+        object.cloth = handle(entry.value("cloth", -1), file.scene.cloths.size());
         auto skin = entry.value("skin", -1);
         file.scene.objects.push_back(std::move(object));
         file.objectModels.push_back(entry.value("model", -1));

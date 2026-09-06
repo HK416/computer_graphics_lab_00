@@ -326,13 +326,15 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     bool fluidActive = fluid->prepare(scene, &scene != lastScene);
     // 입자는 그림자를 던지지 않고 경로 추적에도 없어 장면 변경으로 치지 않는다.
     particlesActive = particles->prepare(scene, &scene != lastScene, frameDeltaSeconds);
+    // 천은 정점이 바뀌면 그림자 캐시·경로 추적 누적을 버려야 하므로 장면 변경으로 친다.
+    clothActiveThisFrame = cloth->prepare(scene, &scene != lastScene, frameDeltaSeconds, geometry);
     uint32_t particleTotal = geometry.meshLive(fluidSphereMesh) ? fluid->totalParticles() : 0;
     reserveInstances(frame, static_cast<uint32_t>(scene.objects.size()) + particleTotal);
 
     // 장면이 통째로 바뀌면(장면 전환) 프레임 캐시가 다른 장면 것이다. 유체가 움직이는 프레임도 장면이
     // 바뀐 것으로 친다. 가속 구조 재구축, 그림자 캐시 무효화, 경로 추적 누적 초기화가 한꺼번에 맞는다.
-    sceneChangedThisFrame =
-        &scene != lastScene || scene.revision() != lastSceneRevision || (fluidActive && particleTotal > 0);
+    sceneChangedThisFrame = &scene != lastScene || scene.revision() != lastSceneRevision ||
+                            (fluidActive && particleTotal > 0) || clothActiveThisFrame;
     // 오브젝트 번호는 추가/삭제로 밀리므로 구성이 바뀐 프레임에는 지난 값을 버린다. 그 한 프레임만
     // 변위가 0 이고 다음 프레임부터 다시 맞는다. 장면 자체가 바뀐 경우도 같다.
     bool temporalReset = &scene != lastScene || scene.topologyRevision() != lastTopologyRevision ||
@@ -533,12 +535,21 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         auto [mode, sided] = bucketOf(index);
         const GpuMesh& mesh = geometry.mesh(scene.meshOf(index));
         const GpuMeshLod& lod = lodFor(index);
-        const glm::mat4& model = scene.world(index);
+        glm::mat4 model = scene.world(index);
+        glm::mat4 previousModel = temporalReset ? model : previousWorld[index];
+        glm::vec4 bounds = transformBoundingSphere(model, mesh.boundingSphere);
+        // 천은 월드 공간에서 풀어 변형 정점에 이미 월드 위치가 들어 있다. 변환은 항등이고 경계는 시뮬레이터가 준다.
+        int32_t clothIndex = scene.objects[index].cloth;
+        if (clothIndex >= 0 && cloth->active(static_cast<uint32_t>(clothIndex))) {
+            model = glm::mat4{1.0F};
+            previousModel = glm::mat4{1.0F};
+            bounds = cloth->bounds(static_cast<uint32_t>(clothIndex));
+        }
 
         instances[slot].model = model;
-        instances[slot].previousModel = temporalReset ? model : previousWorld[index];
+        instances[slot].previousModel = previousModel;
         instances[slot].normalMatrix = glm::mat4(glm::inverseTranspose(glm::mat3(model)));
-        instanceBounds[slot] = transformBoundingSphere(model, mesh.boundingSphere);
+        instanceBounds[slot] = bounds;
         instances[slot].meshIndex = scene.meshOf(index);
         instances[slot].bucket = static_cast<uint32_t>(mode * 2 + sided);
         instances[slot].bucketBase = batches.meshletDraws[mode][sided].first;
@@ -584,7 +595,16 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     // 구조 번호라 직렬로 모은다.
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
         uint32_t slot = objectInstanceSlots[index];
-        if (slot == INVALID_INSTANCE_SLOT || instances[slot].jointOffset == NO_JOINTS) {
+        if (slot == INVALID_INSTANCE_SLOT) {
+            continue;
+        }
+        // 천도 같은 배관을 탄다. 스킨 컴퓨트 대신 천 시뮬레이터가 구간을 채우고 나머지(경계 구, BLAS, 모션 벡터)는
+        // 같다.
+        int32_t clothSlot = scene.objects[index].cloth;
+        uint32_t clothIndex = clothSlot >= 0 && cloth->active(static_cast<uint32_t>(clothSlot))
+                                  ? static_cast<uint32_t>(clothSlot)
+                                  : NO_CLOTH;
+        if (instances[slot].jointOffset == NO_JOINTS && clothIndex == NO_CLOTH) {
             continue;
         }
         const GpuMesh& mesh = geometry.mesh(scene.meshOf(index));
@@ -597,10 +617,14 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                                               geometry.meshSkinOffset(scene.meshOf(index)),
                                               mesh.meshletOffset,
                                               mesh.meshletCount,
-                                              skinnedMeshletCursor});
-        // 애니메이터가 이번 프레임에 재포즈했으면 바뀐 것. 버퍼·목록이 바뀐 경우는 아래서 전부 바뀐 것으로 덮는다.
+                                              skinnedMeshletCursor,
+                                              clothIndex});
+        // 애니메이터가 이번 프레임에 재포즈했으면(천이면 진행·리셋했으면) 바뀐 것. 버퍼·목록이 바뀐 경우는 아래서
+        // 전부 바뀐 것으로 덮는다.
         int32_t animator = scene.objects[index].animator;
-        skinDispatchChanged.push_back(animator >= 0 && scene.animatorPosed(static_cast<uint32_t>(animator)) ? 1 : 0);
+        bool changed = clothIndex != NO_CLOTH ? cloth->stepped(clothIndex)
+                                              : animator >= 0 && scene.animatorPosed(static_cast<uint32_t>(animator));
+        skinDispatchChanged.push_back(changed ? 1 : 0);
         skinnedSlots.emplace_back(slot, objectSkinnedBlas[index]);
         skinnedVertexCursor += vertexCount;
         skinnedMeshletCursor += mesh.meshletCount;
@@ -657,9 +681,10 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         waitIdle();
         destroyBuffer(context, skinnedVertexBuffer);
         skinnedVertexCapacity = skinnedVertexCursor * 2;
+        // CPU 천이 스테이징에서 복사해 넣으므로 전송 대상이기도 하다.
         skinnedVertexBuffer = createBuffer(context,
                                            static_cast<VkDeviceSize>(skinnedVertexCapacity) * 2 * sizeof(asset::Vertex),
-                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                                            MemoryLocation::DEVICE,
                                            "스킨 정점");

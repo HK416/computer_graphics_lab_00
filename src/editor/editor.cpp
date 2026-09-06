@@ -1134,6 +1134,76 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
                             "충돌은 상위 가속 구조에 광선 질의로 판정한다");
     }
 
+    if (object.cloth >= 0 && object.cloth < static_cast<int>(active.cloths.size()) &&
+        componentHeader("천", &scene::Object::cloth)) {
+        scene::Cloth& cloth = active.cloths[static_cast<size_t>(object.cloth)];
+        auto clothIndex = static_cast<uint32_t>(object.cloth);
+        constexpr std::array<const char*, 3> BACKEND_NAMES{"자동", "CPU", "GPU"};
+        bool gpuUsable = renderer.clothGpuAvailable();
+        int backendIndex = static_cast<int>(cloth.backend);
+        if (ImGui::BeginCombo("백엔드", BACKEND_NAMES[static_cast<size_t>(backendIndex)])) {
+            for (int i = 0; i < static_cast<int>(BACKEND_NAMES.size()); ++i) {
+                ImGui::BeginDisabled(i == static_cast<int>(scene::SimulationBackend::GPU) && !gpuUsable);
+                if (ImGui::Selectable(BACKEND_NAMES[static_cast<size_t>(i)], i == backendIndex)) {
+                    cloth.backend = static_cast<scene::SimulationBackend>(i);
+                }
+                ImGui::EndDisabled();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(지금 %s)", renderer.clothOnCpu(clothIndex) ? "CPU" : "GPU");
+        constexpr std::array<uint32_t, 3> RESOLUTIONS{16U, 32U, 64U};
+        constexpr std::array<const char*, 3> RESOLUTION_NAMES{"16×16", "32×32", "64×64"};
+        size_t resolutionIndex = cloth.resolution <= 16 ? 0 : (cloth.resolution <= 32 ? 1 : 2);
+        if (ImGui::BeginCombo("해상도", RESOLUTION_NAMES[resolutionIndex])) {
+            for (size_t i = 0; i < RESOLUTIONS.size(); ++i) {
+                if (ImGui::Selectable(RESOLUTION_NAMES[i], i == resolutionIndex)) {
+                    cloth.resolution = RESOLUTIONS[i];
+                    // 메쉬도 그 격자로 바꾼다. 정점 수가 맞지 않으면 천이 돌지 않는다.
+                    auto primitive = static_cast<size_t>(asset::clothPrimitiveFor(cloth.resolution));
+                    if (primitive < primitiveMeshes.size()) {
+                        active.attachMeshRenderer(objectIndex, primitiveMeshes[primitive]);
+                    }
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::DragFloat("질량", &cloth.mass, 0.01F, 0.01F, 100.0F, "%.2f kg");
+        ImGui::DragFloat("신장 컴플라이언스", &cloth.stretchCompliance, 1e-4F, 0.0F, 1.0F, "%.4f");
+        ImGui::DragFloat("전단 컴플라이언스", &cloth.shearCompliance, 1e-4F, 0.0F, 1.0F, "%.4f");
+        ImGui::DragFloat("굽힘 컴플라이언스", &cloth.bendCompliance, 1e-4F, 0.0F, 1.0F, "%.4f");
+        ImGui::DragFloat("감쇠", &cloth.damping, 0.01F, 0.0F, 20.0F, "%.2f");
+        int substeps = static_cast<int>(cloth.substeps);
+        if (ImGui::SliderInt("서브스텝", &substeps, 1, 16)) {
+            cloth.substeps = static_cast<uint32_t>(substeps);
+        }
+        int iterations = static_cast<int>(cloth.iterations);
+        if (ImGui::SliderInt("반복", &iterations, 1, 32)) {
+            cloth.iterations = static_cast<uint32_t>(iterations);
+        }
+        constexpr std::array<const char*, 3> PIN_NAMES{"없음", "윗변", "위 모서리 둘"};
+        int pinIndex = static_cast<int>(cloth.pin);
+        if (ImGui::Combo("고정", &pinIndex, PIN_NAMES.data(), static_cast<int>(PIN_NAMES.size()))) {
+            cloth.pin = static_cast<scene::ClothPin>(pinIndex);
+        }
+        ImGui::DragFloat("두께", &cloth.thickness, 0.001F, 0.0F, 1.0F, "%.3f");
+        ImGui::SliderFloat("마찰", &cloth.friction, 0.0F, 1.0F, "%.2f");
+        ImGui::DragFloat3("중력", glm::value_ptr(cloth.gravity), 0.1F, -100.0F, 100.0F);
+        ImGui::DragFloat3("바람", glm::value_ptr(cloth.wind), 0.1F, -100.0F, 100.0F);
+        if (!renderer.clothActive(clothIndex)) {
+            ImGui::TextColored(ImVec4{1.0F, 0.6F, 0.3F, 1.0F},
+                               "메쉬가 천 격자가 아니다. 해상도를 다시 골라 격자를 붙인다");
+        }
+        ImGui::TextDisabled(
+            "크기는 오브젝트 배율, 정지 자세는 오브젝트 변환이다. 윗변은 월드에서 가장 높은 변이다.\n"
+            "콜라이더 도형과 부딪히고, 메쉬 콜라이더는 GPU 가 광선 질의(TLAS), CPU 가 삼각형으로 본다.\n"
+            "Path Tracing 과 광선 반사·그림자에 변형 그대로 보인다");
+        if (!renderer.clothMeshCollisionAvailable()) {
+            ImGui::TextDisabled("광선 질의가 없어 GPU 백엔드는 메쉬 콜라이더를 지나간다");
+        }
+    }
+
     ImGui::Separator();
     if (ImGui::Button("컴포넌트 추가", ImVec2{-1.0F, 0.0F})) {
         ImGui::OpenPopup("컴포넌트 추가");
@@ -1178,6 +1248,17 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         ImGui::BeginDisabled(object.particleSystem >= 0);
         if (ImGui::MenuItem("입자")) {
             active.attachParticleSystem(objectIndex);
+        }
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(object.cloth >= 0);
+        if (ImGui::MenuItem("천")) {
+            scene::Cloth cloth;
+            active.attachCloth(objectIndex, cloth);
+            // 메쉬를 32×32 격자로 붙인다. 이미 있던 메쉬는 천 격자로 바뀐다.
+            auto primitive = static_cast<size_t>(asset::clothPrimitiveFor(cloth.resolution));
+            if (primitive < primitiveMeshes.size()) {
+                active.attachMeshRenderer(objectIndex, primitiveMeshes[primitive]);
+            }
         }
         ImGui::EndDisabled();
         ImGui::EndPopup();

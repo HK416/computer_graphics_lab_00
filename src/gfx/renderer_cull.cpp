@@ -206,7 +206,7 @@ void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame)
                   READER_STAGES,
                   VK_ACCESS_2_SHADER_READ_BIT,
                   VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                  VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT |
+                  VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
     // 바뀐 오브젝트의 현재 구간(지난 프레임 포즈)을 지난 반쪽에 남긴다. 모션 벡터가 그것을 읽는다. 현재 반쪽
@@ -239,11 +239,29 @@ void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame)
                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     }
 
+    // 천은 스킨 컴퓨트 대신 시뮬레이터가 구간을 채운다. 메쉬 충돌은 지난 프레임의 TLAS 를 본다(이 패스가 가속
+    // 구조 갱신보다 앞이다. ponytail: 한 프레임 지연).
+    bool clothRayQuery = clothMeshCollisionAvailable() && rayTracer->ready();
+    for (size_t i = 0; i < skinDispatches.size(); ++i) {
+        const SkinDispatch& dispatch = skinDispatches[i];
+        if (skinDispatchChanged[i] == 0 || dispatch.cloth == NO_CLOTH) {
+            continue;
+        }
+        cloth->record(commandBuffer,
+                      static_cast<uint32_t>(frameIndex % FRAMES_IN_FLIGHT),
+                      dispatch.cloth,
+                      skinnedVertexBuffer.handle,
+                      skinnedVertexBuffer.address,
+                      currentBase + dispatch.destinationOffset,
+                      clothRayQuery ? rayTracer->accelerationSet() : VK_NULL_HANDLE,
+                      clothRayQuery);
+    }
+
     vkCmdBindDescriptorSets(
         commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, skinPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, skinPipeline);
     for (size_t i = 0; i < skinDispatches.size(); ++i) {
-        if (skinDispatchChanged[i] == 0) {
+        if (skinDispatchChanged[i] == 0 || skinDispatches[i].cloth != NO_CLOTH) {
             continue;
         }
         const SkinDispatch& dispatch = skinDispatches[i];
@@ -261,10 +279,10 @@ void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame)
         vkCmdDispatch(commandBuffer, (dispatch.vertexCount + SKIN_GROUP_SIZE - 1) / SKIN_GROUP_SIZE, 1, 1);
     }
 
-    // 경계 구 컴퓨트가 변형 정점을 읽는다.
+    // 경계 구 컴퓨트가 변형 정점을 읽는다. CPU 천은 전송으로 썼다.
     memoryBarrier(commandBuffer,
-                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                   VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     vkCmdBindDescriptorSets(

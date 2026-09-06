@@ -1,0 +1,34 @@
+#version 460
+
+#include "cloth_common.glsl"
+
+// 서브스텝의 첫 패스. 속도에 가속도를 더하고 감쇠한 뒤 위치를 예측한다. 고정점(질량 역수 0)은 제자리다.
+// CLOTH_FLAG_RESET 이면 정지 자세로 되돌린다.
+layout(local_size_x = CLOTH_GROUP_SIZE) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.vertexCount) {
+        return;
+    }
+    if ((push.flags & CLOTH_FLAG_RESET) != 0u) {
+        vec4 rest = push.rest.items[i];
+        push.positions.items[i] = rest;
+        push.predicted.items[i] = rest;
+        push.velocities.items[i] = vec4(0.0);
+        return;
+    }
+    ClothParams params = push.params.item;
+    vec4 position = push.positions.items[i];
+    if (position.w <= 0.0) {
+        push.predicted.items[i] = position;
+        push.velocities.items[i] = vec4(0.0);
+        return;
+    }
+    float h = push.dt;
+    vec3 velocity = push.velocities.items[i].xyz;
+    velocity += params.accelerationDamping.xyz * h;
+    velocity *= max(1.0 - params.accelerationDamping.w * h, 0.0);
+    push.velocities.items[i] = vec4(velocity, 0.0);
+    push.predicted.items[i] = vec4(position.xyz + velocity * h, position.w);
+}

@@ -1,0 +1,40 @@
+#version 460
+
+#include "cloth_common.glsl"
+
+// 프레임 끝. 격자 중앙 차분으로 법선·탄젠트를 내고 변형 정점 버퍼에 asset::Vertex 로 쓴다. physics/cloth.cpp 의
+// computeNormals 와 같은 식이라 CPU 백엔드와 같은 정점이 나온다.
+layout(local_size_x = CLOTH_GROUP_SIZE) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.vertexCount) {
+        return;
+    }
+    ClothParams params = push.params.item;
+    uint n = params.resolution;
+    uint side = n + 1u;
+    ClothVertexInfo info = push.info.items[i];
+    uint x0 = info.gridX > 0u ? info.gridX - 1u : 0u;
+    uint x1 = min(info.gridX + 1u, n);
+    uint z0 = info.gridZ > 0u ? info.gridZ - 1u : 0u;
+    uint z1 = min(info.gridZ + 1u, n);
+    vec3 dx = push.positions.items[push.grid.items[x1 + info.gridZ * side]].xyz -
+              push.positions.items[push.grid.items[x0 + info.gridZ * side]].xyz;
+    vec3 dz = push.positions.items[push.grid.items[info.gridX + z1 * side]].xyz -
+              push.positions.items[push.grid.items[info.gridX + z0 * side]].xyz;
+    // 격자 v 는 +Z 로 늘어나고 정지 법선은 +Y 다. cross(dz, dx) 가 +Y 를 낸다.
+    vec3 crossed = cross(dz, dx);
+    float crossLength = length(crossed);
+    vec3 normal = crossLength > 1.0e-8 ? crossed / crossLength : vec3(0.0, 1.0, 0.0);
+    float dxLength = length(dx);
+    vec3 tangent = dxLength > 1.0e-8 ? dx / dxLength : vec3(1.0, 0.0, 0.0);
+
+    Vertex vertex;
+    vertex.position = push.positions.items[i].xyz;
+    vertex.normal = encodeUnitVector(normal);
+    // 내장 평면과 같은 손 방향(-1).
+    vertex.tangent = encodeTangent(vec4(tangent, -1.0));
+    vertex.uv = vec2(float(info.gridX), float(info.gridZ)) / float(n);
+    push.vertices.items[push.destinationOffset + i] = vertex;
+}

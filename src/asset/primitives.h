@@ -25,8 +25,17 @@ enum class Primitive : uint32_t {
     CONE,
     CAPSULE,
     TORUS,
+    // 천 부품이 쓰는 XZ 격자(±1). 분할 수가 곧 천 해상도다. 양면 재질.
+    CLOTH_16,
+    CLOTH_32,
+    CLOTH_64,
     COUNT,
 };
+
+// 천 격자 도형의 분할 수. 천 도형이 아니면 0.
+uint32_t clothPrimitiveResolution(Primitive primitive);
+// 분할 수로 천 도형을 찾는다. 16·32·64 가 아니면 COUNT.
+Primitive clothPrimitiveFor(uint32_t resolution);
 
 // 편집기 메뉴에 쓰는 이름.
 const char* primitiveLabel(Primitive primitive);

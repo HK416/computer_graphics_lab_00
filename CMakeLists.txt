@@ -118,6 +118,10 @@ set(shader_sources
     shaders/particles.comp
     shaders/particle_sprite.vert
     shaders/particle_sprite.frag
+    shaders/cloth_predict.comp
+    shaders/cloth_constraint.comp
+    shaders/cloth_finish.comp
+    shaders/cloth_write.comp
     shaders/rigid_integrate.comp
     shaders/rigid_solve.comp
     shaders/rigid_finish.comp
@@ -156,7 +160,8 @@ set(shader_variants
     "shaders/mesh.vert|mesh_nodrawid.vert.spv|NO_DRAW_ID"
     "shaders/mesh.frag|mesh_rq.frag.spv|RAY_QUERY_SHADOWS"
     "shaders/mesh_oit.frag|mesh_oit_rq.frag.spv|RAY_QUERY_SHADOWS"
-    "shaders/particles.comp|particles_rq.comp.spv|PARTICLE_RAY_QUERY")
+    "shaders/particles.comp|particles_rq.comp.spv|PARTICLE_RAY_QUERY"
+    "shaders/cloth_finish.comp|cloth_finish_rq.comp.spv|CLOTH_RAY_QUERY")
 
 foreach(variant IN LISTS shader_variants)
     string(REPLACE "|" ";" variant_parts "${variant}")
@@ -211,6 +216,7 @@ add_executable(cg_lab
     src/gfx/debug_lines.cpp
     src/gfx/environment.cpp
     src/gfx/bindless.cpp
+    src/gfx/cloth.cpp
     src/gfx/fluid.cpp
     src/gfx/particles.cpp
     src/gfx/geometry.cpp
@@ -249,6 +255,7 @@ add_executable(cg_lab
     src/gfx/uploader.cpp
     src/gfx/vma_impl.cpp
     src/physics/fluid_sph.cpp
+    src/physics/cloth.cpp
     src/physics/marching_cubes.cpp
     src/physics/rigid_body.cpp
     src/scene/camera.cpp
@@ -411,6 +418,8 @@ add_executable(cg_lab_fluid_tests tests/fluid_test.cpp src/physics/fluid_sph.cpp
     src/asset/animation.cpp src/core/error.cpp src/core/job_system.cpp)
 add_executable(cg_lab_debug_lines_tests tests/debug_lines_test.cpp src/gfx/debug_lines.cpp src/scene/scene.cpp
     src/asset/animation.cpp src/core/error.cpp src/core/job_system.cpp)
+add_executable(cg_lab_cloth_tests tests/cloth_test.cpp src/physics/cloth.cpp src/physics/fluid_sph.cpp
+    src/asset/primitives.cpp src/scene/scene.cpp src/asset/animation.cpp src/core/error.cpp src/core/job_system.cpp)
 target_include_directories(cg_lab_vertex_pack_tests PRIVATE src)
 target_link_libraries(cg_lab_vertex_pack_tests PRIVATE glm::glm)
 if(MSVC)
@@ -432,6 +441,15 @@ if(MSVC)
     target_compile_options(cg_lab_hardware_profile_tests PRIVATE /W4 /utf-8)
 else()
     target_compile_options(cg_lab_hardware_profile_tests PRIVATE -Wall -Wextra)
+endif()
+
+target_include_directories(cg_lab_cloth_tests PRIVATE src)
+target_link_libraries(cg_lab_cloth_tests PRIVATE SDL3::SDL3 spdlog::spdlog glm::glm Threads::Threads)
+target_compile_definitions(cg_lab_cloth_tests PRIVATE GLM_ENABLE_EXPERIMENTAL)
+if(MSVC)
+    target_compile_options(cg_lab_cloth_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(cg_lab_cloth_tests PRIVATE -Wall -Wextra)
 endif()
 
 target_include_directories(cg_lab_fluid_tests PRIVATE src)
@@ -560,7 +578,7 @@ foreach(test_target
         cg_lab_scene_io_tests cg_lab_profiler_tests cg_lab_shadow_tests cg_lab_concurrency_tests
         cg_lab_upscaler_tests cg_lab_vertex_pack_tests cg_lab_physics_tests cg_lab_primitives_tests
         cg_lab_debug_lines_tests cg_lab_hardware_profile_tests cg_lab_fluid_tests
-        cg_lab_marching_cubes_tests)
+        cg_lab_marching_cubes_tests cg_lab_cloth_tests)
     if(MSVC)
         target_compile_options(${test_target} PRIVATE /UNDEBUG)
     else()
@@ -587,6 +605,7 @@ add_test(NAME primitives COMMAND cg_lab_primitives_tests)
 add_test(NAME debug_lines COMMAND cg_lab_debug_lines_tests)
 add_test(NAME hardware_profile COMMAND cg_lab_hardware_profile_tests)
 add_test(NAME fluid COMMAND cg_lab_fluid_tests)
+add_test(NAME cloth COMMAND cg_lab_cloth_tests)
 add_test(NAME physics COMMAND cg_lab_physics_tests)
 add_test(NAME marching_cubes COMMAND cg_lab_marching_cubes_tests)
 # 헤드리스 물리 회귀: 강체 장면을 120 프레임 돌려 저장한 결과가 기준 파일과 바이트로 같은지 본다.

@@ -50,7 +50,7 @@ ctest --test-dir build/debug --output-on-failure
 
 테스트 이름: `lod_network` `animation` `camera` `scene` `scene_io` `profiler` `shadow` `upscaler`
 `concurrency` `vertex_pack` `physics` `primitives` `debug_lines` `hardware_profile` `fluid`
-`marching_cubes` `headless_physics`(cg_lab 을 `--headless` 로 돌려 저장 결과를 `tests/scenes/expected/` 와 cmp).
+`marching_cubes` `cloth` `headless_physics`(cg_lab 을 `--headless` 로 돌려 저장 결과를 `tests/scenes/expected/` 와 cmp).
 
 선택 기능:
 
@@ -152,8 +152,8 @@ cmd /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliar
 ## 구조
 
 `src/main.cpp` 가 인자를 파싱해 `app::Application` 을 띄운다. 계층은 `app` → `editor`/`gfx`/`scene`/
-`asset`/`physics` → `core` 방향으로만 의존한다. `physics` 는 `scene` 과 `core` 만 보고, `gfx` 는 유체
-CPU 백엔드를 부르느라 `physics` 를 하나 본다.
+`asset`/`physics` → `core` 방향으로만 의존한다. `physics` 는 `scene` 과 `core` 만 보고, `gfx` 는 유체·천
+CPU 백엔드를 부르느라 `physics` 를 본다.
 
 | 경로 | 내용 |
 | --- | --- |
@@ -181,7 +181,7 @@ CPU 백엔드를 부르느라 `physics` 를 하나 본다.
 `Renderer::drawFrame` → `buildDrawCommands`(유체 `prepare` 포함) → `buildLights` → `recordCommands`. `recordCommands` 는
 패스를 `RenderGraph` 노드로 등록하고(플러그인 `addPass` 훅이 그 뒤에 자기 노드를 끼움) `execute` 한다. 노드 순서:
 
-환경 맵 굽기(설정이 바뀔 때만) → 스킨 컴퓨트(변형 정점·meshlet 경계; 포즈가 바뀐 오브젝트만) → [강체 GPU 솔버: PhysicsPlugin 이 끼움] →
+환경 맵 굽기(설정이 바뀔 때만) → 스킨 컴퓨트(변형 정점·meshlet 경계; 포즈가 바뀐 오브젝트만. 천은 여기서 스킨 컴퓨트 대신 `ClothSimulator` 가 같은 구간을 채운다) → [강체 GPU 솔버: PhysicsPlugin 이 끼움] →
 유체 컴퓨트(입자 진행, 인스턴스와 TLAS 인스턴스 쓰기; CPU 백엔드는 지난 프레임이 띄운 스텝을 거둬 쓰고 노드 끝에서 다음 스텝을 백그라운드로 띄운다) → 그림자 패스 → DDGI 프로브 갱신 → GPU 입자 진행(충돌이면 TLAS 를 먼저 세움) → [경로 추적] **또는** [컬(1차) → 불투명(1차, 끝에 유체 인스턴스 드로우)
 → HZB → 컬(2차) → 불투명(2차) → 하늘 → 직접광 ReSTIR → 광선 반사 → OIT → 합성 → 입자 스프라이트 → SSAO] → Bloom·자동 노출 → 시간축
 업스케일 → 톤 매핑 → 공간 업스케일 → UI.
@@ -213,6 +213,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `GpuLight` (`src/gfx/renderer.h`) | `Light` (`scene_types.glsl`) |
 | `GpuFluidCollider` `GpuFluidParams` `FluidPushConstants` (`src/gfx/fluid.h`) | `FluidCollider` `FluidParams` `FluidPushConstants` (`shaders/fluid_common.glsl`) |
 | `GpuParticle` `GpuParticleParams` `ParticlePushConstants` (`src/gfx/particles.h`) | `Particle` `ParticleParams` `ParticlePushConstants` (`shaders/particle_common.glsl`) — 컴퓨트와 스프라이트 정점·프래그먼트가 같은 블록 |
+| `physics::ClothConstraint` `ClothVertexInfo` `CLOTH_COLORS` (`src/physics/cloth.h`), `GpuClothParams` `ClothPushConstants` `CLOTH_SELF_RAY_MASK` (`src/gfx/cloth.h`) | 동명 구조체·상수 (`shaders/cloth_common.glsl`); 제약 색 규칙은 `buildClothTopology` 와 `cloth_constraint.comp` 디스패치 순서 |
 | `GpuRigidBody` `RigidPushConstants` (`src/gfx/rigid_body_gpu.h`) | `RigidBody` `RigidPushConstants` (`shaders/rigid_common.glsl`) |
 | `physics::Triangle` (`src/physics/rigid_body.h`) | `RigidTriangle` (`rigid_common.glsl`) |
 | `collideBoxBox` 등 접촉 생성 (`src/physics/rigid_body.cpp`) | `rigidCollide` (`shaders/rigid_common.glsl`) |
@@ -245,9 +246,12 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 
 전부 `scalar` 레이아웃이다.
 
-배치가 아니라 «값» 이 묶인 자리도 하나 있다. `physics::FluidParams`(`src/physics/fluid_sph.h`)는 CPU
+배치가 아니라 «값» 이 묶인 자리도 있다. `physics::FluidParams`(`src/physics/fluid_sph.h`)는 CPU
 백엔드가 쓰고, `FluidSimulator::fillParams` 가 그것을 `GpuFluidParams` 로 필드마다 옮겨 담는다. 유체
-설정을 더할 때는 세 곳(`FluidParams`, `GpuFluidParams`, `fluid_common.glsl`)을 함께 고친다.
+설정을 더할 때는 세 곳(`FluidParams`, `GpuFluidParams`, `fluid_common.glsl`)을 함께 고친다. 천도 같다:
+`physics::ClothParams` → `ClothSimulator::record` 의 `GpuClothParams` → `cloth_common.glsl`. 천 솔버 알고리즘
+자체도 두 벌(`physics/cloth.cpp` 의 `ClothSolver::step` ↔ `cloth_predict/constraint/finish/write.comp`)이라
+한쪽을 고치면 다른 쪽도 같은 순서로 고친다.
 
 **푸시 상수 블록은 `layout(push_constant)` 만 쓰면 std430 이라** `vec2`/`ivec2`/`vec4` 가 8·16바이트
 경계로 밀려 C++ 의 빽빽한 배치와 조용히 어긋난다. 앞에 홀수 개의 4바이트 멤버가 오는 벡터를 넣을

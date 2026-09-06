@@ -1,0 +1,33 @@
+#version 460
+
+#include "cloth_common.glsl"
+
+// 거리 제약 한 색. 한 색 안의 제약들은 정점을 나눠 갖지 않으므로 예측 위치를 바로 고쳐도 경쟁이 없다
+// (색칠한 Gauss-Seidel). physics/cloth.cpp 와 같은 XPBD 식이다.
+layout(local_size_x = CLOTH_GROUP_SIZE) in;
+
+void main() {
+    uint local = gl_GlobalInvocationID.x;
+    if (local >= push.constraintCount) {
+        return;
+    }
+    uint c = push.constraintFirst + local;
+    ClothConstraint constraint = push.constraints.items[c];
+    vec4 pa = push.predicted.items[constraint.a];
+    vec4 pb = push.predicted.items[constraint.b];
+    float wa = pa.w;
+    float wb = pb.w;
+    vec3 direction = pa.xyz - pb.xyz;
+    float length = length(direction);
+    if (length <= 1.0e-6 || wa + wb <= 0.0) {
+        return;
+    }
+    direction /= length;
+    float violation = length - constraint.restLength;
+    float alpha = constraint.compliance / (push.dt * push.dt);
+    float lambda = push.lambdas.items[c];
+    float deltaLambda = (-violation - alpha * lambda) / (wa + wb + alpha);
+    push.lambdas.items[c] = lambda + deltaLambda;
+    push.predicted.items[constraint.a] = vec4(pa.xyz + direction * (wa * deltaLambda), wa);
+    push.predicted.items[constraint.b] = vec4(pb.xyz - direction * (wb * deltaLambda), wb);
+}

@@ -94,20 +94,26 @@ FluidParams deriveFluidParams(const scene::Fluid& settings,
     uint32_t nz = std::max(1U, (particleCount + nx * ny - 1) / (nx * ny));
     params.lattice = glm::uvec3{nx, ny, nz};
 
-    params.colliderCount = 0;
-    for (uint32_t index = 0; index < scene.objects.size() && params.colliderCount < FLUID_MAX_COLLIDERS; ++index) {
+    params.colliderCount = collectShapeColliders(scene, params.colliders);
+    return params;
+}
+
+uint32_t collectShapeColliders(const scene::Scene& scene, std::array<FluidCollider, FLUID_MAX_COLLIDERS>& out) {
+    uint32_t count = 0;
+    for (uint32_t index = 0; index < scene.objects.size() && count < FLUID_MAX_COLLIDERS; ++index) {
         int32_t slot = scene.objects[index].rigidBody;
         if (slot < 0 || static_cast<size_t>(slot) >= scene.rigidBodies.size() || !scene.visibleCached(index)) {
             continue;
         }
         const scene::RigidBody& body = scene.rigidBodies[static_cast<size_t>(slot)];
         if (body.shape == scene::ColliderShape::MESH) {
-            // ponytail: 입자 대 삼각형 판정은 아직 없다. 메쉬 콜라이더는 유체가 통과한다.
+            // 메쉬는 볼록하지 않아 도형 목록에 없다. 유체는 통과하고(ponytail: 입자 대 삼각형 없음) 천은
+            // 삼각형·광선 질의로 따로 본다.
             continue;
         }
         // 크기 규칙은 강체 솔버·콜라이더 표시와 같은 함수로 낸다.
         scene::ColliderPose pose = scene::colliderPose(body, scene.world(index));
-        FluidCollider& collider = params.colliders[params.colliderCount++];
+        FluidCollider& collider = out[count++];
         collider.shape = body.shape;
         collider.radius = pose.radius;
         collider.halfExtents = pose.halfExtents;
@@ -115,7 +121,7 @@ FluidParams deriveFluidParams(const scene::Fluid& settings,
         collider.world = rigid;
         collider.inverseWorld = glm::inverse(rigid);
     }
-    return params;
+    return count;
 }
 
 uint32_t fluidSubsteps(const FluidParams& params, float deltaSeconds) {

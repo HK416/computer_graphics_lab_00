@@ -227,6 +227,42 @@ struct ParticleSystem {
     bool operator==(const ParticleSystem&) const = default;
 };
 
+// 천의 고정 방식. 월드 Y 평균이 가장 높은 격자 변을 «윗변» 으로 본다(오브젝트 방향에 무관).
+enum class ClothPin : uint32_t {
+    NONE = 0,
+    TOP_EDGE = 1,
+    TWO_CORNERS = 2,
+};
+
+// 천 부품(XPBD). 오브젝트의 메쉬가 내장 «천 격자»(resolution 과 같은 분할)여야 돈다. 크기는 오브젝트 배율,
+// 정지 자세는 오브젝트 월드 변환이다. 상태(정점 위치)는 렌더러의 변형 정점 버퍼에만 있고 저장하지 않는다.
+struct Cloth {
+    // AUTO 는 GPU 를 쓰되 만들 수 없으면 CPU 로 내려간다(유체와 같은 규칙).
+    SimulationBackend backend = SimulationBackend::AUTO;
+    // 격자 분할 수. 16, 32, 64 만 있다(내장 도형).
+    uint32_t resolution = 32;
+    // 천 전체 질량(kg).
+    float mass = 1.0F;
+    // XPBD 컴플라이언스(m/N). 0 이면 늘어나지 않는다.
+    float stretchCompliance = 0.0F;
+    float shearCompliance = 1.0e-3F;
+    float bendCompliance = 1.0e-2F;
+    // 초당 속도 감쇠 비율.
+    float damping = 0.5F;
+    uint32_t substeps = 4;
+    uint32_t iterations = 8;
+    ClothPin pin = ClothPin::TOP_EDGE;
+    // 콜라이더에서 띄우는 두께.
+    float thickness = 0.02F;
+    // 콜라이더에 닿은 정점의 접선 이동을 이 비율만큼 죽인다(0 미끄러움, 1 달라붙음).
+    float friction = 0.5F;
+    glm::vec3 gravity{0.0F, -9.81F, 0.0F};
+    // 단위 질량당 힘으로 더하는 바람.
+    glm::vec3 wind{0.0F};
+
+    bool operator==(const Cloth&) const = default;
+};
+
 struct Object {
     std::string name;
     // 부모 기준 지역 변환. 세계 변환은 Scene::worldMatrix 가 부모를 거슬러 올라가 만든다.
@@ -241,6 +277,7 @@ struct Object {
     int32_t rigidBody = -1;
     int32_t fluid = -1;
     int32_t particleSystem = -1;
+    int32_t cloth = -1;
 
     bool operator==(const Object&) const = default;
 };
@@ -303,6 +340,7 @@ struct SceneSnapshot {
     std::vector<RigidBody> rigidBodies;
     std::vector<Fluid> fluids;
     std::vector<ParticleSystem> particleSystems;
+    std::vector<Cloth> cloths;
     glm::vec3 ambientColor{0.25F};
     float ambientIntensity = 1.0F;
     Environment environment;
@@ -318,6 +356,7 @@ struct Scene {
     std::vector<RigidBody> rigidBodies;
     std::vector<Fluid> fluids;
     std::vector<ParticleSystem> particleSystems;
+    std::vector<Cloth> cloths;
     Camera camera;
     // 재생 중인지. 참일 때만 물리가 돌고, 편집기는 되돌리기 기록을 멈춘다. 저장하지 않는다.
     bool simulating = false;
@@ -387,6 +426,7 @@ struct Scene {
     int32_t attachRigidBody(uint32_t index, const RigidBody& body = {});
     int32_t attachFluid(uint32_t index, const Fluid& fluid = {});
     int32_t attachParticleSystem(uint32_t index, const ParticleSystem& system = {});
+    int32_t attachCloth(uint32_t index, const Cloth& cloth = {});
     // 부품을 뗀다. 아무도 가리키지 않게 된 부품은 배열에서 빠지고 첨자가 다시 맞춰진다.
     void detachComponent(uint32_t index, int32_t Object::* handle);
 

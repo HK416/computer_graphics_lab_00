@@ -107,6 +107,8 @@ Renderer::Renderer(Context& context,
     createSsaoPipelines();
     environment = std::make_unique<EnvironmentMap>(context, bindless);
     fluid = std::make_unique<FluidSimulator>(context, bindless, jobs);
+    cloth = std::make_unique<ClothSimulator>(
+        context, bindless, jobs, rayQueryShadowsAvailable() ? rayTracer->accelerationLayout() : VK_NULL_HANDLE);
     particles = std::make_unique<ParticleSimulator>(
         context, bindless, rayQueryShadowsAvailable() ? rayTracer->accelerationLayout() : VK_NULL_HANDLE);
     createParticlePipelines();

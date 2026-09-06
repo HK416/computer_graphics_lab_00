@@ -34,6 +34,9 @@ struct FluidCollider {
 
 // 부품 설정과 장면에서 끌어낸 시뮬레이션 상수. CPU 솔버와 GPU 셰이더가 «같은 함수»로 만든 같은
 // 값을 본다. 두 벌로 두면 백엔드를 바꿀 때마다 물이 달리 흐른다.
+// 장면의 강체 «도형» 콜라이더(메쉬 제외, 보이는 것만)를 세계 변환과 함께 모은다. 유체와 천이 같은 목록을 본다.
+uint32_t collectShapeColliders(const scene::Scene& scene, std::array<FluidCollider, FLUID_MAX_COLLIDERS>& out);
+
 struct FluidParams {
     glm::mat4 emitterWorld{1.0F};
     glm::vec3 emitterHalfExtents{0.5F};

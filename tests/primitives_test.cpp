@@ -118,6 +118,19 @@ int main() {
         check(asset::primitiveFromAssetName(asset::primitiveAssetName(primitive)) == primitive, "이름 왕복", label);
     }
 
+    // 천 격자는 분할 수가 곧 해상도라 정점 (n+1)²·삼각형 2n² 이고 양면 재질이다.
+    for (uint32_t n : {16U, 32U, 64U}) {
+        asset::Primitive primitive = asset::clothPrimitiveFor(n);
+        assert(primitive != asset::Primitive::COUNT && asset::clothPrimitiveResolution(primitive) == n);
+        asset::Model cloth = asset::makePrimitive(primitive);
+        assert(cloth.meshes[0].vertices.size() == static_cast<size_t>(n + 1) * (n + 1));
+        assert(cloth.meshes[0].indices.size() == static_cast<size_t>(n) * n * 6);
+        assert(cloth.materials[0].doubleSided && "천은 양면이다");
+        assert(std::abs(cloth.meshes[0].boundsRadius - std::sqrt(2.0F)) < 1e-4F);
+    }
+    assert(asset::clothPrimitiveFor(8) == asset::Primitive::COUNT);
+    assert(asset::clothPrimitiveResolution(asset::Primitive::PLANE) == 0);
+
     assert(asset::primitiveFromAssetName("<builtin:없음>") == asset::Primitive::COUNT);
     assert(asset::primitiveFromAssetName("Fox.glb") == asset::Primitive::COUNT);
 
