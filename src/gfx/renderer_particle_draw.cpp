@@ -103,7 +103,15 @@ void Renderer::recordParticlePass(VkCommandBuffer commandBuffer, const Frame& fr
     auto slot = static_cast<uint32_t>(frameIndex % FRAMES_IN_FLIGHT);
     VkDescriptorSet accelerationSet = rayQuery ? rayTracer->accelerationSet() : VK_NULL_HANDLE;
     for (uint32_t index = 0; index < particles->systemCount(); ++index) {
-        particles->record(commandBuffer, slot, index, scene, frameIndex, rayQuery, accelerationSet, buffers);
+        particles->record(commandBuffer,
+                          slot,
+                          index,
+                          scene,
+                          frameIndex,
+                          rayQuery,
+                          accelerationSet,
+                          buffers,
+                          frame.cameraBuffer.address);
     }
 }
 
@@ -135,15 +143,14 @@ void Renderer::recordParticleSpritePass(VkCommandBuffer commandBuffer, const Fra
         push.camera = frame.cameraBuffer.address;
         push.depthTexture = targets.depthSlot;
         push.particleCount = count;
+        push.sorted = particles->sortedAddress(index);
         vkCmdPushConstants(commandBuffer,
                            particlePipelineLayout,
                            VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0,
                            sizeof(push),
                            &push);
-        // 정렬 없이 입자 번호 순으로 섞는다. 알파가 낮으면 순서 오차가 눈에 띄지 않고 프레임이 바이트로 결정적이다.
-        //
-        // ponytail: 짙은 입자를 겹쳐 쌓으면 순서가 튄다. 카메라 거리로 바이토닉 정렬을 넣으면 된다.
+        // 진행 컴퓨트가 카메라 거리로 정렬해 둔 순서(먼 것 먼저)로 그린다.
         vkCmdDraw(commandBuffer, 6, count, 0, 0);
     }
     vkCmdEndRendering(commandBuffer);

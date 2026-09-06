@@ -68,8 +68,15 @@ struct ParticlePushConstants {
     // 장면 깊이의 bindless 샘플 슬롯. 소프트 깊이 감쇠에 쓴다.
     uint32_t depthTexture = 0;
     uint32_t particleCount = 0;
+    // 카메라 거리로 정렬한 (키, 입자 번호) 목록. 스프라이트가 이 순서로 그린다. 정렬 컴퓨트의 단계는 sortK·sortJ.
+    VkDeviceAddress sorted = 0;
+    uint32_t sortK = 0;
+    uint32_t sortJ = 0;
 };
-static_assert(sizeof(ParticlePushConstants) == 32, "입자 푸시 상수 배치가 셰이더와 어긋난다");
+static_assert(sizeof(ParticlePushConstants) == 48, "입자 푸시 상수 배치가 셰이더와 어긋난다");
+
+// 정렬 컴퓨트 한 그룹이 공유 메모리에서 다루는 원소 수. 스레드는 그 절반이다.
+inline constexpr uint32_t PARTICLE_SORT_BLOCK = 1024;
 
 // 상위 가속 구조에 광선 질의로 부딪힌다.
 inline constexpr uint32_t PARTICLE_FLAG_COLLIDE = 1U;
@@ -97,7 +104,8 @@ public:
         VkDeviceAddress lods = 0;
         VkDeviceAddress instances = 0;
     };
-    // 시스템 index 를 한 프레임 진행한다. rayQuery 가 참이면 집합 1 에 accelerationSet 을 묶고 충돌한다.
+    // 시스템 index 를 한 프레임 진행하고 카메라 거리로 정렬한다. rayQuery 가 참이면 집합 1 에 accelerationSet 을
+    // 묶고 충돌한다. camera 는 정렬 키에 쓰는 카메라 버퍼다.
     void record(VkCommandBuffer commandBuffer,
                 uint32_t frameSlot,
                 uint32_t index,
@@ -105,7 +113,8 @@ public:
                 uint64_t frameIndex,
                 bool rayQuery,
                 VkDescriptorSet accelerationSet,
-                const SceneBuffers& buffers);
+                const SceneBuffers& buffers,
+                VkDeviceAddress camera);
 
     uint32_t systemCount() const { return static_cast<uint32_t>(states.size()); }
     // 시스템 index 의 입자 수. 그릴 수 없으면 0.
@@ -114,6 +123,7 @@ public:
     bool wantsCollision() const;
     VkDeviceAddress particleAddress(uint32_t index) const;
     VkDeviceAddress paramsAddress(uint32_t frameSlot, uint32_t index) const;
+    VkDeviceAddress sortedAddress(uint32_t index) const;
     // 컴퓨트 파이프라인을 만들었는지. 거짓이면 입자를 돌리지 않는다.
     bool gpuAvailable() const { return pipeline != VK_NULL_HANDLE; }
     // 광선 질의 변종을 만들었는지.
@@ -123,6 +133,9 @@ private:
     struct State {
         Buffer particles;
         std::array<Buffer, PARTICLE_FRAMES> params;
+        // 정렬 목록. 바이토닉이라 2 의 거듭제곱으로 잡고 남는 칸은 맨 뒤로 가는 키로 채운다.
+        Buffer sorted;
+        uint32_t sortCapacity = 0;
         uint32_t capacity = 0;
         // 이번 프레임 prepare 가 정한 것.
         uint32_t objectIndex = 0;
@@ -148,6 +161,7 @@ private:
     VkPipelineLayout rayQueryLayout = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipeline rayQueryPipeline = VK_NULL_HANDLE;
+    VkPipeline sortPipeline = VK_NULL_HANDLE;
     std::vector<State> states;
     uint64_t lastSceneId = 0;
     uint64_t lastComponentRevision = UINT64_MAX;

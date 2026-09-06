@@ -10,7 +10,8 @@ layout(location = 3) out float outSize;
 // 입자마다 카메라를 향한 사각형 하나. 인스턴스 번호가 입자, 정점 번호 0..5 가 모서리다. 죽은 입자는 퇴화
 // 삼각형으로 내보내 프래그먼트가 나오지 않게 한다.
 void main() {
-    Particle particle = push.particles.items[gl_InstanceIndex];
+    // 인스턴스 번호는 정렬 목록의 자리고, 입자 번호는 거기서 읽는다. 뒤에서 앞으로 그려 반투명이 겹쳐도 순서가 맞다.
+    Particle particle = push.particles.items[push.sorted.items[gl_InstanceIndex].y];
     if (particle.age >= particle.lifetime) {
         gl_Position = vec4(0.0);
         outUv = vec2(0.0);

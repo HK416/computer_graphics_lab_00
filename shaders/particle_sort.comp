@@ -1,0 +1,90 @@
+#version 460
+
+#include "particle_common.glsl"
+
+// 입자를 카메라 거리로 정렬하는 바이토닉 망. 키는 -거리(오름차순이면 먼 것이 앞), 죽은 입자와 2의 거듭제곱을
+// 채우는 패딩은 +무한대라 맨 뒤로 간다. 동률은 입자 번호로 갈라 결과가 늘 같다.
+//
+// 세 모드를 sortK·sortJ 로 고른다.
+//   sortK == 0            : 키를 만들고 블록(PARTICLE_SORT_BLOCK) 안을 공유 메모리에서 통째로 정렬한다.
+//   sortJ >= 블록         : 블록을 넘는 비교 한 단계를 전역 메모리에서 돈다.
+//   sortJ == 0, sortK > 0 : 블록 안에 남은 단계(j = 블록/2 .. 1)를 공유 메모리에서 이어 돈다.
+// 방향은 늘 «전역 번호 & sortK» 로 정하므로 세 모드가 같은 망을 이룬다.
+layout(local_size_x = PARTICLE_SORT_BLOCK / 2u) in;
+
+shared uvec2 block[PARTICLE_SORT_BLOCK];
+
+bool before(uvec2 a, uvec2 b) {
+    float ka = uintBitsToFloat(a.x);
+    float kb = uintBitsToFloat(b.x);
+    return ka < kb || (ka == kb && a.y < b.y);
+}
+
+void compareSwapShared(uint i, uint l, bool ascending) {
+    uvec2 a = block[i];
+    uvec2 b = block[l];
+    if (before(b, a) == ascending) {
+        block[i] = b;
+        block[l] = a;
+    }
+}
+
+uvec2 makeKey(uint index) {
+    if (index >= push.particleCount) {
+        return uvec2(floatBitsToUint(uintBitsToFloat(0x7F800000u)), index);
+    }
+    Particle particle = push.particles.items[index];
+    if (particle.age >= particle.lifetime) {
+        return uvec2(floatBitsToUint(uintBitsToFloat(0x7F800000u)), index);
+    }
+    vec3 cameraPosition = push.camera.item.position.xyz;
+    return uvec2(floatBitsToUint(-distance(cameraPosition, particle.position)), index);
+}
+
+void main() {
+    uint thread = gl_LocalInvocationID.x;
+    if (push.sortK != 0u && push.sortJ != 0u) {
+        // 전역 단계 하나. 스레드마다 짝 하나를 견준다.
+        uint t = gl_GlobalInvocationID.x;
+        uint j = push.sortJ;
+        uint i = 2u * t - (t & (j - 1u));
+        uint l = i + j;
+        bool ascending = (i & push.sortK) == 0u;
+        uvec2 a = push.sorted.items[i];
+        uvec2 b = push.sorted.items[l];
+        if (before(b, a) == ascending) {
+            push.sorted.items[i] = b;
+            push.sorted.items[l] = a;
+        }
+        return;
+    }
+
+    uint base = gl_WorkGroupID.x * PARTICLE_SORT_BLOCK;
+    if (push.sortK == 0u) {
+        block[thread] = makeKey(base + thread);
+        block[thread + PARTICLE_SORT_BLOCK / 2u] = makeKey(base + thread + PARTICLE_SORT_BLOCK / 2u);
+    } else {
+        block[thread] = push.sorted.items[base + thread];
+        block[thread + PARTICLE_SORT_BLOCK / 2u] = push.sorted.items[base + thread + PARTICLE_SORT_BLOCK / 2u];
+    }
+    barrier();
+
+    if (push.sortK == 0u) {
+        for (uint k = 2u; k <= PARTICLE_SORT_BLOCK; k <<= 1u) {
+            for (uint j = k >> 1u; j > 0u; j >>= 1u) {
+                uint i = 2u * thread - (thread & (j - 1u));
+                compareSwapShared(i, i + j, ((base + i) & k) == 0u);
+                barrier();
+            }
+        }
+    } else {
+        for (uint j = PARTICLE_SORT_BLOCK >> 1u; j > 0u; j >>= 1u) {
+            uint i = 2u * thread - (thread & (j - 1u));
+            compareSwapShared(i, i + j, ((base + i) & push.sortK) == 0u);
+            barrier();
+        }
+    }
+
+    push.sorted.items[base + thread] = block[thread];
+    push.sorted.items[base + thread + PARTICLE_SORT_BLOCK / 2u] = block[thread + PARTICLE_SORT_BLOCK / 2u];
+}

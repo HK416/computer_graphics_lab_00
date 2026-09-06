@@ -466,7 +466,10 @@ private:
     void reserveLights(Frame& frame, uint32_t lightCount);
     void reserveShadowDraws(Frame& frame, uint32_t drawCount);
     // 그림자 시점마다 절두체와 캐스터 스윕으로 걸러 압축한 그리기 명령을 만든다.
-    void buildShadowDraws(Frame& frame, const FrameBatches& batches, const glm::mat4& cameraViewProjection);
+    void buildShadowDraws(const scene::Scene& scene,
+                          Frame& frame,
+                          const FrameBatches& batches,
+                          const glm::mat4& cameraViewProjection);
     // 장면의 조명을 GPU 배치로 옮기고 그림자 시점을 정한다.
     void buildLights(Frame& frame, const scene::Scene& scene);
     void createCullPipeline();
@@ -621,6 +624,11 @@ private:
     uint32_t shadowDrawsTotal = 0;
     std::array<ShadowLayerState, MAX_SHADOW_VIEWS> shadowLayers{};
     std::vector<uint8_t> shadowLayerDirty;
+    // 그리는 집합 자체가 바뀐 프레임(장면 전환·계층·부품·유체·천). 이때는 층을 전부 다시 그리고, 그 밖의 변화는
+    // 움직인 오브젝트의 경계구가 걸린 층만 다시 그린다. buildDrawCommands 가 정한다.
+    bool shadowStructureChanged = true;
+    // 오브젝트마다 지난 프레임에 그린 경계구. w 가 음수면 그리지 않았다. 움직인 오브젝트가 «떠난» 층도 잡는다.
+    std::vector<glm::vec4> previousObjectBounds;
     uint32_t shadowLayersRedrawn = 0;
     uint64_t lastShadowSettings = 0;
 
@@ -780,6 +788,7 @@ private:
     std::vector<uint32_t> drawMeshletData;
     std::vector<VkDrawIndexedIndirectCommand> shadowDrawData;
     uint64_t lastTopologyRevision = 0;
+    uint64_t lastComponentRevision = 0;
     uint32_t pathSampleCount = 0;
 
     bool hzbNeedsClear = true;

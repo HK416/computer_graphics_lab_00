@@ -1,6 +1,7 @@
 #include "gfx/particles.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 
@@ -73,6 +74,10 @@ void ParticleSimulator::createPipelines(VkDescriptorSetLayout accelerationLayout
         spdlog::warn("입자 컴퓨트를 만들지 못해 입자를 그리지 않는다");
         return;
     }
+    sortPipeline = createComputePipeline(context, pipelineLayout, "particle_sort.comp.spv");
+    if (sortPipeline == VK_NULL_HANDLE) {
+        spdlog::warn("입자 정렬 컴퓨트를 만들지 못해 입자를 번호 순으로 그린다");
+    }
     if (accelerationLayout == VK_NULL_HANDLE) {
         return;
     }
@@ -87,6 +92,7 @@ void ParticleSimulator::createPipelines(VkDescriptorSetLayout accelerationLayout
 void ParticleSimulator::destroyState(State& state) {
     // 진행 중인 프레임의 명령 버퍼에 주소가 실려 있을 수 있다. 그 프레임이 끝난 뒤에 지운다.
     context.retireBuffer(state.particles);
+    context.retireBuffer(state.sorted);
     for (Buffer& buffer : state.params) {
         context.retireBuffer(buffer);
     }
@@ -116,6 +122,12 @@ void ParticleSimulator::ensureCapacity(State& state, uint32_t count) {
                               MemoryLocation::HOST_WRITE,
                               "입자 설정");
     }
+    state.sortCapacity = std::bit_ceil(count);
+    state.sorted = createBuffer(context,
+                                static_cast<VkDeviceSize>(state.sortCapacity) * sizeof(glm::uvec2),
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                MemoryLocation::DEVICE,
+                                "입자 정렬");
     state.needsReset = true;
 }
 
@@ -227,7 +239,8 @@ void ParticleSimulator::record(VkCommandBuffer commandBuffer,
                                uint64_t frameIndex,
                                bool rayQuery,
                                VkDescriptorSet accelerationSet,
-                               const SceneBuffers& buffers) {
+                               const SceneBuffers& buffers,
+                               VkDeviceAddress camera) {
     State& state = states[index];
     if (state.count == 0) {
         return;
@@ -286,21 +299,67 @@ void ParticleSimulator::record(VkCommandBuffer commandBuffer,
     ParticlePushConstants push;
     push.particles = state.particles.address;
     push.params = state.params[frameSlot].address;
+    push.camera = camera;
     push.particleCount = state.count;
-    vkCmdPushConstants(commandBuffer,
-                       layout,
-                       VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0,
-                       sizeof(push),
-                       &push);
+    push.sorted = state.sorted.address;
+    auto pushAll = [&](VkPipelineLayout target) {
+        vkCmdPushConstants(commandBuffer,
+                           target,
+                           VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0,
+                           sizeof(push),
+                           &push);
+    };
+    pushAll(layout);
     vkCmdDispatch(commandBuffer, (state.count + PARTICLE_GROUP_SIZE - 1) / PARTICLE_GROUP_SIZE, 1, 1);
 
-    // 스프라이트 정점·프래그먼트가 입자를 읽는다.
+    // 카메라 거리로 정렬한다. 바이토닉 망은 고정이라 같은 입력에 같은 순서가 나와 프레임이 결정적이다.
+    // 단계는 공유 메모리 블록 안에서 먼저 풀고(sortK = 0), 블록을 넘는 단계만 전역으로 돈 뒤(sortJ ≥ 블록)
+    // 나머지를 다시 블록 안에서 푼다(sortJ = 0). 65536 개면 디스패치 28 번이다.
+    if (sortPipeline != VK_NULL_HANDLE) {
+        auto computeToCompute = [&] {
+            memoryBarrier(commandBuffer,
+                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                          VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                          VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        };
+        uint32_t n = state.sortCapacity;
+        uint32_t blocks = std::max(n / PARTICLE_SORT_BLOCK, 1U);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, sortPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, sets.data(), 0, nullptr);
+        computeToCompute();
+        push.sortK = 0;
+        push.sortJ = 0;
+        pushAll(pipelineLayout);
+        vkCmdDispatch(commandBuffer, blocks, 1, 1);
+        for (uint32_t k = PARTICLE_SORT_BLOCK * 2; k <= n; k <<= 1U) {
+            for (uint32_t j = k / 2; j >= PARTICLE_SORT_BLOCK; j >>= 1U) {
+                computeToCompute();
+                push.sortK = k;
+                push.sortJ = j;
+                pushAll(pipelineLayout);
+                vkCmdDispatch(commandBuffer, n / PARTICLE_SORT_BLOCK, 1, 1);
+            }
+            computeToCompute();
+            push.sortK = k;
+            push.sortJ = 0;
+            pushAll(pipelineLayout);
+            vkCmdDispatch(commandBuffer, blocks, 1, 1);
+        }
+    }
+
+    // 스프라이트 정점·프래그먼트가 입자와 정렬 목록을 읽는다.
     memoryBarrier(commandBuffer,
                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                   VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                   VK_ACCESS_2_SHADER_READ_BIT);
+}
+
+VkDeviceAddress ParticleSimulator::sortedAddress(uint32_t index) const {
+    return states[index].sorted.address;
 }
 
 } // namespace gfx

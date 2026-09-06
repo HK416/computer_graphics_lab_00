@@ -116,6 +116,7 @@ set(shader_sources
     shaders/fluid_surface.frag
     shaders/fluid_thickness.frag
     shaders/particles.comp
+    shaders/particle_sort.comp
     shaders/particle_sprite.vert
     shaders/particle_sprite.frag
     shaders/cloth_predict.comp

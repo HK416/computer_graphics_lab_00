@@ -14,13 +14,23 @@ namespace gfx {
 //
 // ponytail: 압축 간접 그리기가 있는 장치라면 시점을 컬 컴퓨트의 두 번째 디스패치 축으로 넘겨
 // meshlet 단위까지 걸러 내는 편이 낫다.
-void Renderer::buildShadowDraws(Frame& frame, const FrameBatches& batches, const glm::mat4& cameraViewProjection) {
+void Renderer::buildShadowDraws(const scene::Scene& scene,
+                                Frame& frame,
+                                const FrameBatches& batches,
+                                const glm::mat4& cameraViewProjection) {
     shadowBatches.assign(shadowViews.size() * TRANSLUCENT_MODE, DrawBatch{});
     shadowDrawsIssued = 0;
     shadowDrawsTotal = 0;
     shadowLayerDirty.assign(MAX_SHADOW_VIEWS, 0);
     if (shadowViews.empty()) {
         return;
+    }
+
+    auto viewCount = static_cast<uint32_t>(shadowViews.size());
+    std::vector<std::array<glm::vec4, MAX_FRUSTUM_PLANES>> viewPlanes(viewCount);
+    std::vector<uint32_t> viewPlaneCounts(viewCount);
+    for (uint32_t view = 0; view < viewCount; ++view) {
+        viewPlaneCounts[view] = extractFrustumPlanes(shadowViews[view].viewProjection, viewPlanes[view], true);
     }
 
     // 어떤 층을 다시 그릴지 먼저 정한다. 설정이 바뀌면 그리는 집합 자체가 달라지므로 전부 무효화한다.
@@ -30,15 +40,45 @@ void Renderer::buildShadowDraws(Frame& frame, const FrameBatches& batches, const
                          (static_cast<uint64_t>(settings.shadowViewCulling) << 24U) |
                          (static_cast<uint64_t>(settings.shadowCasterCulling) << 25U) |
                          (static_cast<uint64_t>(std::bit_cast<uint32_t>(settings.lodErrorThreshold)) << 32U);
-    //
-    // ponytail: 장면이 조금이라도 바뀌면 층을 전부 다시 그린다. 움직인 캐스터의 이전/현재 경계구를
-    // 시점 절두체와 비교해 걸린 층만 무효화하면 더 아낄 수 있지만, 지금은 카메라만 움직이는 경우가
-    // 대부분이고 그때는 이 조건이 걸리지 않아 이득이 이미 나온다.
-    bool invalidateAll = !settings.shadowCaching || shadowKey != lastShadowSettings || sceneChangedThisFrame;
+    bool invalidateAll = !settings.shadowCaching || shadowKey != lastShadowSettings || shadowStructureChanged ||
+                         previousObjectBounds.size() != scene.objects.size();
     lastShadowSettings = shadowKey;
-    for (uint32_t layer = 0; layer < shadowViews.size(); ++layer) {
+
+    // 변환만 바뀐 프레임: 움직인 오브젝트(자세를 바꾼 스킨 포함)의 지난·현재 경계구가 걸린 층만 다시 그린다.
+    // 광원만 움직인 프레임은 오브젝트가 더티가 아니고, 아래 시점 행렬 비교가 그 층을 잡는다.
+    std::vector<uint8_t> touchedLayer(viewCount, 0);
+    if (!invalidateAll && sceneChangedThisFrame) {
+        for (uint32_t index = 0; index < scene.objects.size(); ++index) {
+            if (!scene.objectDirty(index)) {
+                continue;
+            }
+            uint32_t slot = objectInstanceSlots[index];
+            std::array<glm::vec4, 2> spheres{previousObjectBounds[index],
+                                             slot != INVALID_INSTANCE_SLOT ? instanceBounds[slot]
+                                                                           : glm::vec4{0.0F, 0.0F, 0.0F, -1.0F}};
+            for (const glm::vec4& sphere : spheres) {
+                if (sphere.w < 0.0F) {
+                    continue;
+                }
+                for (uint32_t view = 0; view < viewCount; ++view) {
+                    if (touchedLayer[view] == 0 &&
+                        sphereInFrustum(viewPlanes[view], viewPlaneCounts[view], glm::vec3(sphere), sphere.w)) {
+                        touchedLayer[view] = 1;
+                    }
+                }
+            }
+        }
+    }
+    previousObjectBounds.resize(scene.objects.size());
+    for (uint32_t index = 0; index < scene.objects.size(); ++index) {
+        uint32_t slot = objectInstanceSlots[index];
+        previousObjectBounds[index] =
+            slot != INVALID_INSTANCE_SLOT ? instanceBounds[slot] : glm::vec4{0.0F, 0.0F, 0.0F, -1.0F};
+    }
+
+    for (uint32_t layer = 0; layer < viewCount; ++layer) {
         // 캐스케이드 텍셀 스냅 덕에 카메라가 텍셀 안에서 움직이는 동안에는 행렬이 그대로다.
-        bool changed = invalidateAll || !shadowLayers[layer].valid ||
+        bool changed = invalidateAll || touchedLayer[layer] != 0 || !shadowLayers[layer].valid ||
                        shadowLayers[layer].drawnViewProjection != shadowViews[layer].viewProjection;
         shadowLayerDirty[layer] = changed ? 1 : 0;
     }
@@ -75,13 +115,7 @@ void Renderer::buildShadowDraws(Frame& frame, const FrameBatches& batches, const
     for (size_t mode = 0; mode < TRANSLUCENT_MODE; ++mode) {
         opaqueCount += batches.draws[mode][0].count + batches.draws[mode][1].count;
     }
-    auto viewCount = static_cast<uint32_t>(shadowViews.size());
     shadowVisibleMask.assign(static_cast<size_t>(opaqueCount) * viewCount, 0);
-    std::vector<std::array<glm::vec4, MAX_FRUSTUM_PLANES>> viewPlanes(viewCount);
-    std::vector<uint32_t> viewPlaneCounts(viewCount);
-    for (uint32_t view = 0; view < viewCount; ++view) {
-        viewPlaneCounts[view] = extractFrustumPlanes(shadowViews[view].viewProjection, viewPlanes[view], true);
-    }
     if (opaqueCount > 0) {
         jobs.parallelFor(opaqueCount, 512, [&](uint32_t begin, uint32_t end) {
             for (uint32_t i = begin; i < end; ++i) {

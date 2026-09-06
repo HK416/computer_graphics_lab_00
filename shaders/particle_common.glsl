@@ -45,6 +45,12 @@ layout(buffer_reference, scalar) buffer ParticleBuffer {
 layout(buffer_reference, scalar) readonly buffer ParticleParamsBuffer {
     ParticleParams item;
 };
+// 정렬 목록. x 가 키(float 비트, 오름차순 = 먼 것 먼저), y 가 입자 번호.
+layout(buffer_reference, scalar) buffer SortedParticleBuffer {
+    uvec2 items[];
+};
+
+#define PARTICLE_SORT_BLOCK 1024u
 
 layout(push_constant, scalar) uniform ParticlePushConstants {
     ParticleBuffer particles;
@@ -52,6 +58,9 @@ layout(push_constant, scalar) uniform ParticlePushConstants {
     CameraBuffer camera;
     uint depthTexture;
     uint particleCount;
+    SortedParticleBuffer sorted;
+    uint sortK;
+    uint sortJ;
 }
 push;
 

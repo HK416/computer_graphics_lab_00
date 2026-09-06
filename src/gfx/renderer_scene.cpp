@@ -339,6 +339,10 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     // 변위가 0 이고 다음 프레임부터 다시 맞는다. 장면 자체가 바뀐 경우도 같다.
     bool temporalReset = scene.id != lastSceneId || scene.topologyRevision() != lastTopologyRevision ||
                          previousWorld.size() != scene.objects.size();
+    // 그림자 캐시는 «무엇이 그려지는가»가 바뀐 프레임에만 통째로 무효화한다. 변환만 바뀐 프레임은 층별로 가른다.
+    shadowStructureChanged = temporalReset || scene.componentRevision() != lastComponentRevision ||
+                             (fluidActive && particleTotal > 0) || clothActiveThisFrame;
+    lastComponentRevision = scene.componentRevision();
     lastSceneId = scene.id;
     lastSceneRevision = scene.revision();
     lastTopologyRevision = scene.topologyRevision();
@@ -775,7 +779,7 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         shadowDrawsTotal = 0;
     } else {
         uint32_t shadowDrawZone = frameProfiler.begin("그림자 드로우 구성");
-        buildShadowDraws(frame, batches, cameraViewProjection);
+        buildShadowDraws(scene, frame, batches, cameraViewProjection);
         frameProfiler.end(shadowDrawZone);
     }
 
