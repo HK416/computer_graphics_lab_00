@@ -42,8 +42,10 @@ CMake Tools 는 알아서 맞춰 주지만, 직접 부를 때는 VS 개발자 �
 `ninja -t deps <오브젝트>` 가 `#deps 0` 이면 그렇다. `--clean-first` 로도 그 오브젝트는 지워지지 않으니
 **`.obj` 를 직접 지우고** 다시 빌드한다. 그 뒤로는 정상 기록된다.
 
+셰이더도 같다: `.glsl` 헤더를 고쳤는데 `.spv` 가 안 바뀌면(검증 레이어가 푸시 상수 크기 불일치를 찍는다) `.spv` 를 지운다.
+
 ```sh
-find build/release/CMakeFiles -name "*.obj" -delete && cmake --build --preset release
+find build/release/CMakeFiles -name "*.obj" -delete && rm -f build/release/shaders/*.spv && cmake --build --preset release
 ```
 
 ```sh
