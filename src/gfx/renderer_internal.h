@@ -100,6 +100,9 @@ struct GpuCamera {
     // 높이 안개. rgb 색, w 밀도. fogParameters 는 x 기준 높이, y 감쇠.
     glm::vec4 fog;
     glm::vec4 fogParameters;
+    // 안개 태양 인스캐터. fogSun xyz 첫 방향광의 진행 방향, w 산란 세기. fogSunColor rgb 색 × 세기, w 방향광 유무.
+    glm::vec4 fogSun;
+    glm::vec4 fogSunColor;
     // x 디버그 뷰. 푸시 상수가 128 바이트에 꽉 차서 여기로 옮겼다. y ReSTIR 켜짐.
     glm::uvec4 flags;
     // DDGI 프로브 격자. probeOrigin xyz 원점, w 간격 길이. probeSpacing xyz 간격, w 히스테리시스.

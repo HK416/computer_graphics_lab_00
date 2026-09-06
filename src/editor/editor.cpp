@@ -1480,6 +1480,10 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::ColorEdit3("안개 색", glm::value_ptr(post.fogColor));
         ImGui::DragFloat("안개 높이", &post.fogHeight, 0.05F, -100.0F, 100.0F, "%.2f");
         ImGui::SliderFloat("높이 감쇠", &post.fogFalloff, 0.0F, 5.0F, "%.2f");
+        ImGui::SliderFloat("태양 산란", &post.fogSunScatter, 0.0F, 2.0F, "%.2f");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("첫 방향광 쪽을 볼수록 안개가 밝아진다(Henyey-Greenstein). 방향광이 없으면 효과가 없다");
+        }
         ImGui::EndDisabled();
     }
 

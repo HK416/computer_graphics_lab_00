@@ -255,6 +255,8 @@ struct PostProcess {
     float fogDensity = 0.0F;
     float fogHeight = 0.0F;
     float fogFalloff = 0.5F;
+    // 첫 방향광 쪽 안개 인스캐터 세기. 0 이면 안개 색이 방향과 무관한 상수다.
+    float fogSunScatter = 0.0F;
 
     bool operator==(const PostProcess&) const = default;
 };

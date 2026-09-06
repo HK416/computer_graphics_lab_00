@@ -726,12 +726,16 @@ private:
     PathTraceOptions lastPathTrace{};
     bool lastUseIbl = true;
     std::unique_ptr<EnvironmentMap> environment;
-    // 첫 방향광의 진행 방향. 하늘의 태양을 그림자와 맞추는 데 쓴다.
+    // 첫 방향광의 진행 방향. 하늘의 태양을 그림자와 맞추는 데 쓴다. sunColor 는 그 색 × 세기이고 방향광이
+    // 없으면 0 이다(안개 인스캐터가 읽는다).
     glm::vec3 sunDirection{0.0F, -1.0F, 0.0F};
+    glm::vec3 sunColor{0.0F};
     glm::mat4 lastViewProjection{0.0F};
     // 안개가 바뀌면 경로 추적 누적을 버린다. 안개는 광선 생성 셰이더가 직접 걸기 때문이다.
     glm::vec4 lastFog{0.0F};
     glm::vec4 lastFogParameters{0.0F};
+    glm::vec4 lastFogSun{0.0F};
+    glm::vec4 lastFogSunColor{0.0F};
     // 모션 벡터용 지난 프레임 상태. 장면 구성이 바뀌면 현재 값으로 덮어 변위를 0 으로 만든다.
     glm::mat4 previousViewProjection{1.0F};
     std::vector<glm::mat4> previousWorld;

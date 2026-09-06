@@ -205,6 +205,7 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
     sceneHasBounds = hasBounds;
 
     bool sunAssigned = false;
+    sunColor = glm::vec3{0.0F};
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
         const scene::Object& object = scene.objects[index];
         if (object.light < 0 || static_cast<size_t>(object.light) >= scene.lights.size() ||
@@ -231,6 +232,7 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
         // 하늘의 태양과 그림자 방향이 어긋나면 곧바로 눈에 띈다. 첫 방향광을 따라간다.
         if (source.type == scene::LightType::DIRECTIONAL && !sunAssigned) {
             sunDirection = direction;
+            sunColor = source.color * source.intensity;
             sunAssigned = true;
         }
 
@@ -786,6 +788,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         jitterNdc, reflectionsActive() ? settings.reflectionRoughnessCutoff : 0.0F, settings.reflectionIntensity};
     camera->fog = glm::vec4{scene.post.fogColor, scene.post.fogDensity};
     camera->fogParameters = glm::vec4{scene.post.fogHeight, scene.post.fogFalloff, 0.0F, 0.0F};
+    camera->fogSun = glm::vec4{sunDirection, scene.post.fogSunScatter};
+    camera->fogSunColor = glm::vec4{sunColor, sunColor != glm::vec3{0.0F} ? 1.0F : 0.0F};
     // y: ReSTIR 가 직접광을 맡으면 1. 래스터의 불투명 픽셀은 광원 루프를 건너뛴다.
     camera->flags = glm::uvec4{settings.debugMode, restirActive() ? 1U : 0U, 0U, 0U};
     // DDGI 프로브 격자. 장면 경계 상자를 조금 넓혀 축마다 n 개를 깐다. 원점·간격이 바뀐 프레임은 아틀라스를
@@ -824,11 +828,14 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     // 돌아갔을 때 이어지게 한다. 이 대입이 traceInputsChanged 를 통해 누적을 초기화한다.
     settings.pathTrace.debugMode = pathTraceSupportsDebugMode(settings.debugMode) ? settings.debugMode : 0U;
     bool traceInputsChanged = settings.pathTrace != lastPathTrace || settings.useIbl != lastUseIbl ||
-                              camera->fog != lastFog || camera->fogParameters != lastFogParameters;
+                              camera->fog != lastFog || camera->fogParameters != lastFogParameters ||
+                              camera->fogSun != lastFogSun || camera->fogSunColor != lastFogSunColor;
     lastPathTrace = settings.pathTrace;
     lastUseIbl = settings.useIbl;
     lastFog = camera->fog;
     lastFogParameters = camera->fogParameters;
+    lastFogSun = camera->fogSun;
+    lastFogSunColor = camera->fogSunColor;
     if (camera->viewProjection != lastViewProjection || sceneChangedThisFrame || traceInputsChanged) {
         lastViewProjection = camera->viewProjection;
         pathSampleCount = 0;

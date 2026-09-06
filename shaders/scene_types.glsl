@@ -184,6 +184,10 @@ struct Camera {
     vec4 fog;
     // x 기준 높이, y 높이 감쇠. zw 는 예약.
     vec4 fogParameters;
+    // 안개 태양 인스캐터. fogSun xyz 첫 방향광의 진행 방향, w 산란 세기(0 이면 끔). fogSunColor rgb 색 × 세기,
+    // w 방향광이 있으면 1.
+    vec4 fogSun;
+    vec4 fogSunColor;
     // x 디버그 뷰(DEBUG_MODE_*). 푸시 상수가 128 바이트에 꽉 차서 프레임에 한 번 정해지는 값은 여기로
     // 온다. y ReSTIR 직접광이 켜져 있으면 1(불투명 픽셀은 광원 루프를 건너뛴다). zw 예약.
     uvec4 flags;

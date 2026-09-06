@@ -154,7 +154,8 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
                         {"fogColor", toJson(scene.post.fogColor)},
                         {"fogDensity", scene.post.fogDensity},
                         {"fogHeight", scene.post.fogHeight},
-                        {"fogFalloff", scene.post.fogFalloff}};
+                        {"fogFalloff", scene.post.fogFalloff},
+                        {"fogSunScatter", scene.post.fogSunScatter}};
 
     json lights = json::array();
     for (const Light& light : scene.lights) {
@@ -322,6 +323,7 @@ SceneFile readScene(const std::string& text) {
     postTarget.fogDensity = post.value("fogDensity", postTarget.fogDensity);
     postTarget.fogHeight = post.value("fogHeight", postTarget.fogHeight);
     postTarget.fogFalloff = post.value("fogFalloff", postTarget.fogFalloff);
+    postTarget.fogSunScatter = post.value("fogSunScatter", postTarget.fogSunScatter);
 
     for (const json& entry : document.value("lights", json::array())) {
         Light light;

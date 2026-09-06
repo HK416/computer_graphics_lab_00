@@ -264,7 +264,8 @@
     ],
     "fogDensity": 0.0,
     "fogFalloff": 0.5,
-    "fogHeight": 0.0
+    "fogHeight": 0.0,
+    "fogSunScatter": 0.0
   },
   "rigidBodies": [
     {
