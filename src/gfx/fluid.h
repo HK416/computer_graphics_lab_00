@@ -37,8 +37,9 @@ inline constexpr uint32_t FLUID_FRAMES = 2;
 inline constexpr uint32_t FLUID_MAX_SURFACE_VERTICES = 196608;
 // 표면 격자 해상도의 상한. 축마다의 셀 수라 표본 수는 세제곱으로 는다.
 inline constexpr uint32_t FLUID_MAX_SURFACE_RESOLUTION = 128;
-// CPU 백엔드의 상한. 표본마다 입자 전부를 훑으므로 GPU 와 같은 해상도를 줄 수 없다.
-inline constexpr uint32_t FLUID_MAX_CPU_SURFACE_RESOLUTION = 40;
+// CPU 백엔드의 상한. 장 구축은 해시 격자라 값싸지만 마칭이 세제곱으로 늘어 렌더 스레드를 잡는다(64³ 에 34 ms, 8192
+// 입자).
+inline constexpr uint32_t FLUID_MAX_CPU_SURFACE_RESOLUTION = 64;
 inline constexpr uint32_t FLUID_SURFACE_GROUP_SIZE = 4;
 
 // 아래 셋은 shaders/fluid_common.glsl 의 FluidCollider / FluidParams / FluidPushConstants 와 배치가 같아야
@@ -235,6 +236,7 @@ private:
         uint32_t surfaceCapacity = 0;
         bool surfaceReady = false;
         std::vector<float> cpuField;
+        physics::FluidGrid cpuFieldGrid;
         uint32_t capacity = 0;
         uint32_t cellCount = 0;
         // 이번 스텝이 읽는 반쪽.

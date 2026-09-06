@@ -14,6 +14,7 @@ class JobSystem;
 namespace physics {
 
 struct FluidParams;
+struct FluidGrid;
 
 // 한 셀이 낼 수 있는 삼각형 수와 표의 폭. shaders/marching_cubes.glsl 과 같아야 한다.
 inline constexpr uint32_t MC_MAX_TRIANGLES = 5;
@@ -36,10 +37,12 @@ static_assert(sizeof(SurfaceVertex) == 16, "표면 정점 배치가 셰이더와
 
 // 입자에서 스칼라 장을 만든다. 격자는 (resolution+1)³ 개의 표본이고 x 가 가장 빠르다. 값은 커널을
 // 합친 «밀도 비슷한 것» 이라 등치값은 무차원이다. shaders/fluid_field.comp 와 같은 식을 쓴다.
+// grid 는 호출자가 쥔 스크래치다. 여기서 particles 로 다시 세우고 표본마다 이웃 27 셀만 훑는다.
 void buildFluidField(const std::vector<glm::vec4>& particles,
                      const FluidParams& params,
                      uint32_t resolution,
                      std::vector<float>& field,
+                     FluidGrid& grid,
                      core::JobSystem* jobs);
 
 // 스칼라 장에서 등치면을 뽑아 삼각형 정점을 채운다. 돌려주는 값은 쓴 정점 수이며 capacity 를 넘지

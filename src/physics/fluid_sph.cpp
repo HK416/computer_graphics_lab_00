@@ -156,7 +156,7 @@ void FluidSolver::keepRendered() {
     previousRendered = positions;
 }
 
-void FluidSolver::buildGrid(const FluidParams& params, core::JobSystem* jobs) {
+void FluidGrid::build(const std::vector<glm::vec4>& positions, const FluidParams& params, core::JobSystem* jobs) {
     cellCounts.assign(params.cellCount, 0U);
     cellParticles.resize(static_cast<size_t>(params.cellCount) * FLUID_CELL_CAPACITY);
     auto count = static_cast<uint32_t>(positions.size());
@@ -187,7 +187,7 @@ void FluidSolver::buildGrid(const FluidParams& params, core::JobSystem* jobs) {
 }
 
 void FluidSolver::substep(const FluidParams& params, float dt, core::JobSystem* jobs) {
-    buildGrid(params, jobs);
+    grid.build(positions, params, jobs);
 
     auto count = static_cast<uint32_t>(positions.size());
     float h = params.smoothingRadius;
@@ -205,9 +205,9 @@ void FluidSolver::substep(const FluidParams& params, float dt, core::JobSystem* 
                 for (int dy = -1; dy <= 1; ++dy) {
                     for (int dx = -1; dx <= 1; ++dx) {
                         uint32_t bucket = spatialHash(cell + glm::ivec3{dx, dy, dz}, params.cellCount);
-                        uint32_t bucketCount = std::min(cellCounts[bucket], FLUID_CELL_CAPACITY);
+                        uint32_t bucketCount = grid.bucketCount(bucket);
                         for (uint32_t k = 0; k < bucketCount; ++k) {
-                            uint32_t j = cellParticles[static_cast<size_t>(bucket) * FLUID_CELL_CAPACITY + k];
+                            uint32_t j = grid.particleAt(bucket, k);
                             glm::vec3 delta = position - glm::vec3{positions[j]};
                             density += mass * poly6(glm::dot(delta, delta), h);
                         }
@@ -234,9 +234,9 @@ void FluidSolver::substep(const FluidParams& params, float dt, core::JobSystem* 
                 for (int dy = -1; dy <= 1; ++dy) {
                     for (int dx = -1; dx <= 1; ++dx) {
                         uint32_t bucket = spatialHash(cell + glm::ivec3{dx, dy, dz}, params.cellCount);
-                        uint32_t bucketCount = std::min(cellCounts[bucket], FLUID_CELL_CAPACITY);
+                        uint32_t bucketCount = grid.bucketCount(bucket);
                         for (uint32_t k = 0; k < bucketCount; ++k) {
-                            uint32_t j = cellParticles[static_cast<size_t>(bucket) * FLUID_CELL_CAPACITY + k];
+                            uint32_t j = grid.particleAt(bucket, k);
                             if (j == i) {
                                 continue;
                             }

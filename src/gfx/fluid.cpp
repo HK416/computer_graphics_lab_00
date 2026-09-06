@@ -199,8 +199,8 @@ void FluidSimulator::ensureCapacity(State& state, uint32_t count) {
 
 void FluidSimulator::ensureSurface(State& state, const scene::Fluid& settings) {
     bool wanted = settings.display == scene::FluidDisplay::SURFACE && (state.cpu || surfaceReady);
-    // CPU 백엔드는 표본마다 입자 전부를 훑으므로 해상도를 낮게 묶는다. 128³ 을 그대로 두면 명령 기록
-    // 도중 렌더 스레드가 수십 초를 먹는다.
+    // CPU 백엔드는 마칭이 렌더 스레드에서 돌므로 해상도를 낮게 묶는다. 128³ 을 그대로 두면 명령 기록 도중
+    // 렌더 스레드가 수백 ms 를 먹는다.
     uint32_t ceiling = state.cpu ? FLUID_MAX_CPU_SURFACE_RESOLUTION : FLUID_MAX_SURFACE_RESOLUTION;
     uint32_t resolution = std::clamp(settings.surfaceResolution, 8U, ceiling);
     if (!wanted) {
@@ -782,7 +782,8 @@ void FluidSimulator::buildCpuSurface(uint32_t frameSlot, uint32_t index, const s
     const scene::Fluid& settings = scene.fluids[index];
     physics::FluidParams shared = deriveParams(state, scene);
     // GPU 경로와 «같은 함수» 로 장을 만들고 «같은 표» 로 자른다. 두 벌로 두면 백엔드마다 물이 달라진다.
-    physics::buildFluidField(state.solver.particles(), shared, state.surfaceResolution, state.cpuField, &jobs);
+    physics::buildFluidField(
+        state.solver.particles(), shared, state.surfaceResolution, state.cpuField, state.cpuFieldGrid, &jobs);
     glm::vec3 cell = (shared.containerMax - shared.containerMin) / static_cast<float>(state.surfaceResolution);
     frameSlot %= FLUID_FRAMES;
     auto* vertices = static_cast<physics::SurfaceVertex*>(state.surfaceVertices[frameSlot].mapped);

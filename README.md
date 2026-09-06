@@ -433,9 +433,10 @@ TLAS 에 올린다(`RayTracer::ensureDynamicBottomLevel`/`buildDynamicBottomLeve
 ponytail 셋. 굴절에 거칠기를 넣지 않았고, 굴절률 변화의 복사 휘도 배율(eta²)은 들어갔다 나오며 상쇄된다고 보아
 생략했으며, 상한 개수 구축은 실제 삼각형 수와 무관하게 프레임마다 65536 삼각형을 세운다.
 
-두 백엔드의 장 값은 완전히 같지는 않다. GPU 는 해시 격자의 버킷당 32개까지만 보고 해시가 충돌하면 같은
-입자를 두 번 더한다. CPU 는 입자 전부를 정확히 훑는다. 같은 등치값에서 표면 두께가 조금 다를 수 있다.
-CPU 백엔드는 표본마다 입자 전부를 훑으므로 격자 해상도가 `FLUID_MAX_CPU_SURFACE_RESOLUTION` 으로 묶인다.
+두 백엔드 다 해시 격자의 이웃 27셀만 훑어 장을 만든다(`physics::FluidGrid` ↔ `fluid_grid.comp`). 버킷당 32개
+한계는 둘이 같이 갖고, 이웃 셀 둘이 같은 버킷으로 접히는 충돌은 이미 본 버킷을 건너뛰어 두 번 더하지 않는다.
+CPU 는 표본마다 입자 전부를 훑던 것을 이렇게 바꿔 8192 입자·40³ 에서 52 ms 가 17 ms 로 줄었고, 그 덕에 CPU
+해상도 상한 `FLUID_MAX_CPU_SURFACE_RESOLUTION` 을 64 로 올렸다(64³ 에 34 ms, 이제는 마칭이 대부분이다).
 
 ```sh
 ./build/release/cg_lab --open tests/scenes/fluid_surface.json --play --screenshot gpu.png --screenshot-frame 200

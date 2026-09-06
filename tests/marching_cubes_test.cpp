@@ -11,6 +11,8 @@
 
 #include <glm/geometric.hpp>
 
+#include "core/job_system.h"
+#include "physics/fluid_sph.h"
 #include "physics/marching_cubes.h"
 
 namespace {
@@ -248,6 +250,71 @@ int main() {
             assert(glm::dot(normal, center) > 0.0F && "구 표면 삼각형이 뒤집혔다");
         }
         std::printf("  구 표면 삼각형 %u개\n", written / 3);
+    }
+
+    // 7) 해시 격자로 만든 장은 입자 전부를 훑은 완전 탐색과 같다(버킷 넘침이 없고 충돌한 버킷은 한 번만 보므로).
+    //    워커를 쓰든 안 쓰든 같은 값이어야 한다.
+    {
+        constexpr uint32_t RESOLUTION = 20;
+        physics::FluidParams params;
+        params.containerMin = glm::vec3{-1.0F, 0.0F, -1.0F};
+        params.containerMax = glm::vec3{1.0F, 2.0F, 1.0F};
+        params.smoothingRadius = 0.2F;
+        params.cellCount = 4096;
+        std::vector<glm::vec4> particles;
+        uint32_t seed = 12345U;
+        auto jitter = [&] {
+            seed = seed * 1664525U + 1013904223U;
+            return (static_cast<float>(seed >> 8) / 16777216.0F - 0.5F) * 0.04F;
+        };
+        // 격자점을 셀 안쪽 0.05 자리에 두고 ±0.02 만 흔들어 셀 경계를 넘지 않게 한다. 그러면 셀마다 딱 여덟 개다.
+        float spacing = params.smoothingRadius * 0.5F;
+        for (float z = -0.95F; z < 0.95F; z += spacing) {
+            for (float y = 0.05F; y < 1.95F; y += spacing) {
+                for (float x = -0.95F; x < 0.95F; x += spacing) {
+                    particles.emplace_back(x + jitter(), y + jitter(), z + jitter(), 0.0F);
+                }
+            }
+        }
+        std::vector<float> hashed;
+        physics::FluidGrid grid;
+        physics::buildFluidField(particles, params, RESOLUTION, hashed, grid, nullptr);
+        std::vector<float> threaded;
+        {
+            core::JobSystem jobs(3);
+            physics::buildFluidField(particles, params, RESOLUTION, threaded, grid, &jobs);
+        }
+        uint32_t samples = RESOLUTION + 1;
+        glm::vec3 cell = (params.containerMax - params.containerMin) / static_cast<float>(RESOLUTION);
+        float radiusSq = params.smoothingRadius * params.smoothingRadius;
+        uint32_t nonZero = 0;
+        for (uint32_t z = 0; z < samples; ++z) {
+            for (uint32_t y = 0; y < samples; ++y) {
+                for (uint32_t x = 0; x < samples; ++x) {
+                    size_t index = (static_cast<size_t>(z) * samples + y) * samples + x;
+                    assert(hashed[index] == threaded[index] && "워커 수가 장 값을 바꾸면 안 된다");
+                    bool edge = x == 0 || y == 0 || z == 0 || x == RESOLUTION || y == RESOLUTION || z == RESOLUTION;
+                    if (edge) {
+                        assert(hashed[index] == 0.0F && "격자 가장자리는 0 이어야 한다");
+                        continue;
+                    }
+                    glm::vec3 point = params.containerMin + glm::vec3{x, y, z} * cell;
+                    float brute = 0.0F;
+                    for (const glm::vec4& particle : particles) {
+                        glm::vec3 delta = glm::vec3{particle} - point;
+                        float distanceSq = glm::dot(delta, delta);
+                        if (distanceSq < radiusSq) {
+                            float d = 1.0F - distanceSq / radiusSq;
+                            brute += d * d * d;
+                        }
+                    }
+                    assert(std::abs(hashed[index] - brute) < 1e-4F && "해시 격자가 완전 탐색과 다르다");
+                    nonZero += brute > 0.0F ? 1U : 0U;
+                }
+            }
+        }
+        assert(nonZero > 0 && "장이 비어 있으면 비교가 의미 없다");
+        std::printf("  해시 격자 장 표본 %u개 일치 (입자 %zu개)\n", nonZero, particles.size());
     }
 
     std::printf("마칭 큐브 자체 점검 통과\n");

@@ -35,10 +35,21 @@ void main() {
     float total = 0.0;
 
     ivec3 base = spatialCell(point, params.smoothingRadius);
+    // 이웃 셀 둘이 같은 버킷으로 접히면 그 입자를 두 번 더하게 된다. 이미 본 버킷은 건너뛴다.
+    uint visited[27];
+    uint visitedCount = 0u;
     for (int z = -1; z <= 1; ++z) {
         for (int y = -1; y <= 1; ++y) {
             for (int x = -1; x <= 1; ++x) {
                 uint bucket = spatialHash(base + ivec3(x, y, z), params.lattice.w);
+                bool seen = false;
+                for (uint v = 0u; v < visitedCount; ++v) {
+                    seen = seen || visited[v] == bucket;
+                }
+                if (seen) {
+                    continue;
+                }
+                visited[visitedCount++] = bucket;
                 uint count = min(push.cellCounts.items[bucket], FLUID_CELL_CAPACITY);
                 for (uint i = 0u; i < count; ++i) {
                     uint other = push.cellParticles.items[bucket * FLUID_CELL_CAPACITY + i];

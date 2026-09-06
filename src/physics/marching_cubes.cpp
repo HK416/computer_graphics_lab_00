@@ -1,6 +1,7 @@
 #include "physics/marching_cubes.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <functional>
@@ -10,6 +11,7 @@
 #include "asset/vertex_pack.h"
 #include "core/job_system.h"
 #include "physics/fluid_sph.h"
+#include "physics/spatial_hash.h"
 
 namespace physics {
 
@@ -305,19 +307,37 @@ void forRange(core::JobSystem* jobs, uint32_t count, const std::function<void(ui
     }
 }
 
-// 표본점 하나에 이웃 입자를 모은다. shaders/fluid_field.comp 의 같은 식이다. 커널은 poly6 의 모양만
-// 빌린 무차원 값이라 등치값도 무차원이다.
-float sampleField(const glm::vec4* particles, uint32_t count, glm::vec3 point, float radius) {
+// 표본점 하나에 이웃 27 셀의 입자를 모은다. shaders/fluid_field.comp 의 같은 식·같은 순서다. 커널은 poly6 의
+// 모양만 빌린 무차원 값이라 등치값도 무차원이다.
+float sampleField(
+    const glm::vec4* particles, const FluidGrid& grid, uint32_t cellCount, glm::vec3 point, float radius) {
     float radiusSq = radius * radius;
     float total = 0.0F;
-    for (uint32_t i = 0; i < count; ++i) {
-        glm::vec3 delta = glm::vec3{particles[i]} - point;
-        float distanceSq = glm::dot(delta, delta);
-        if (distanceSq >= radiusSq) {
-            continue;
+    glm::ivec3 base = spatialCell(point, radius);
+    // 이웃 셀 둘이 같은 버킷으로 접히면 그 입자를 두 번 더하게 된다. 이미 본 버킷은 건너뛴다.
+    std::array<uint32_t, 27> visited{};
+    uint32_t visitedCount = 0;
+    for (int z = -1; z <= 1; ++z) {
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                uint32_t bucket = spatialHash(base + glm::ivec3{x, y, z}, cellCount);
+                if (std::find(visited.begin(), visited.begin() + visitedCount, bucket) !=
+                    visited.begin() + visitedCount) {
+                    continue;
+                }
+                visited[visitedCount++] = bucket;
+                uint32_t count = grid.bucketCount(bucket);
+                for (uint32_t k = 0; k < count; ++k) {
+                    glm::vec3 delta = glm::vec3{particles[grid.particleAt(bucket, k)]} - point;
+                    float distanceSq = glm::dot(delta, delta);
+                    if (distanceSq >= radiusSq) {
+                        continue;
+                    }
+                    float d = 1.0F - distanceSq / radiusSq;
+                    total += d * d * d;
+                }
+            }
         }
-        float d = 1.0F - distanceSq / radiusSq;
-        total += d * d * d;
     }
     return total;
 }
@@ -339,22 +359,21 @@ void buildFluidField(const std::vector<glm::vec4>& particles,
                      const FluidParams& params,
                      uint32_t resolution,
                      std::vector<float>& field,
+                     FluidGrid& grid,
                      core::JobSystem* jobs) {
     uint32_t samples = resolution + 1;
     field.assign(static_cast<size_t>(samples) * samples * samples, 0.0F);
     if (particles.empty()) {
         return;
     }
+    // 솔버의 격자는 마지막 서브스텝의 적분 전 위치로 세운 것이라 지금 위치와 어긋난다. O(n) 이라 다시 세운다.
+    grid.build(particles, params, jobs);
     glm::vec3 origin = params.containerMin;
     glm::vec3 span = params.containerMax - params.containerMin;
     glm::vec3 cell = span / static_cast<float>(resolution);
     float radius = params.smoothingRadius;
     const glm::vec4* data = particles.data();
-    auto count = static_cast<uint32_t>(particles.size());
 
-    // ponytail: 표본마다 입자 전부를 훑는다. 격자 48³ · 입자 8192 면 워커에 나눠도 무겁다. GPU 경로는
-    // 이미 만들어 둔 해시 격자를 쓰므로 그런 문제가 없다. CPU 백엔드에서 표면을 켜면 격자 해상도를
-    // 낮춰 쓴다.
     forRange(jobs, samples * samples * samples, [&](uint32_t begin, uint32_t end) {
         for (uint32_t i = begin; i < end; ++i) {
             uint32_t x = i % samples;
@@ -366,7 +385,7 @@ void buildFluidField(const std::vector<glm::vec4>& particles,
                 continue;
             }
             glm::vec3 point = origin + glm::vec3{x, y, z} * cell;
-            field[i] = sampleField(data, count, point, radius);
+            field[i] = sampleField(data, grid, params.cellCount, point, radius);
         }
     });
 }

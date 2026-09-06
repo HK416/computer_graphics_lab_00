@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -75,6 +76,23 @@ inline constexpr float FLUID_MAX_FRAME_STEP = 1.0F / 30.0F;
 // GPU 경로도 이 함수를 쓴다. 두 벌로 두면 백엔드를 바꿀 때 물이 달리 흐른다.
 uint32_t fluidSubsteps(const FluidParams& params, float deltaSeconds);
 
+// 균일 해시 격자. 셀 크기는 커널 반지름이고 버킷마다 FLUID_CELL_CAPACITY 개까지 담는다. 솔버의 이웃 탐색과
+// 표면 장 구축(buildFluidField)이 같은 격자를 세운다. GPU 의 fluid_grid.comp 와 같은 규칙이다.
+struct FluidGrid {
+    // positions 의 xyz 로 격자를 다시 세운다. 셀 번호는 나눠 계산하고 버킷에 넣는 것은 직렬이라 결과가
+    // 워커 수와 무관하다.
+    void build(const std::vector<glm::vec4>& positions, const FluidParams& params, core::JobSystem* jobs);
+    // 버킷에 실제로 든 개수(용량으로 자른 것).
+    uint32_t bucketCount(uint32_t bucket) const { return std::min(cellCounts[bucket], FLUID_CELL_CAPACITY); }
+    uint32_t particleAt(uint32_t bucket, uint32_t slot) const {
+        return cellParticles[static_cast<size_t>(bucket) * FLUID_CELL_CAPACITY + slot];
+    }
+
+    std::vector<uint32_t> cellOf;
+    std::vector<uint32_t> cellCounts;
+    std::vector<uint32_t> cellParticles;
+};
+
 // CPU SPH. 입자 상태를 여기 들고 밀도·힘·적분을 JobSystem 으로 나눠 푼다. Vulkan 을 타지 않아 테스트할
 // 수 있고, 같은 시작 상태에서 워커 수와 무관하게 같은 결과가 나온다(GPU 백엔드는 그렇지 않다).
 class FluidSolver {
@@ -94,7 +112,6 @@ public:
 
 private:
     void substep(const FluidParams& params, float dt, core::JobSystem* jobs);
-    void buildGrid(const FluidParams& params, core::JobSystem* jobs);
 
     // xyz 위치, w 밀도.
     std::vector<glm::vec4> positions;
@@ -103,10 +120,7 @@ private:
     std::vector<glm::vec4> nextPositions;
     std::vector<glm::vec4> nextVelocities;
     std::vector<glm::vec4> previousRendered;
-    // 해시 격자. 셀 번호는 나눠 계산하고 버킷에 넣는 것은 직렬이라 결과가 워커 수와 무관하다.
-    std::vector<uint32_t> cellOf;
-    std::vector<uint32_t> cellCounts;
-    std::vector<uint32_t> cellParticles;
+    FluidGrid grid;
 };
 
 } // namespace physics
