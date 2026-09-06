@@ -88,6 +88,12 @@ scene::Scene makeScene() {
     fluid.stiffness = 75.0F;
     fluid.containerMax = glm::vec3{3.0F, 4.0F, 5.0F};
     scene.attachFluid(0, fluid);
+    scene::ParticleSystem particles;
+    particles.maxParticles = 2048;
+    particles.emitRate = 55.0F;
+    particles.color = glm::vec4{0.1F, 0.2F, 0.3F, 0.5F};
+    particles.collide = false;
+    scene.attachParticleSystem(1, particles);
     return scene;
 }
 
@@ -145,6 +151,11 @@ int main() {
     assert(loaded.scene.fluids[0].backend == scene::SimulationBackend::CPU && "백엔드도 장면에 남아야 한다");
     assert(std::abs(loaded.scene.fluids[0].stiffness - 75.0F) < 1e-5F);
     assert(std::abs(loaded.scene.fluids[0].containerMax.z - 5.0F) < 1e-5F);
+    assert(loaded.scene.particleSystems.size() == 1 && loaded.scene.objects[1].particleSystem == 0);
+    assert(loaded.scene.objects[0].particleSystem == -1);
+    assert(loaded.scene.particleSystems[0].maxParticles == 2048 && !loaded.scene.particleSystems[0].collide);
+    assert(std::abs(loaded.scene.particleSystems[0].emitRate - 55.0F) < 1e-5F);
+    assert(std::abs(loaded.scene.particleSystems[0].color.a - 0.5F) < 1e-5F);
 
     // 부품이 없던 옛 판(1) 파일도 그대로 읽힌다.
     scene::SceneFile old = scene::readScene(R"({"version":1,"name":"옛 장면","objects":[{"name":"a"}]})");

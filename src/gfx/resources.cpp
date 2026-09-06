@@ -191,6 +191,22 @@ void destroyImage(Context& context, Image& image) {
     image = {};
 }
 
+void memoryBarrier(VkCommandBuffer commandBuffer,
+                   VkPipelineStageFlags2 sourceStage,
+                   VkAccessFlags2 sourceAccess,
+                   VkPipelineStageFlags2 destinationStage,
+                   VkAccessFlags2 destinationAccess) {
+    VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    barrier.srcStageMask = sourceStage;
+    barrier.srcAccessMask = sourceAccess;
+    barrier.dstStageMask = destinationStage;
+    barrier.dstAccessMask = destinationAccess;
+    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+}
+
 void imageBarrier(VkCommandBuffer commandBuffer,
                   VkImage image,
                   VkImageAspectFlags aspect,

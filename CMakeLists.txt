@@ -115,6 +115,9 @@ set(shader_sources
     shaders/fluid_surface.vert
     shaders/fluid_surface.frag
     shaders/fluid_thickness.frag
+    shaders/particles.comp
+    shaders/particle_sprite.vert
+    shaders/particle_sprite.frag
     shaders/rigid_integrate.comp
     shaders/rigid_solve.comp
     shaders/rigid_finish.comp
@@ -152,7 +155,8 @@ endforeach()
 set(shader_variants
     "shaders/mesh.vert|mesh_nodrawid.vert.spv|NO_DRAW_ID"
     "shaders/mesh.frag|mesh_rq.frag.spv|RAY_QUERY_SHADOWS"
-    "shaders/mesh_oit.frag|mesh_oit_rq.frag.spv|RAY_QUERY_SHADOWS")
+    "shaders/mesh_oit.frag|mesh_oit_rq.frag.spv|RAY_QUERY_SHADOWS"
+    "shaders/particles.comp|particles_rq.comp.spv|PARTICLE_RAY_QUERY")
 
 foreach(variant IN LISTS shader_variants)
     string(REPLACE "|" ";" variant_parts "${variant}")
@@ -208,6 +212,7 @@ add_executable(cg_lab
     src/gfx/environment.cpp
     src/gfx/bindless.cpp
     src/gfx/fluid.cpp
+    src/gfx/particles.cpp
     src/gfx/geometry.cpp
     src/gfx/hardware_profile.cpp
     src/gfx/lod_network.cpp
@@ -219,6 +224,7 @@ add_executable(cg_lab
     src/gfx/renderer_cull.cpp
     src/gfx/renderer_debug_lines.cpp
     src/gfx/renderer_fluid_draw.cpp
+    src/gfx/renderer_particle_draw.cpp
     src/gfx/renderer_geometry.cpp
     src/gfx/renderer_pathtrace.cpp
     src/gfx/renderer_post.cpp

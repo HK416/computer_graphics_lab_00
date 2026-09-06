@@ -1,0 +1,177 @@
+{
+ "version": 3,
+ "name": "입자",
+ "models": [
+  "<builtin:plane>",
+  "<builtin:box>"
+ ],
+ "camera": {
+  "position": [
+   0.0,
+   1.5,
+   4.0
+  ],
+  "yaw": -90.0,
+  "pitch": -15.0,
+  "fovY": 60.0,
+  "near": 0.05,
+  "moveSpeed": 2.0,
+  "mode": "orbit",
+  "target": [
+   0.0,
+   0.8,
+   0.0
+  ],
+  "distance": 4.0
+ },
+ "ambient": {
+  "color": [
+   0.25,
+   0.25,
+   0.25
+  ],
+  "intensity": 1.0
+ },
+ "lights": [
+  {
+   "type": "directional",
+   "color": [
+    1.0,
+    0.97,
+    0.9
+   ],
+   "intensity": 3.0,
+   "range": 20.0,
+   "innerCone": 20.0,
+   "outerCone": 30.0,
+   "size": [
+    2.0,
+    2.0
+   ],
+   "castsShadow": true
+  }
+ ],
+ "animators": [],
+ "rigidBodies": [],
+ "fluids": [],
+ "particleSystems": [
+  {
+   "maxParticles": 4096,
+   "emitRate": 800.0,
+   "lifetime": 2.5,
+   "initialSpeed": 4.0,
+   "spreadAngleDegrees": 25.0,
+   "gravityScale": 1.0,
+   "drag": 0.05,
+   "sizeStart": 0.08,
+   "sizeEnd": 0.02,
+   "color": [
+    1.0,
+    0.6,
+    0.2,
+    1.0
+   ],
+   "emissive": [
+    2.0,
+    0.8,
+    0.1
+   ],
+   "restitution": 0.5,
+   "collide": true
+  }
+ ],
+ "objects": [
+  {
+   "name": "태양",
+   "parent": -1,
+   "position": [
+    0,
+    5,
+    0
+   ],
+   "rotation": [
+    -0.383,
+    0.0,
+    0.0,
+    0.924
+   ],
+   "scale": [
+    1,
+    1,
+    1
+   ],
+   "visible": true,
+   "light": 0
+  },
+  {
+   "name": "바닥",
+   "parent": -1,
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation": [
+    0,
+    0,
+    0,
+    1
+   ],
+   "scale": [
+    3.0,
+    1.0,
+    3.0
+   ],
+   "visible": true,
+   "model": 0,
+   "mesh": 0,
+   "skin": -1
+  },
+  {
+   "name": "상자",
+   "parent": -1,
+   "position": [
+    0.0,
+    0.6,
+    -0.4
+   ],
+   "rotation": [
+    0,
+    0.2,
+    0,
+    0.98
+   ],
+   "scale": [
+    0.5,
+    0.5,
+    0.5
+   ],
+   "visible": true,
+   "model": 1,
+   "mesh": 0,
+   "skin": -1
+  },
+  {
+   "name": "방출기",
+   "parent": -1,
+   "position": [
+    0.0,
+    1.8,
+    0.2
+   ],
+   "rotation": [
+    1.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "scale": [
+    1,
+    1,
+    1
+   ],
+   "visible": true,
+   "particleSystem": 0
+  }
+ ]
+}

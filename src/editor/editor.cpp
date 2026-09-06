@@ -1102,6 +1102,38 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         ImGui::TextDisabled("입자는 GPU 에서 계산해 내장 구로 그린다. Path Tracing에도 보인다");
     }
 
+    if (object.particleSystem >= 0 && object.particleSystem < static_cast<int>(active.particleSystems.size()) &&
+        componentHeader("입자", &scene::Object::particleSystem)) {
+        scene::ParticleSystem& system = active.particleSystems[static_cast<size_t>(object.particleSystem)];
+        if (!renderer.particleGpuAvailable()) {
+            ImGui::TextDisabled("이 장치에서는 입자 컴퓨트를 만들지 못했다");
+        }
+        int maxParticles = static_cast<int>(system.maxParticles);
+        if (ImGui::SliderInt("최대 입자", &maxParticles, 64, 65536, "%d", ImGuiSliderFlags_Logarithmic)) {
+            system.maxParticles = static_cast<uint32_t>(maxParticles);
+        }
+        ImGui::DragFloat("초당 방출", &system.emitRate, 1.0F, 0.0F, 100000.0F, "%.0f");
+        ImGui::DragFloat("수명", &system.lifetime, 0.05F, 0.05F, 60.0F, "%.2f");
+        ImGui::DragFloat("초기 속력", &system.initialSpeed, 0.05F, 0.0F, 100.0F, "%.2f");
+        ImGui::SliderFloat("퍼짐 각", &system.spreadAngleDegrees, 0.0F, 180.0F, "%.0f°");
+        ImGui::DragFloat("중력 배율", &system.gravityScale, 0.01F, -5.0F, 5.0F, "%.2f");
+        ImGui::DragFloat("항력", &system.drag, 0.01F, 0.0F, 20.0F, "%.2f");
+        ImGui::DragFloat("시작 지름", &system.sizeStart, 0.005F, 0.0F, 10.0F, "%.3f");
+        ImGui::DragFloat("끝 지름", &system.sizeEnd, 0.005F, 0.0F, 10.0F, "%.3f");
+        ImGui::ColorEdit4("색", glm::value_ptr(system.color));
+        ImGui::ColorEdit3("발광", glm::value_ptr(system.emissive), ImGuiColorEditFlags_HDR | ImGuiColorEditFlags_Float);
+        ImGui::DragFloat("반발", &system.restitution, 0.01F, 0.0F, 1.0F, "%.2f");
+        bool collisionUsable = renderer.particleCollisionAvailable();
+        ImGui::BeginDisabled(!collisionUsable);
+        ImGui::Checkbox("충돌", &system.collide);
+        ImGui::EndDisabled();
+        if (!collisionUsable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("광선 질의가 없어 장면과 부딪히지 않는다");
+        }
+        ImGui::TextDisabled("GPU 전용. 카메라를 향한 스프라이트로 그리며 Path Tracing 에는 보이지 않는다.\n"
+                            "충돌은 상위 가속 구조에 광선 질의로 판정한다");
+    }
+
     ImGui::Separator();
     if (ImGui::Button("컴포넌트 추가", ImVec2{-1.0F, 0.0F})) {
         ImGui::OpenPopup("컴포넌트 추가");
@@ -1141,6 +1173,11 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         ImGui::BeginDisabled(object.fluid >= 0);
         if (ImGui::MenuItem("유체")) {
             active.attachFluid(objectIndex);
+        }
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(object.particleSystem >= 0);
+        if (ImGui::MenuItem("입자")) {
+            active.attachParticleSystem(objectIndex);
         }
         ImGui::EndDisabled();
         ImGui::EndPopup();

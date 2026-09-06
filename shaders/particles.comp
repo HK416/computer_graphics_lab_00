@@ -1,0 +1,108 @@
+#version 460
+
+#include "particle_common.glsl"
+#include "sampling.glsl"
+
+#ifdef PARTICLE_RAY_QUERY
+#include "ray_query.glsl"
+// 경로 추적기와 같은 상위 가속 구조. 집합 1 로 묶여 있다.
+layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevel;
+#endif
+
+// 입자 하나를 스레드 하나가 제자리에서 갱신한다. 서로 읽지 않으므로 원자 연산이 없다. 이번 프레임의 방출 구간
+// (링 버퍼)은 CPU 가 정해 두었고, 방출된 입자는 다음 프레임부터 적분한다.
+layout(local_size_x = PARTICLE_GROUP_SIZE) in;
+
+// +Y 둘레 원뿔 안의 균일 방향(cosHalfAngle 이 원뿔 반각의 코사인).
+vec3 coneDirection(float cosHalfAngle, inout uint seed) {
+    float cosTheta = mix(cosHalfAngle, 1.0, randomFloat(seed));
+    float sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
+    float phi = 2.0 * PI * randomFloat(seed);
+    return vec3(sinTheta * cos(phi), cosTheta, sinTheta * sin(phi));
+}
+
+#ifdef PARTICLE_RAY_QUERY
+// 히트 삼각형의 기하 법선(월드). 셰이딩 법선이 아니라 면 법선이라 튕김이 면에 맞는다.
+vec3 hitNormal(ParticleParams params, uint instanceIndex, uint primitiveIndex) {
+    Instance instance = params.instances.items[instanceIndex];
+    Mesh mesh = params.meshes.items[instance.meshIndex];
+    MeshLod lod = params.lods.items[mesh.lodOffset];
+    uint base = lod.indexOffset + primitiveIndex * 3u;
+    bool skinned = instance.skinnedVertexOffset != NO_SKINNED_VERTICES;
+    VertexBuffer source = skinned ? params.skinnedVertices : params.vertices;
+    uint vertexBase = skinned ? instance.skinnedVertexOffset : uint(mesh.vertexOffset);
+    vec3 a = source.items[vertexBase + params.indices.items[base]].position;
+    vec3 b = source.items[vertexBase + params.indices.items[base + 1u]].position;
+    vec3 c = source.items[vertexBase + params.indices.items[base + 2u]].position;
+    return normalize(mat3(instance.normalMatrix) * cross(b - a, c - a));
+}
+#endif
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.particleCount) {
+        return;
+    }
+    ParticleParams params = push.params.item;
+    Particle particle = push.particles.items[i];
+
+    // 방출 구간이면 새로 뿌리고 끝낸다. 링이라 끝에서 앞으로 감긴다.
+    uint relative = (i + params.particleCount - params.spawnFirst) % params.particleCount;
+    if (relative < params.spawnCount) {
+        uint seed = pcgHash(i + params.frameIndex * 9781u);
+        vec3 local = coneDirection(params.sizeSpeedSpread.w, seed);
+        vec3 direction = normalize(mat3(params.emitterWorld) * local);
+        particle.position = params.emitterWorld[3].xyz;
+        particle.velocity = direction * params.sizeSpeedSpread.z;
+        // 프레임 안 어느 시점에 태어났는지를 나이로 남겨 방출이 프레임 단위로 뭉치지 않게 한다.
+        particle.age = randomFloat(seed) * params.dt;
+        particle.lifetime = params.lifetime;
+        push.particles.items[i] = particle;
+        return;
+    }
+    if (particle.age >= particle.lifetime) {
+        return;
+    }
+
+    float dt = params.dt;
+    particle.velocity += params.gravityDrag.xyz * dt;
+    particle.velocity *= max(1.0 - params.gravityDrag.w * dt, 0.0);
+    vec3 step = particle.velocity * dt;
+    float stepLength = length(step);
+
+#ifdef PARTICLE_RAY_QUERY
+    if ((params.flags & PARTICLE_FLAG_COLLIDE) != 0u && stepLength > 1.0e-6) {
+        vec3 direction = step / stepLength;
+        // 물 표면 인스턴스(마스크 0x01)는 지나간다. 불투명 플래그라 컷오프·반투명도 막는 것으로 친다.
+        rayQueryEXT query;
+        rayQueryInitializeEXT(query,
+                              topLevel,
+                              gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
+                              0xFEu,
+                              particle.position,
+                              1.0e-3,
+                              direction,
+                              stepLength);
+        rayQueryProceedEXT(query);
+        if (rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+            float hitDistance = rayQueryGetIntersectionTEXT(query, true);
+            vec3 normal = hitNormal(params,
+                                    uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, true)),
+                                    uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, true)));
+            if (dot(normal, direction) > 0.0) {
+                normal = -normal;
+            }
+            // 히트 지점 바로 앞에 세우고 법선 방향 속도만 반발 계수로 되돌린다.
+            particle.position += direction * max(hitDistance - 1.0e-3, 0.0);
+            particle.velocity -= (1.0 + params.emissive.w) * dot(particle.velocity, normal) * normal;
+            particle.age += dt;
+            push.particles.items[i] = particle;
+            return;
+        }
+    }
+#endif
+
+    particle.position += step;
+    particle.age += dt;
+    push.particles.items[i] = particle;
+}

@@ -324,6 +324,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     // 유체 입자는 오브젝트 인스턴스 뒤에 이어 붙으므로 그만큼 더 잡는다. 내장 구가 없으면 그리지 않는다.
     fluid->setParticleLimit(settings.fluidParticleLimit);
     bool fluidActive = fluid->prepare(scene, &scene != lastScene);
+    // 입자는 그림자를 던지지 않고 경로 추적에도 없어 장면 변경으로 치지 않는다.
+    particlesActive = particles->prepare(scene, &scene != lastScene, frameDeltaSeconds);
     uint32_t particleTotal = geometry.meshLive(fluidSphereMesh) ? fluid->totalParticles() : 0;
     reserveInstances(frame, static_cast<uint32_t>(scene.objects.size()) + particleTotal);
 

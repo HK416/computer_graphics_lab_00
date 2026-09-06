@@ -121,24 +121,11 @@ void Renderer::recordDdgiPass(VkCommandBuffer commandBuffer, const Frame& frame)
         ddgiAtlasInitialized = true;
     }
 
-    auto memoryBarrier = [&](VkPipelineStageFlags2 sourceStage,
-                             VkAccessFlags2 sourceAccess,
-                             VkPipelineStageFlags2 destinationStage,
-                             VkAccessFlags2 destinationAccess) {
-        VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-        barrier.srcStageMask = sourceStage;
-        barrier.srcAccessMask = sourceAccess;
-        barrier.dstStageMask = destinationStage;
-        barrier.dstAccessMask = destinationAccess;
-        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-        dependency.memoryBarrierCount = 1;
-        dependency.pMemoryBarriers = &barrier;
-        vkCmdPipelineBarrier2(commandBuffer, &dependency);
-    };
     // 지난 프레임의 래스터·컴퓨트가 아틀라스를 읽고 있었다. 이번 갱신이 그 뒤에 온다.
-    constexpr VkPipelineStageFlags2 READER_STAGES =
+    constexpr VkPipelineStageFlags2 ATLAS_READER_STAGES =
         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-    memoryBarrier(READER_STAGES,
+    memoryBarrier(commandBuffer,
+                  ATLAS_READER_STAGES,
                   VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                   VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
@@ -179,7 +166,8 @@ void Renderer::recordDdgiPass(VkCommandBuffer commandBuffer, const Frame& frame)
         vkCmdDispatch(commandBuffer, (threads + DDGI_GROUP_SIZE - 1) / DDGI_GROUP_SIZE, 1, 1);
     };
     auto computeToCompute = [&] {
-        memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        memoryBarrier(commandBuffer,
+                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                       VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
@@ -192,9 +180,10 @@ void Renderer::recordDdgiPass(VkCommandBuffer commandBuffer, const Frame& frame)
     computeToCompute();
     dispatch(3, total);
     // 래스터 프래그먼트와 반사·ReSTIR 컴퓨트가 이번 프레임 아틀라스를 읽는다.
-    memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+    memoryBarrier(commandBuffer,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                  READER_STAGES,
+                  ATLAS_READER_STAGES,
                   VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
     frameProfiler.end(zone, commandBuffer);
 }

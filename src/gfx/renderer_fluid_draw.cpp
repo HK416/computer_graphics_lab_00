@@ -367,16 +367,16 @@ void Renderer::recordFluidPass(VkCommandBuffer commandBuffer,
                                const scene::Scene& scene,
                                bool wantsTlas) {
     auto slot = static_cast<uint32_t>(frameIndex % FRAMES_IN_FLIGHT);
-    uint32_t particles = fluid->totalParticles();
+    uint32_t particleTotal = fluid->totalParticles();
     VkDeviceAddress tlasAddress = 0;
     VkDeviceAddress sphereBlas = 0;
     if (wantsTlas) {
         sphereBlas = rayTracer->bottomLevelAddress(fluidSphereMesh);
         if (sphereBlas != 0) {
             // updateTopLevel 이 기록 중에 버퍼를 다시 잡으면 여기서 넘긴 주소가 낡는다. 미리 잡아 둔다.
-            rayTracer->reserveInstances(slot, particles + batches.instanceCount);
+            rayTracer->reserveInstances(slot, particleTotal + batches.instanceCount);
             tlasAddress = rayTracer->instanceBufferAddress(slot);
-            fluidTlasPrepended = particles;
+            fluidTlasPrepended = particleTotal;
         }
     }
     // CPU 백엔드는 매핑된 버퍼에 직접 쓴다. TLAS 인스턴스 버퍼도 호스트에서 보이는 자리다.

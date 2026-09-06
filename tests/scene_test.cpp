@@ -91,12 +91,14 @@ int main() {
         assert(physics.attachRigidBody(0, scene::RigidBody{}) == 0 && "이미 붙어 있으면 그 첨자를 돌려준다");
         assert(physics.rigidBodies.size() == 2 && physics.rigidBodies[0].mass == 3.0F);
         assert(physics.attachFluid(1) == 0 && physics.fluids.size() == 1);
+        assert(physics.attachParticleSystem(1) == 0 && physics.particleSystems.size() == 1);
 
         physics.detachComponent(0, &scene::Object::rigidBody);
         assert(physics.objects[0].rigidBody == -1);
         assert(physics.rigidBodies.size() == 1 && "아무도 가리키지 않는 강체는 빠진다");
         assert(physics.objects[2].rigidBody == 0 && "남은 강체의 첨자가 당겨진다");
         assert(physics.objects[1].fluid == 0 && "다른 종류의 부품은 그대로다");
+        assert(physics.objects[1].particleSystem == 0);
 
         uint32_t physicsCopy = physics.duplicateObject(2);
         assert(physics.rigidBodies.size() == 2 && physics.objects[physicsCopy].rigidBody == 1);
@@ -108,6 +110,10 @@ int main() {
         assert(physics.differsFrom(saved) && "부품 값 변경은 되돌리기 대상이다");
         physics.restore(saved);
         assert(!physics.differsFrom(saved));
+        physics.particleSystems[0].emitRate += 1.0F;
+        assert(physics.differsFrom(saved) && "입자 부품 값 변경도 되돌리기 대상이다");
+        physics.detachComponent(1, &scene::Object::particleSystem);
+        assert(physics.particleSystems.empty() && physics.objects[1].particleSystem == -1);
     }
 
     // 하나의 애니메이터를 뿌리와 자식이 함께 가리키는 관계는 복제 뒤에도 유지된다.

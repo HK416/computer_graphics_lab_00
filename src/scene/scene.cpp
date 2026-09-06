@@ -16,7 +16,7 @@ namespace {
 
 // 부품 종류 수. refresh 가 만드는 배치표의 폭이며 Object 의 부품 첨자 개수와 같아야 한다.
 // 부품을 한 종류 더 넣으면 여기와 refresh 의 배치표 채우기도 함께 고쳐야 한다.
-constexpr size_t COMPONENT_KINDS = 5;
+constexpr size_t COMPONENT_KINDS = 6;
 
 // 살아남은 오브젝트가 하나도 가리키지 않는 부품을 버리고 첨자를 다시 맞춘다.
 // 애니메이터처럼 여러 오브젝트가 함께 가리키는 부품도 있어 소유가 아니라 참조를 기준으로 센다.
@@ -325,7 +325,7 @@ void Scene::refresh(core::JobSystem* jobs) {
     bool lightsChanged = previousLights != lights;
     previousLights = lights;
 
-    // 부품 배열의 «배치»만 담는다. 크기 다섯 개를 앞에 두고 오브젝트마다 부품 첨자 다섯 개를 잇는다.
+    // 부품 배열의 «배치»만 담는다. 크기 여섯 개를 앞에 두고 오브젝트마다 부품 첨자 여섯 개를 잇는다.
     // 값(강체 속도 등)은 담지 않으므로 재생 중에는 변하지 않는다.
     componentLayout.clear();
     componentLayout.reserve(COMPONENT_KINDS + count * COMPONENT_KINDS);
@@ -334,12 +334,14 @@ void Scene::refresh(core::JobSystem* jobs) {
     componentLayout.push_back(static_cast<int32_t>(lights.size()));
     componentLayout.push_back(static_cast<int32_t>(rigidBodies.size()));
     componentLayout.push_back(static_cast<int32_t>(fluids.size()));
+    componentLayout.push_back(static_cast<int32_t>(particleSystems.size()));
     for (const Object& object : objects) {
         componentLayout.push_back(object.meshRenderer);
         componentLayout.push_back(object.animator);
         componentLayout.push_back(object.light);
         componentLayout.push_back(object.rigidBody);
         componentLayout.push_back(object.fluid);
+        componentLayout.push_back(object.particleSystem);
     }
     // 배치표가 같아도 배열이 재배치되었을 수 있다. 부품을 떼고 같은 자리에 다시 붙이면 배치는
     // 그대로지만 부품은 다른 것이다.
@@ -401,6 +403,7 @@ SceneSnapshot Scene::capture() const {
     snapshot.lights = lights;
     snapshot.rigidBodies = rigidBodies;
     snapshot.fluids = fluids;
+    snapshot.particleSystems = particleSystems;
     snapshot.ambientColor = ambientColor;
     snapshot.ambientIntensity = ambientIntensity;
     snapshot.environment = environment;
@@ -420,6 +423,7 @@ void Scene::restore(const SceneSnapshot& snapshot) {
     lights = snapshot.lights;
     rigidBodies = snapshot.rigidBodies;
     fluids = snapshot.fluids;
+    particleSystems = snapshot.particleSystems;
     ambientColor = snapshot.ambientColor;
     ambientIntensity = snapshot.ambientIntensity;
     environment = snapshot.environment;
@@ -429,8 +433,9 @@ void Scene::restore(const SceneSnapshot& snapshot) {
 bool Scene::differsFrom(const SceneSnapshot& snapshot) const {
     if (name != snapshot.name || objects != snapshot.objects || meshRenderers != snapshot.meshRenderers ||
         lights != snapshot.lights || rigidBodies != snapshot.rigidBodies || fluids != snapshot.fluids ||
-        ambientColor != snapshot.ambientColor || ambientIntensity != snapshot.ambientIntensity ||
-        !(environment == snapshot.environment) || !(post == snapshot.post)) {
+        particleSystems != snapshot.particleSystems || ambientColor != snapshot.ambientColor ||
+        ambientIntensity != snapshot.ambientIntensity || !(environment == snapshot.environment) ||
+        !(post == snapshot.post)) {
         return true;
     }
     if (animators.size() != snapshot.animators.size()) {
@@ -502,6 +507,10 @@ int32_t Scene::attachFluid(uint32_t index, const Fluid& fluid) {
     return attachComponent(objects, fluids, index, &Object::fluid, fluid);
 }
 
+int32_t Scene::attachParticleSystem(uint32_t index, const ParticleSystem& system) {
+    return attachComponent(objects, particleSystems, index, &Object::particleSystem, system);
+}
+
 void Scene::detachComponent(uint32_t index, int32_t Object::* handle) {
     markStructureDirty();
     objects[index].*handle = -1;
@@ -511,6 +520,7 @@ void Scene::detachComponent(uint32_t index, int32_t Object::* handle) {
     compactComponents(lights, objects, &Object::light);
     compactComponents(rigidBodies, objects, &Object::rigidBody);
     compactComponents(fluids, objects, &Object::fluid);
+    compactComponents(particleSystems, objects, &Object::particleSystem);
 }
 
 void Scene::removeObject(uint32_t index) {
@@ -563,6 +573,7 @@ void Scene::removeObjects(const std::vector<uint32_t>& indices) {
     compactComponents(lights, objects, &Object::light);
     compactComponents(rigidBodies, objects, &Object::rigidBody);
     compactComponents(fluids, objects, &Object::fluid);
+    compactComponents(particleSystems, objects, &Object::particleSystem);
 }
 
 uint32_t Scene::duplicateObject(uint32_t index) {
@@ -602,6 +613,7 @@ uint32_t Scene::duplicateObject(uint32_t index) {
     duplicateComponents(lights, objects, remap, &Object::light);
     duplicateComponents(rigidBodies, objects, remap, &Object::rigidBody);
     duplicateComponents(fluids, objects, remap, &Object::fluid);
+    duplicateComponents(particleSystems, objects, remap, &Object::particleSystem);
     return static_cast<uint32_t>(remap[index]);
 }
 

@@ -9,6 +9,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/mat4x4.hpp>
 #include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
 
 #include "asset/model.h"
 #include "scene/camera.h"
@@ -197,6 +198,35 @@ struct Fluid {
     bool operator==(const Fluid&) const = default;
 };
 
+// 입자 부품(불꽃·파편). 입자 상태는 GPU 에만 있고 여기에는 방출·운동·표시 설정만 둔다. 방출 자세는
+// 오브젝트의 월드 변환(위치와 +Y 축)이다. GPU 전용이라 백엔드 선택이 없다.
+struct ParticleSystem {
+    // 살아 있을 수 있는 입자 수의 상한. 링 버퍼라 이보다 많이 뿌리면 가장 오래된 것이 덮인다.
+    uint32_t maxParticles = 4096;
+    // 초당 방출 수.
+    float emitRate = 200.0F;
+    float lifetime = 3.0F;
+    float initialSpeed = 3.0F;
+    // +Y 둘레 원뿔의 반각(도).
+    float spreadAngleDegrees = 20.0F;
+    // (0, -9.81, 0) 에 곱한다.
+    float gravityScale = 1.0F;
+    // 초당 속도 감쇠 비율.
+    float drag = 0.1F;
+    // 스프라이트 지름(월드). 나이에 따라 시작에서 끝으로 선형 보간한다.
+    float sizeStart = 0.1F;
+    float sizeEnd = 0.02F;
+    // 미리 곱하지 않은 색과 알파. 알파는 나이에 따라 0 으로 줄어든다.
+    glm::vec4 color{1.0F, 0.8F, 0.4F, 1.0F};
+    glm::vec3 emissive{0.0F};
+    // 장면과 부딪혔을 때 법선 방향 속도에 남는 비율.
+    float restitution = 0.4F;
+    // 상위 가속 구조에 광선 질의로 부딪힌다. 광선 질의가 없는 장치에서는 무시된다.
+    bool collide = true;
+
+    bool operator==(const ParticleSystem&) const = default;
+};
+
 struct Object {
     std::string name;
     // 부모 기준 지역 변환. 세계 변환은 Scene::worldMatrix 가 부모를 거슬러 올라가 만든다.
@@ -210,6 +240,7 @@ struct Object {
     int32_t light = -1;
     int32_t rigidBody = -1;
     int32_t fluid = -1;
+    int32_t particleSystem = -1;
 
     bool operator==(const Object&) const = default;
 };
@@ -271,6 +302,7 @@ struct SceneSnapshot {
     std::vector<Light> lights;
     std::vector<RigidBody> rigidBodies;
     std::vector<Fluid> fluids;
+    std::vector<ParticleSystem> particleSystems;
     glm::vec3 ambientColor{0.25F};
     float ambientIntensity = 1.0F;
     Environment environment;
@@ -285,6 +317,7 @@ struct Scene {
     std::vector<Light> lights;
     std::vector<RigidBody> rigidBodies;
     std::vector<Fluid> fluids;
+    std::vector<ParticleSystem> particleSystems;
     Camera camera;
     // 재생 중인지. 참일 때만 물리가 돌고, 편집기는 되돌리기 기록을 멈춘다. 저장하지 않는다.
     bool simulating = false;
@@ -353,6 +386,7 @@ struct Scene {
     int32_t attachLight(uint32_t index, const Light& light = {});
     int32_t attachRigidBody(uint32_t index, const RigidBody& body = {});
     int32_t attachFluid(uint32_t index, const Fluid& fluid = {});
+    int32_t attachParticleSystem(uint32_t index, const ParticleSystem& system = {});
     // 부품을 뗀다. 아무도 가리키지 않게 된 부품은 배열에서 빠지고 첨자가 다시 맞춰진다.
     void detachComponent(uint32_t index, int32_t Object::* handle);
 

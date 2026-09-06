@@ -201,28 +201,9 @@ void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame)
     uint32_t zone = frameProfiler.begin("스킨", commandBuffer);
     VkDescriptorSet bindlessSet = bindless.set();
 
-    auto memoryBarrier = [&](VkPipelineStageFlags2 sourceStage,
-                             VkAccessFlags2 sourceAccess,
-                             VkPipelineStageFlags2 destinationStage,
-                             VkAccessFlags2 destinationAccess) {
-        VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-        barrier.srcStageMask = sourceStage;
-        barrier.srcAccessMask = sourceAccess;
-        barrier.dstStageMask = destinationStage;
-        barrier.dstAccessMask = destinationAccess;
-        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-        dependency.memoryBarrierCount = 1;
-        dependency.pMemoryBarriers = &barrier;
-        vkCmdPipelineBarrier2(commandBuffer, &dependency);
-    };
-    // 이 버퍼를 읽는 단계 전부. 지난 프레임의 읽기가 끝나기를 기다리고, 이번 프레임의 읽기에 앞선다.
-    constexpr VkPipelineStageFlags2 READER_STAGES =
-        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT |
-        VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-        VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-        VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
-    // 지난 프레임의 읽기가 끝난 뒤 지난 반쪽으로의 복사와 현재 반쪽 스킨이 시작된다.
-    memoryBarrier(READER_STAGES,
+    // 지난 프레임의 읽기(READER_STAGES)가 끝난 뒤 지난 반쪽으로의 복사와 현재 반쪽 스킨이 시작된다.
+    memoryBarrier(commandBuffer,
+                  READER_STAGES,
                   VK_ACCESS_2_SHADER_READ_BIT,
                   VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                   VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT |
@@ -251,7 +232,8 @@ void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame)
                         static_cast<uint32_t>(copies.size()),
                         copies.data());
         // 복사가 현재 구간을 다 읽은 뒤에 스킨이 그 구간을 덮는다.
-        memoryBarrier(VK_PIPELINE_STAGE_2_COPY_BIT,
+        memoryBarrier(commandBuffer,
+                      VK_PIPELINE_STAGE_2_COPY_BIT,
                       VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
@@ -280,7 +262,8 @@ void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame)
     }
 
     // 경계 구 컴퓨트가 변형 정점을 읽는다.
-    memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+    memoryBarrier(commandBuffer,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                   VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
@@ -312,7 +295,8 @@ void Renderer::recordSkinPass(VkCommandBuffer commandBuffer, const Frame& frame)
 
     // 정점은 그림자·장면 패스와 가속 구조 구축이, 경계 구는 컬 컴퓨트와 태스크 셰이더가, 지난 반쪽은 모션
     // 벡터가 읽는다.
-    memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT,
+    memoryBarrier(commandBuffer,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT,
                   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
                   READER_STAGES,
                   VK_ACCESS_2_SHADER_READ_BIT);

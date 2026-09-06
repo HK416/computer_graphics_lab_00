@@ -107,6 +107,9 @@ Renderer::Renderer(Context& context,
     createSsaoPipelines();
     environment = std::make_unique<EnvironmentMap>(context, bindless);
     fluid = std::make_unique<FluidSimulator>(context, bindless, jobs);
+    particles = std::make_unique<ParticleSimulator>(
+        context, bindless, rayQueryShadowsAvailable() ? rayTracer->accelerationLayout() : VK_NULL_HANDLE);
+    createParticlePipelines();
 
     VkSemaphoreTypeCreateInfo timelineInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
     timelineInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -144,6 +147,8 @@ Renderer::~Renderer() {
     vkDestroyPipeline(context.device, fluidDepthPipeline, nullptr);
     vkDestroyPipeline(context.device, fluidSurfacePipeline, nullptr);
     vkDestroyPipelineLayout(context.device, fluidSurfaceLayout, nullptr);
+    vkDestroyPipeline(context.device, particleSpritePipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, particlePipelineLayout, nullptr);
     for (VkPipeline pipeline : meshPipelines) {
         vkDestroyPipeline(context.device, pipeline, nullptr);
     }
@@ -579,6 +584,15 @@ void Renderer::recordCommands(Frame& frame,
                    }
                }});
 
+    // 입자 진행. 경로 추적 프레임에도 돌아 시간이 멈추지 않는다. 충돌은 이번 프레임 TLAS 를 노드 안에서 세워 본다.
+    graph.add({"입자",
+               "입자",
+               [&] { return particlesActive; },
+               {},
+               {},
+               {},
+               [&](VkCommandBuffer cmd) { recordParticlePass(cmd, frame, scene); }});
+
     // ---- 경로 추적 경로. 모션 벡터와 깊이는 광선 생성 셰이더가 직접 쓰고 읽기 전용으로 남긴다.
     graph.add({"경로 추적",
                "경로 추적",
@@ -937,6 +951,14 @@ void Renderer::recordCommands(Frame& frame,
                {},
                {},
                [](VkCommandBuffer) {}});
+    // 입자 스프라이트. 깊이는 텍스처로 읽고(소프트 파티클) 색상에 미리 곱한 알파로 섞는다. 경로 추적에는 없다.
+    graph.add({"입자 스프라이트",
+               "입자 스프라이트",
+               [&] { return !pathTracing && particlesActive; },
+               {depthSampled(VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT)},
+               {colorWrite(targets.color, false)},
+               {},
+               [&](VkCommandBuffer cmd) { recordParticleSpritePass(cmd, frame); }});
     graph.add({"SSAO",
                "SSAO",
                [&] { return !pathTracing && settings.useSsao; },

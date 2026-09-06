@@ -66,6 +66,21 @@ VkShaderModule createShaderModule(VkDevice device, const std::string& name);
 VkShaderModule tryCreateShaderModule(VkDevice device, const std::string& name);
 void destroyImage(Context& context, Image& image);
 
+// 메모리 배리어 한 장을 기록한다. 버퍼를 쓰는 컴퓨트·전송과 그것을 읽는 단계 사이에 쓴다.
+void memoryBarrier(VkCommandBuffer commandBuffer,
+                   VkPipelineStageFlags2 sourceStage,
+                   VkAccessFlags2 sourceAccess,
+                   VkPipelineStageFlags2 destinationStage,
+                   VkAccessFlags2 destinationAccess);
+
+// 정점·인스턴스·가속 구조 입력 버퍼를 읽는 단계 전부. 스킨 패스와 유체·입자 컴퓨트가 지난 프레임의 읽기를
+// 기다리고 이번 프레임의 읽기에 앞설 때 같은 집합을 쓴다.
+inline constexpr VkPipelineStageFlags2 READER_STAGES =
+    VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT |
+    VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+    VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+    VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+
 // 이미지 배리어 한 장을 기록한다. 레이아웃 전이와 큐 패밀리 소유권 이전에 모두 쓴다.
 void imageBarrier(VkCommandBuffer commandBuffer,
                   VkImage image,

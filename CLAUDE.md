@@ -182,8 +182,8 @@ CPU 백엔드를 부르느라 `physics` 를 하나 본다.
 패스를 `RenderGraph` 노드로 등록하고(플러그인 `addPass` 훅이 그 뒤에 자기 노드를 끼움) `execute` 한다. 노드 순서:
 
 환경 맵 굽기(설정이 바뀔 때만) → 스킨 컴퓨트(변형 정점·meshlet 경계; 포즈가 바뀐 오브젝트만) → [강체 GPU 솔버: PhysicsPlugin 이 끼움] →
-유체 컴퓨트(입자 진행, 인스턴스와 TLAS 인스턴스 쓰기; CPU 백엔드는 지난 프레임이 띄운 스텝을 거둬 쓰고 노드 끝에서 다음 스텝을 백그라운드로 띄운다) → 그림자 패스 → DDGI 프로브 갱신 → [경로 추적] **또는** [컬(1차) → 불투명(1차, 끝에 유체 인스턴스 드로우)
-→ HZB → 컬(2차) → 불투명(2차) → 하늘 → 직접광 ReSTIR → 광선 반사 → OIT → 합성 → SSAO] → Bloom·자동 노출 → 시간축
+유체 컴퓨트(입자 진행, 인스턴스와 TLAS 인스턴스 쓰기; CPU 백엔드는 지난 프레임이 띄운 스텝을 거둬 쓰고 노드 끝에서 다음 스텝을 백그라운드로 띄운다) → 그림자 패스 → DDGI 프로브 갱신 → GPU 입자 진행(충돌이면 TLAS 를 먼저 세움) → [경로 추적] **또는** [컬(1차) → 불투명(1차, 끝에 유체 인스턴스 드로우)
+→ HZB → 컬(2차) → 불투명(2차) → 하늘 → 직접광 ReSTIR → 광선 반사 → OIT → 합성 → 입자 스프라이트 → SSAO] → Bloom·자동 노출 → 시간축
 업스케일 → 톤 매핑 → 공간 업스케일 → UI.
 
 유체 입자 인스턴스는 오브젝트 인스턴스 **뒤**(`objects.size()` 부터)에 GPU 가 쓴다. CPU 는 앞쪽만
@@ -212,6 +212,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `GpuMesh` `GpuMeshLod` `GpuMeshlet` `GpuMaterial` `GpuInstance` (`src/gfx/geometry.h`) | 동명 구조체 (`scene_types.glsl`) |
 | `GpuLight` (`src/gfx/renderer.h`) | `Light` (`scene_types.glsl`) |
 | `GpuFluidCollider` `GpuFluidParams` `FluidPushConstants` (`src/gfx/fluid.h`) | `FluidCollider` `FluidParams` `FluidPushConstants` (`shaders/fluid_common.glsl`) |
+| `GpuParticle` `GpuParticleParams` `ParticlePushConstants` (`src/gfx/particles.h`) | `Particle` `ParticleParams` `ParticlePushConstants` (`shaders/particle_common.glsl`) — 컴퓨트와 스프라이트 정점·프래그먼트가 같은 블록 |
 | `GpuRigidBody` `RigidPushConstants` (`src/gfx/rigid_body_gpu.h`) | `RigidBody` `RigidPushConstants` (`shaders/rigid_common.glsl`) |
 | `physics::Triangle` (`src/physics/rigid_body.h`) | `RigidTriangle` (`rigid_common.glsl`) |
 | `collideBoxBox` 등 접촉 생성 (`src/physics/rigid_body.cpp`) | `rigidCollide` (`shaders/rigid_common.glsl`) |

@@ -41,29 +41,6 @@ VkPipeline createComputePipeline(Context& context, VkPipelineLayout layout, cons
     return pipeline;
 }
 
-void memoryBarrier(VkCommandBuffer commandBuffer,
-                   VkPipelineStageFlags2 sourceStage,
-                   VkAccessFlags2 sourceAccess,
-                   VkPipelineStageFlags2 destinationStage,
-                   VkAccessFlags2 destinationAccess) {
-    VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-    barrier.srcStageMask = sourceStage;
-    barrier.srcAccessMask = sourceAccess;
-    barrier.dstStageMask = destinationStage;
-    barrier.dstAccessMask = destinationAccess;
-    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    dependency.memoryBarrierCount = 1;
-    dependency.pMemoryBarriers = &barrier;
-    vkCmdPipelineBarrier2(commandBuffer, &dependency);
-}
-
-// 인스턴스와 가속 구조 입력을 읽는 단계 전부. 스킨 패스와 같은 집합이다.
-constexpr VkPipelineStageFlags2 READER_STAGES =
-    VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT |
-    VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-    VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-    VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
-
 uint32_t groupsFor(uint32_t count) {
     return (count + FLUID_GROUP_SIZE - 1) / FLUID_GROUP_SIZE;
 }

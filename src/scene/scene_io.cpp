@@ -21,12 +21,22 @@ json toJson(const glm::vec2& value) {
 json toJson(const glm::quat& value) {
     return json::array({value.x, value.y, value.z, value.w});
 }
+json toJson(const glm::vec4& value) {
+    return json::array({value.x, value.y, value.z, value.w});
+}
 
 glm::vec3 toVec3(const json& value, const glm::vec3& fallback) {
     if (!value.is_array() || value.size() != 3) {
         return fallback;
     }
     return glm::vec3{value[0].get<float>(), value[1].get<float>(), value[2].get<float>()};
+}
+
+glm::vec4 toVec4(const json& value, const glm::vec4& fallback) {
+    if (!value.is_array() || value.size() != 4) {
+        return fallback;
+    }
+    return glm::vec4{value[0].get<float>(), value[1].get<float>(), value[2].get<float>(), value[3].get<float>()};
 }
 
 glm::vec2 toVec2(const json& value, const glm::vec2& fallback) {
@@ -219,6 +229,24 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
     }
     document["fluids"] = fluids;
 
+    json particleSystems = json::array();
+    for (const ParticleSystem& system : scene.particleSystems) {
+        particleSystems.push_back({{"maxParticles", system.maxParticles},
+                                   {"emitRate", system.emitRate},
+                                   {"lifetime", system.lifetime},
+                                   {"initialSpeed", system.initialSpeed},
+                                   {"spreadAngleDegrees", system.spreadAngleDegrees},
+                                   {"gravityScale", system.gravityScale},
+                                   {"drag", system.drag},
+                                   {"sizeStart", system.sizeStart},
+                                   {"sizeEnd", system.sizeEnd},
+                                   {"color", toJson(system.color)},
+                                   {"emissive", toJson(system.emissive)},
+                                   {"restitution", system.restitution},
+                                   {"collide", system.collide}});
+    }
+    document["particleSystems"] = particleSystems;
+
     json objects = json::array();
     for (uint32_t objectIndex = 0; objectIndex < scene.objects.size(); ++objectIndex) {
         const Object& object = scene.objects[objectIndex];
@@ -247,6 +275,9 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
         }
         if (object.fluid >= 0) {
             entry["fluid"] = object.fluid;
+        }
+        if (object.particleSystem >= 0) {
+            entry["particleSystem"] = object.particleSystem;
         }
         objects.push_back(std::move(entry));
     }
@@ -390,6 +421,25 @@ SceneFile readScene(const std::string& text) {
         file.scene.fluids.push_back(fluid);
     }
 
+    for (const json& entry : document.value("particleSystems", json::array())) {
+        ParticleSystem system;
+        // 상한은 gfx::PARTICLE_MAX_PARTICLES 와 같은 값이다. scene 은 gfx 를 보지 못해 손으로 옮겨 적었다.
+        system.maxParticles = std::clamp(entry.value("maxParticles", system.maxParticles), 1U, 65536U);
+        system.emitRate = entry.value("emitRate", system.emitRate);
+        system.lifetime = entry.value("lifetime", system.lifetime);
+        system.initialSpeed = entry.value("initialSpeed", system.initialSpeed);
+        system.spreadAngleDegrees = entry.value("spreadAngleDegrees", system.spreadAngleDegrees);
+        system.gravityScale = entry.value("gravityScale", system.gravityScale);
+        system.drag = entry.value("drag", system.drag);
+        system.sizeStart = entry.value("sizeStart", system.sizeStart);
+        system.sizeEnd = entry.value("sizeEnd", system.sizeEnd);
+        system.color = toVec4(entry.value("color", json{}), system.color);
+        system.emissive = toVec3(entry.value("emissive", json{}), system.emissive);
+        system.restitution = entry.value("restitution", system.restitution);
+        system.collide = entry.value("collide", system.collide);
+        file.scene.particleSystems.push_back(system);
+    }
+
     // 손으로 고친 파일이나 깨진 파일이 배열 밖을 가리킬 수 있다. 없는 부품은 안 붙은 것으로 본다.
     auto handle = [](int32_t value, size_t size) {
         return value >= 0 && static_cast<size_t>(value) < size ? value : -1;
@@ -406,6 +456,7 @@ SceneFile readScene(const std::string& text) {
         object.light = handle(entry.value("light", -1), file.scene.lights.size());
         object.rigidBody = handle(entry.value("rigidBody", -1), file.scene.rigidBodies.size());
         object.fluid = handle(entry.value("fluid", -1), file.scene.fluids.size());
+        object.particleSystem = handle(entry.value("particleSystem", -1), file.scene.particleSystems.size());
         auto skin = entry.value("skin", -1);
         file.scene.objects.push_back(std::move(object));
         file.objectModels.push_back(entry.value("model", -1));

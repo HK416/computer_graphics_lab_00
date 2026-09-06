@@ -18,6 +18,7 @@
 #include "gfx/environment.h"
 #include "gfx/fluid.h"
 #include "gfx/lod_network.h"
+#include "gfx/particles.h"
 #include "gfx/profiler.h"
 #include "gfx/raytracing.h"
 #include "gfx/render_graph.h"
@@ -354,6 +355,12 @@ public:
     bool fluidGpuAvailable() const { return fluid != nullptr && fluid->gpuAvailable(); }
     // 물 표면 컴퓨트를 만들었는지. GPU 백엔드에서 «표면» 표시를 고를 수 있는지의 조건이다.
     bool fluidSurfaceAvailable() const { return fluid != nullptr && fluid->surfaceAvailable(); }
+    // 이 장치에서 입자 컴퓨트를 만들었는지. 거짓이면 입자 부품은 아무것도 그리지 않는다.
+    bool particleGpuAvailable() const { return particles != nullptr && particles->gpuAvailable(); }
+    // 입자가 장면과 부딪힐 수 있는지(광선 질의 변종 + 가속 구조). 편집기가 «충돌» 항목을 잠그는 데 쓴다.
+    bool particleCollisionAvailable() const {
+        return particles != nullptr && particles->collisionAvailable() && rayQueryShadowsAvailable();
+    }
     // 플러그인이 렌더 그래프에 패스를 끼우는 훅. recordCommands 가 자기 노드를 다 넣은 뒤 등록 순서대로 부른다.
     // 훅은 graph.addAfter(앵커, 노드) 로 끼운다. 앵커 이름은 recordCommands 의 노드 이름이다.
     struct FrameInfo {
@@ -482,6 +489,12 @@ private:
     // 유체를 진행하고 입자 인스턴스를 쓴다. 스킨 패스 뒤, 그림자 패스 앞. wantsTlas 면 상위 가속 구조
     // 인스턴스도 앞쪽에 써 두고 updateAccelerationStructures 가 그 뒤에 오브젝트를 잇는다.
     void createFluidSurfacePipelines();
+    // 입자 스프라이트 파이프라인. 컴퓨트와 같은 푸시 상수 블록을 쓴다.
+    void createParticlePipelines();
+    // 입자를 한 프레임 진행한다. 충돌을 원하면 이번 프레임 가속 구조를 먼저 세운다. DDGI 뒤.
+    void recordParticlePass(VkCommandBuffer commandBuffer, const Frame& frame, const scene::Scene& scene);
+    // 입자를 카메라를 향한 스프라이트로 색상 대상에 섞는다. 합성 뒤라 깊이는 읽기 전용 텍스처다.
+    void recordParticleSpritePass(VkCommandBuffer commandBuffer, const Frame& frame);
     // 물 표면을 그린다. 하늘 뒤라 뒤에 있는 배경이 이미 색상 대상에 들어 있고, 미리 곱해진 알파로
     // 섞으므로 화면 색 사본을 뜨지 않아도 투과가 맞는다.
     void recordFluidSurfacePass(VkCommandBuffer commandBuffer,
@@ -673,6 +686,12 @@ private:
     std::unique_ptr<FluidSimulator> fluid;
     // 유체마다 용기의 경계 구. 그림자 시점 컬링이 쓴다.
     std::vector<glm::vec4> fluidBounds;
+    // GPU 입자. 장면의 입자 부품마다 상태를 들고, 스프라이트 패스가 그린다.
+    std::unique_ptr<ParticleSimulator> particles;
+    // 이번 프레임에 그릴 입자가 있는지. buildDrawCommands 가 정한다.
+    bool particlesActive = false;
+    VkPipelineLayout particlePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline particleSpritePipeline = VK_NULL_HANDLE;
     // 물 표면 파이프라인. 두께를 먼저 쌓고 그 위에 표면을 그린다.
     VkPipelineLayout fluidSurfaceLayout = VK_NULL_HANDLE;
     VkPipeline fluidThicknessPipeline = VK_NULL_HANDLE;

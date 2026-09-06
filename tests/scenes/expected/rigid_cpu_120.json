@@ -248,6 +248,7 @@
       "visible": true
     }
   ],
+  "particleSystems": [],
   "post": {
     "adaptationSpeed": 2.0,
     "autoExposure": false,
