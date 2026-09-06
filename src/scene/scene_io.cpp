@@ -373,6 +373,68 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
     return document.dump(2);
 }
 
+std::string writeSubtree(const Scene& scene,
+                         const std::vector<uint32_t>& roots,
+                         const ModelTable& models,
+                         const std::filesystem::path& root) {
+    // 사본에서 서브트리 밖을 지우면 removeObjects 가 부모·부품·관절 첨자를 알아서 민다. 뿌리를 먼저 떼어 두어야
+    // «부모가 지워지면 자식도 지운다» 규칙에 뿌리가 딸려 가지 않는다.
+    Scene subtree = scene;
+    std::vector<bool> kept(scene.objects.size(), false);
+    for (uint32_t rootIndex : roots) {
+        if (rootIndex >= scene.objects.size()) {
+            continue;
+        }
+        kept[rootIndex] = true;
+        subtree.objects[rootIndex].parent = -1;
+        for (uint32_t i = 0; i < scene.objects.size(); ++i) {
+            if (scene.isDescendant(i, rootIndex)) {
+                kept[i] = true;
+            }
+        }
+    }
+    std::vector<uint32_t> doomed;
+    for (uint32_t i = 0; i < kept.size(); ++i) {
+        if (!kept[i]) {
+            doomed.push_back(i);
+        }
+    }
+    subtree.removeObjects(doomed);
+    subtree.name = roots.size() == 1 && roots[0] < scene.objects.size() ? scene.objects[roots[0]].name : "프리팹";
+    return writeScene(subtree, models, root);
+}
+
+uint32_t appendScene(Scene& target, const Scene& source, int32_t parent) {
+    target.markStructureDirty();
+    auto base = static_cast<uint32_t>(target.objects.size());
+    if (parent >= static_cast<int32_t>(base)) {
+        parent = -1;
+    }
+    std::vector<Object> appended = source.objects;
+    for (Object& object : appended) {
+        object.parent = object.parent >= 0 ? object.parent + static_cast<int32_t>(base) : parent;
+    }
+    // 부품 종류마다 배열을 이어 붙이고 새 오브젝트의 첨자를 그만큼 민다.
+    forEachComponentKind(target, [&](auto& items, int32_t Object::* kind) {
+        using Item = typename std::remove_reference_t<decltype(items)>::value_type;
+        const auto& sourceItems = ComponentSlot<Item>::items(source);
+        auto offset = static_cast<int32_t>(items.size());
+        items.insert(items.end(), sourceItems.begin(), sourceItems.end());
+        for (Object& object : appended) {
+            if (object.*kind >= 0) {
+                object.*kind += offset;
+            }
+        }
+    });
+    // 관절의 상대 번호는 오브젝트 번호라 함께 민다.
+    for (size_t i = target.joints.size() - source.joints.size(); i < target.joints.size(); ++i) {
+        Joint& joint = target.joints[i];
+        joint.other = joint.other >= 0 ? joint.other + static_cast<int32_t>(base) : -1;
+    }
+    target.objects.insert(target.objects.end(), appended.begin(), appended.end());
+    return base;
+}
+
 SceneFile readScene(const std::string& text) {
     json document = json::parse(text, nullptr, false);
     if (document.is_discarded() || !document.is_object()) {

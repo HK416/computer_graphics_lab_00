@@ -68,6 +68,18 @@ void Editor::drawHierarchyNode(scene::Scene& active, const std::vector<std::vect
             deferred = [this, &active] { unparentSelection(active); };
         }
         ImGui::Separator();
+        if (ImGui::MenuItem("복사", "Ctrl+C", false, static_cast<bool>(subtreeCopier))) {
+            copySelection();
+        }
+        if (ImGui::MenuItem(
+                "자식으로 붙여넣기", nullptr, false, !clipboard.empty() && static_cast<bool>(subtreePaster))) {
+            int32_t parent = static_cast<int32_t>(index);
+            deferred = [this, parent] { pasteClipboard(parent); };
+        }
+        if (ImGui::MenuItem("프리팹으로 저장...", nullptr, false, static_cast<bool>(subtreeCopier))) {
+            popupRequest = PopupRequest::SAVE_PREFAB;
+        }
+        ImGui::Separator();
         if (ImGui::BeginMenu("자식 추가")) {
             buildCreateItems(active, *geometryStore, index);
             ImGui::EndMenu();

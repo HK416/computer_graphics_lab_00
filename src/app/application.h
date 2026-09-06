@@ -20,6 +20,7 @@
 #include "gfx/renderer.h"
 #include "gfx/texture.h"
 #include "scene/scene.h"
+#include "scene/scene_io.h"
 
 struct SDL_Window;
 
@@ -186,6 +187,13 @@ private:
     // 장면을 커스텀 JSON 으로 저장하고 읽는다. 읽은 장면은 새 장면으로 추가한 뒤 전환한다.
     void saveScene(const std::filesystem::path& path);
     void openScene(const std::filesystem::path& path);
+    // 편집기 복사·프리팹. 서브트리를 장면 파일 형식 문자열로 만들고, 그 문자열을 활성 장면의 parent 아래에 붙인다.
+    std::string copySubtree(const std::vector<uint32_t>& roots);
+    void pasteSubtree(const std::string& text, int32_t parent);
+    // 읽은 장면 파일이 가리키는 모델을 올리고 메쉬 번호·스켈레톤을 되꽂는다. openScene 과 pasteSubtree 가 함께 쓴다.
+    void resolveModels(scene::SceneFile& loaded);
+    // 장면이 실제로 쓰는 모델만 담은 표. remapped 의 애니메이터 모델 번호를 표 안 번호로 옮긴다.
+    scene::ModelTable usedModels(const scene::Scene& scene, scene::Scene& remapped) const;
     // --headless 의 본체. run() 이 창 대신 이것을 돈다.
     void runHeadless();
     void dumpRigidBodies() const;

@@ -42,4 +42,14 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
 // JSON 문자열을 읽는다. 형식이 잘못되었으면 core::fatal 로 끝낸다.
 SceneFile readScene(const std::string& text);
 
+// 오브젝트 roots 와 그 자손만 담은 장면 문자열(프리팹·클립보드). 형식은 장면 파일과 같아 readScene 으로 읽고,
+// 뿌리는 parent 가 -1 이다. 카메라·환경 같은 장면 설정도 따라가지만 appendScene 은 오브젝트와 부품만 옮긴다.
+std::string writeSubtree(const Scene& scene,
+                         const std::vector<uint32_t>& roots,
+                         const ModelTable& models,
+                         const std::filesystem::path& root = {});
+// source 의 오브젝트와 부품을 target 뒤에 붙인다. 뿌리(parent -1)는 parent 아래로 가고 부품 첨자·관절 상대 번호는
+// 밀린다. 메쉬 번호·스켈레톤은 source 에 이미 되꽂혀 있어야 한다. 첫 새 오브젝트 번호를 돌려준다.
+uint32_t appendScene(Scene& target, const Scene& source, int32_t parent);
+
 } // namespace scene

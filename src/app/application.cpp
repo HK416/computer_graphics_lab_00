@@ -168,6 +168,10 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
             [this](const std::filesystem::path& path) { saveScene(path); },
             [this](const std::filesystem::path& path) { openScene(path); });
         editorUi->setModelCollector([this] { collectUnusedModels(true); });
+        editorUi->setSubtreeIo(
+            std::filesystem::path(CG_LAB_ASSET_ROOT) / "prefabs",
+            [this](const std::vector<uint32_t>& roots) { return copySubtree(roots); },
+            [this](const std::string& text, int32_t parent) { pasteSubtree(text, parent); });
     }
     // 렌더러가 있어야 지오메트리 재구축을 알릴 수 있으므로 여기서 연다. 헤드리스에서는 콜라이더 메쉬만 남는다.
     for (const std::filesystem::path& path : options.modelPaths) {
@@ -857,9 +861,7 @@ editor::LoadStatus Application::loadStatus() const {
     return status;
 }
 
-void Application::saveScene(const std::filesystem::path& path) {
-    const scene::Scene& active = scenes.active();
-
+scene::ModelTable Application::usedModels(const scene::Scene& scene, scene::Scene& remapped) const {
     // 이 장면이 실제로 쓰는 모델만 적는다. 그래야 다시 열 때 필요한 것만 올린다.
     std::vector<int32_t> fileIndex(loadedModels.size(), -1);
     scene::ModelTable table;
@@ -871,8 +873,8 @@ void Application::saveScene(const std::filesystem::path& path) {
             table.meshCount.push_back(loadedModels[modelIndex].meshCount);
         }
     };
-    for (uint32_t object = 0; object < active.objects.size(); ++object) {
-        uint32_t mesh = active.meshOf(object);
+    for (uint32_t object = 0; object < scene.objects.size(); ++object) {
+        uint32_t mesh = scene.meshOf(object);
         for (uint32_t i = 0; i < loadedModels.size(); ++i) {
             if (!loadedModels[i].unloaded && mesh >= loadedModels[i].meshBase &&
                 mesh < loadedModels[i].meshBase + loadedModels[i].meshCount) {
@@ -881,17 +883,41 @@ void Application::saveScene(const std::filesystem::path& path) {
             }
         }
     }
-    for (const scene::Animator& animator : active.animators) {
+    for (const scene::Animator& animator : scene.animators) {
         if (animator.model >= 0) {
             useModel(static_cast<uint32_t>(animator.model));
         }
     }
-
     // 애니메이터가 가리키는 번호를 파일 안의 번호로 옮긴다.
-    scene::Scene remapped = active;
     for (scene::Animator& animator : remapped.animators) {
         animator.model = animator.model >= 0 ? fileIndex[static_cast<size_t>(animator.model)] : -1;
     }
+    return table;
+}
+
+std::string Application::copySubtree(const std::vector<uint32_t>& roots) {
+    scene::Scene remapped = scenes.active();
+    scene::ModelTable table = usedModels(scenes.active(), remapped);
+    return scene::writeSubtree(remapped, roots, table, assetRoot);
+}
+
+void Application::pasteSubtree(const std::string& text, int32_t parent) {
+    if (text.empty()) {
+        return;
+    }
+    scene::SceneFile loaded = scene::readScene(text);
+    resolveModels(loaded);
+    scene::Scene& active = scenes.active();
+    uint32_t first = scene::appendScene(active, loaded.scene, parent);
+    active.update(0.0F);
+    active.refresh();
+    spdlog::info("오브젝트 {} 개를 붙여넣음 (번호 {} 부터)", loaded.scene.objects.size(), first);
+}
+
+void Application::saveScene(const std::filesystem::path& path) {
+    const scene::Scene& active = scenes.active();
+    scene::Scene remapped = active;
+    scene::ModelTable table = usedModels(active, remapped);
 
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
@@ -905,15 +931,7 @@ void Application::saveScene(const std::filesystem::path& path) {
     spdlog::info("장면 저장: {}", path.string());
 }
 
-void Application::openScene(const std::filesystem::path& path) {
-    std::ifstream file(path);
-    if (!file) {
-        spdlog::error("장면을 열지 못했습니다: {}", path.string());
-        return;
-    }
-    std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    scene::SceneFile loaded = scene::readScene(text);
-
+void Application::resolveModels(scene::SceneFile& loaded) {
     // 적재는 지오메트리 버퍼를 다시 만드므로 진행 중인 프레임이 끝난 뒤에 한다.
     // ponytail: 장면 파일의 모델은 아직 동기로 올린다. 백그라운드 적재가 도는 중이면 같은 워커를 나눠
     // 써서 둘 다 느려질 뿐 결과는 옳다.
@@ -937,17 +955,7 @@ void Application::openScene(const std::filesystem::path& path) {
         geometry->build();
         renderer->onGeometryChanged();
     }
-
-    scene::Scene& created = scenes.create(loaded.scene.name);
-    // 파일에서 읽은 장면에는 번호가 없다. 관리자가 붙인 번호를 지킨다.
-    uint64_t sceneId = created.id;
-    created = std::move(loaded.scene);
-    created.id = sceneId;
-    created.colliderMeshes = &colliderMeshes;
-    // 모델과 같은 규칙: 상대 경로는 에셋 뿌리 기준으로 푼다.
-    if (!created.environment.hdrPath.empty() && !created.environment.hdrPath.is_absolute()) {
-        created.environment.hdrPath = assetRoot / created.environment.hdrPath;
-    }
+    scene::Scene& created = loaded.scene;
     auto resolved = [&](int32_t model) {
         return model >= 0 && static_cast<size_t>(model) < modelIndices.size() &&
                modelIndices[static_cast<size_t>(model)] < loadedModels.size();
@@ -963,8 +971,35 @@ void Application::openScene(const std::filesystem::path& path) {
     for (size_t i = 0; i < created.animators.size(); ++i) {
         int32_t model = loaded.animatorModels[i];
         if (resolved(model)) {
+            // 장면 안 번호가 아니라 적재 표의 번호로 바꿔 둔다. 저장할 때 usedModels 가 다시 파일 번호로 옮긴다.
+            created.animators[i].model = static_cast<int32_t>(modelIndices[model]);
             created.animators[i].skeleton = loadedModels[modelIndices[model]].skeleton;
+        } else {
+            // 못 올린 모델의 번호가 적재 표 번호로 오해되지 않게 비운다.
+            created.animators[i].model = -1;
         }
+    }
+}
+
+void Application::openScene(const std::filesystem::path& path) {
+    std::ifstream file(path);
+    if (!file) {
+        spdlog::error("장면을 열지 못했습니다: {}", path.string());
+        return;
+    }
+    std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    scene::SceneFile loaded = scene::readScene(text);
+    resolveModels(loaded);
+
+    scene::Scene& created = scenes.create(loaded.scene.name);
+    // 파일에서 읽은 장면에는 번호가 없다. 관리자가 붙인 번호를 지킨다.
+    uint64_t sceneId = created.id;
+    created = std::move(loaded.scene);
+    created.id = sceneId;
+    created.colliderMeshes = &colliderMeshes;
+    // 모델과 같은 규칙: 상대 경로는 에셋 뿌리 기준으로 푼다.
+    if (!created.environment.hdrPath.empty() && !created.environment.hdrPath.is_absolute()) {
+        created.environment.hdrPath = assetRoot / created.environment.hdrPath;
     }
     created.update(0.0F);
     created.refresh();

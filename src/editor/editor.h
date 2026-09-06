@@ -60,6 +60,11 @@ public:
     void setSceneIo(std::filesystem::path root,
                     std::function<void(const std::filesystem::path&)> saver,
                     std::function<void(const std::filesystem::path&)> opener);
+    // 서브트리 복사·붙여넣기. copier 는 고른 오브젝트들을 장면 파일 형식 문자열로, paster 는 그 문자열을 활성 장면의
+    // parent 아래에 붙인다. 프리팹 파일은 root 아래 *.json 이다.
+    void setSubtreeIo(std::filesystem::path root,
+                      std::function<std::string(const std::vector<uint32_t>&)> copier,
+                      std::function<void(const std::string&, int32_t)> paster);
     // 메뉴 «미사용 모델 해제»가 부르는 함수. 되돌리기 기록을 비운 뒤 부른다.
     void setModelCollector(std::function<void()> collector) { modelCollector = std::move(collector); }
     // 플러그인이 «렌더 설정» 창 끝에 자기 절을 그리는 훅. 애플리케이션이 잇는다.
@@ -95,6 +100,8 @@ private:
     void closeScene(scene::SceneManager& scenes, size_t index);
     void duplicateSelection(scene::Scene& active);
     void deleteSelection(scene::Scene& active);
+    void copySelection();
+    void pasteClipboard(int32_t parent);
     void unparentSelection(scene::Scene& active);
     // 부모를 바꾸되 화면에서의 위치는 그대로 둔다. 순환이면 아무것도 하지 않는다.
     void reparent(scene::Scene& active, int child, int parent);
@@ -176,8 +183,17 @@ private:
     std::filesystem::path pendingSceneSave;
     std::filesystem::path pendingSceneOpen;
     std::array<char, 256> sceneNameInput{};
+    // 서브트리 복사·프리팹. 클립보드는 문자열이라 장면 사이에서도 통한다(OS 클립보드와는 무관).
+    std::function<std::string(const std::vector<uint32_t>&)> subtreeCopier;
+    std::function<void(const std::string&, int32_t)> subtreePaster;
+    std::string clipboard;
+    std::filesystem::path prefabRoot;
+    std::vector<std::filesystem::path> prefabFiles;
+    std::array<char, 256> prefabNameInput{};
+    // 프리팹 불러오기 팝업이 붙일 부모. 우클릭 «자식 추가»에서 열면 그 오브젝트다.
+    int32_t prefabParent = -1;
     // 메뉴나 우클릭에서 요청한 팝업. 다음 프레임 도킹 호스트가 연다.
-    enum class PopupRequest { NONE, SAVE_SCENE, OPEN_SCENE, LOAD_MODEL };
+    enum class PopupRequest { NONE, SAVE_SCENE, OPEN_SCENE, LOAD_MODEL, SAVE_PREFAB, LOAD_PREFAB };
     PopupRequest popupRequest = PopupRequest::NONE;
     // 메뉴 «편집»에서 고른 되돌리기/다시 실행. updateHistory 가 단축키와 같은 길로 처리한다.
     bool menuUndo = false;

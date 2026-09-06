@@ -61,6 +61,19 @@ void Editor::buildMenuBar(scene::SceneManager& scenes, const gfx::GeometryStore&
         if (ImGui::MenuItem("부모 해제", nullptr, false, anySelected)) {
             deferred = [this, &active] { unparentSelection(active); };
         }
+        ImGui::Separator();
+        if (ImGui::MenuItem("복사", "Ctrl+C", false, anySelected && static_cast<bool>(subtreeCopier))) {
+            copySelection();
+        }
+        if (ImGui::MenuItem("붙여넣기", "Ctrl+V", false, !clipboard.empty() && static_cast<bool>(subtreePaster))) {
+            deferred = [this] { pasteClipboard(-1); };
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("복사한 오브젝트와 자손을 이 장면의 뿌리에 붙인다. 다른 장면에서 복사한 것도 된다");
+        }
+        if (ImGui::MenuItem("프리팹으로 저장...", nullptr, false, anySelected && static_cast<bool>(subtreeCopier))) {
+            popupRequest = PopupRequest::SAVE_PREFAB;
+        }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("오브젝트")) {
@@ -126,6 +139,29 @@ void Editor::buildPopups(scene::SceneManager& scenes) {
         ImGui::OpenPopup("장면 열기");
         break;
     }
+    case PopupRequest::SAVE_PREFAB: {
+        int primary = primarySelection();
+        std::string suggested = (primary >= 0 && primary < static_cast<int>(scenes.active().objects.size())
+                                     ? scenes.active().objects[static_cast<size_t>(primary)].name
+                                     : std::string{"프리팹"}) +
+                                ".json";
+        std::copy_n(suggested.c_str(), std::min(suggested.size() + 1, prefabNameInput.size()), prefabNameInput.begin());
+        prefabNameInput.back() = '\0';
+        ImGui::OpenPopup("프리팹 저장");
+        break;
+    }
+    case PopupRequest::LOAD_PREFAB: {
+        prefabFiles.clear();
+        std::error_code error;
+        for (const auto& entry : std::filesystem::directory_iterator(prefabRoot, error)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".json") {
+                prefabFiles.push_back(entry.path());
+            }
+        }
+        std::ranges::sort(prefabFiles);
+        ImGui::OpenPopup("프리팹 불러오기");
+        break;
+    }
     case PopupRequest::LOAD_MODEL: {
         // 팝업을 열 때마다 다시 훑는다. 실행 중에 파일이 늘어날 수 있다.
         modelFiles.clear();
@@ -163,6 +199,53 @@ void Editor::buildPopups(scene::SceneManager& scenes) {
         for (const std::filesystem::path& file : sceneFiles) {
             if (ImGui::Selectable(file.filename().string().c_str())) {
                 pendingSceneOpen = file;
+            }
+        }
+        ImGui::EndPopup();
+    }
+    if (ImGui::BeginPopup("프리팹 저장")) {
+        ImGui::TextDisabled("%s", prefabRoot.string().c_str());
+        ImGui::SetNextItemWidth(280.0F);
+        ImGui::InputText("파일 이름", prefabNameInput.data(), prefabNameInput.size());
+        ImGui::SameLine();
+        if (ImGui::Button("저장##프리팹") && prefabNameInput[0] != '\0' && subtreeCopier) {
+            std::vector<uint32_t> roots;
+            for (int selected : selection) {
+                if (selected >= 0) {
+                    roots.push_back(static_cast<uint32_t>(selected));
+                }
+            }
+            std::filesystem::path path = prefabRoot / prefabNameInput.data();
+            std::error_code error;
+            std::filesystem::create_directories(prefabRoot, error);
+            // 바이너리 모드: 장면 파일과 같은 이유(LF).
+            std::ofstream file(path, std::ios::binary);
+            if (file) {
+                file << subtreeCopier(roots);
+                spdlog::info("프리팹 저장: {}", path.string());
+            } else {
+                spdlog::error("프리팹을 저장하지 못했습니다: {}", path.string());
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    if (ImGui::BeginPopup("프리팹 불러오기")) {
+        if (prefabFiles.empty()) {
+            ImGui::TextDisabled("%s 에 프리팹이 없습니다", prefabRoot.string().c_str());
+        }
+        for (const std::filesystem::path& file : prefabFiles) {
+            if (ImGui::Selectable(file.filename().string().c_str())) {
+                std::ifstream stream(file, std::ios::binary);
+                std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+                int32_t parent = prefabParent;
+                // 팝업 안에서 장면을 바꾸면 그리기 도중이라 미룬다.
+                deferred = [this, text = std::move(text), parent] {
+                    if (subtreePaster) {
+                        subtreePaster(text, parent);
+                    }
+                };
+                ImGui::CloseCurrentPopup();
             }
         }
         ImGui::EndPopup();
@@ -233,6 +316,10 @@ void Editor::buildCreateItems(scene::Scene& active, const gfx::GeometryStore& ge
     }
     if (ImGui::MenuItem("카메라")) {
         deferred = [this, &active, parent] { createCameraObject(active, parent); };
+    }
+    if (ImGui::MenuItem("프리팹 불러오기...", nullptr, false, static_cast<bool>(subtreePaster))) {
+        prefabParent = parent;
+        popupRequest = PopupRequest::LOAD_PREFAB;
     }
     if (ImGui::BeginMenu("조명")) {
         constexpr std::array<const char*, 4> LIGHT_NAMES{"방향광", "점광", "스폿광", "영역광"};
@@ -339,6 +426,24 @@ void Editor::duplicateSelection(scene::Scene& active) {
     selection = std::move(copies);
 }
 
+void Editor::copySelection() {
+    std::vector<uint32_t> roots;
+    for (int selected : selection) {
+        if (selected >= 0) {
+            roots.push_back(static_cast<uint32_t>(selected));
+        }
+    }
+    if (!roots.empty() && subtreeCopier) {
+        clipboard = subtreeCopier(roots);
+    }
+}
+
+void Editor::pasteClipboard(int32_t parent) {
+    if (!clipboard.empty() && subtreePaster) {
+        subtreePaster(clipboard, parent);
+    }
+}
+
 void Editor::deleteSelection(scene::Scene& active) {
     // 하나씩 지우면 첫 삭제가 인덱스를 밀어 나머지가 엉뚱한 것을 가리킨다. 한 번에 넘긴다.
     std::vector<uint32_t> doomed;
@@ -392,6 +497,10 @@ void Editor::handleShortcuts(scene::SceneManager& scenes, const gfx::GeometrySto
             popupRequest = PopupRequest::SAVE_SCENE;
         } else if (ImGui::IsKeyPressed(ImGuiKey_D, false) && hasSelection()) {
             duplicateSelection(active);
+        } else if (ImGui::IsKeyPressed(ImGuiKey_C, false) && hasSelection()) {
+            copySelection();
+        } else if (ImGui::IsKeyPressed(ImGuiKey_V, false)) {
+            pasteClipboard(-1);
         } else if (ImGui::IsKeyPressed(ImGuiKey_P, false)) {
             if (active.simulating) {
                 stopSimulation(scenes);
@@ -402,6 +511,14 @@ void Editor::handleShortcuts(scene::SceneManager& scenes, const gfx::GeometrySto
     } else if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && hasSelection()) {
         deleteSelection(active);
     }
+}
+
+void Editor::setSubtreeIo(std::filesystem::path root,
+                          std::function<std::string(const std::vector<uint32_t>&)> copier,
+                          std::function<void(const std::string&, int32_t)> paster) {
+    prefabRoot = std::move(root);
+    subtreeCopier = std::move(copier);
+    subtreePaster = std::move(paster);
 }
 
 void Editor::setModelLoader(std::filesystem::path root, std::function<void(const std::filesystem::path&)> loader) {

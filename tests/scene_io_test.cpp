@@ -260,6 +260,50 @@ int main() {
     rebuilt.attachMeshRenderer(2, 3, rebuilt.skinOf(2));
     assert(scene::writeScene(rebuilt, table) == text && "왕복해도 같은 파일이 나와야 한다");
 
+    // 서브트리 복사: 뿌리와 자손만 남고, 붙일 때 부모·부품 첨자·관절 상대 번호가 밀린다.
+    {
+        scene::Scene source;
+        source.objects.resize(4);
+        source.objects[0].name = "다른 뿌리";
+        source.objects[1].name = "뿌리";
+        source.objects[2].name = "자식";
+        source.objects[2].parent = 1;
+        source.objects[3].name = "손자";
+        source.objects[3].parent = 2;
+        source.lights.resize(2);
+        source.objects[0].light = 0;
+        source.objects[2].light = 1;
+        source.lights[1].intensity = 7.0F;
+        source.joints.resize(1);
+        source.joints[0].other = 2;
+        source.objects[3].joint = 0;
+        source.rigidBodies.resize(2);
+        source.objects[1].rigidBody = 1;
+        source.objects[2].rigidBody = 0;
+
+        std::string prefab = scene::writeSubtree(source, {1}, scene::ModelTable{});
+        scene::SceneFile piece = scene::readScene(prefab);
+        assert(piece.scene.objects.size() == 3 && piece.scene.objects[0].parent == -1);
+        assert(piece.scene.lights.size() == 1 && std::abs(piece.scene.lights[0].intensity - 7.0F) < 1e-5F);
+        assert(piece.scene.joints.size() == 1 && piece.scene.joints[0].other == 1 &&
+               "관절 상대 번호가 서브트리 안 번호로 밀린다");
+
+        scene::Scene target;
+        target.objects.resize(2);
+        target.lights.resize(3);
+        target.objects[1].light = 2;
+        uint32_t first = scene::appendScene(target, piece.scene, 1);
+        assert(first == 2 && target.objects.size() == 5);
+        assert(target.objects[2].parent == 1 && target.objects[3].parent == 2 && target.objects[4].parent == 3);
+        assert(target.objects[3].light == 3 && target.lights.size() == 4);
+        assert(target.objects[2].rigidBody == 1 && target.objects[3].rigidBody == 0 && target.rigidBodies.size() == 2);
+        assert(target.joints.size() == 1 && target.joints[0].other == 3 && target.objects[4].joint == 0);
+        // 뿌리 밖 부모는 뿌리로 간다.
+        scene::Scene another;
+        uint32_t base = scene::appendScene(another, piece.scene, 9);
+        assert(base == 0 && another.objects[0].parent == -1);
+    }
+
     std::printf("장면 저장/불러오기 자체 점검 통과\n");
     return 0;
 }
