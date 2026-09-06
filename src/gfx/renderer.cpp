@@ -372,6 +372,7 @@ void Renderer::recordCommands(Frame& frame,
     //
     // 아래 지역 변수들은 노드가 참조로 잡으므로 execute 가 이 함수 안에서 끝나야 한다. 앞 노드가 정하고
     // 뒤 노드가 읽는 값(rayQueryPass, sceneLayout, 톤 매핑 푸시 상수 등)도 같은 이유로 지역 변수다.
+    uint32_t graphZone = frameProfiler.begin("그래프 구성");
     graph.clear();
 
     bool hasTranslucent = batches.draws[TRANSLUCENT_MODE][0].count + batches.draws[TRANSLUCENT_MODE][1].count > 0;
@@ -1057,13 +1058,7 @@ void Renderer::recordCommands(Frame& frame,
         tonemapReads.push_back(storage(
             targets.upscaledColor, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT));
     }
-    graph.add({"톤 매핑",
-               "톤 매핑",
-               {},
-               std::move(tonemapReads),
-               {colorWrite(tonemapTarget, true)},
-               {},
-               [&](VkCommandBuffer cmd) {
+    graph.add({"톤 매핑", "톤 매핑", {}, tonemapReads, {colorWrite(tonemapTarget, true)}, {}, [&](VkCommandBuffer cmd) {
                    VkRenderingAttachmentInfo tonemappedColor =
                        colorAttachment(tonemapTarget.view, VK_ATTACHMENT_LOAD_OP_DONT_CARE, {});
                    VkRenderingInfo tonemapPass{VK_STRUCTURE_TYPE_RENDERING_INFO};
@@ -1259,6 +1254,7 @@ void Renderer::recordCommands(Frame& frame,
         hook(graph, info);
     }
 
+    frameProfiler.end(graphZone);
     graph.execute(commandBuffer, frameProfiler);
 
     frameProfiler.end(frameZone, commandBuffer);

@@ -18,17 +18,36 @@ constexpr VkAccessFlags2 WRITE_ACCESS = VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS
 
 void RenderGraph::clear() {
     nodes.clear();
+    uses.clear();
     executed.clear();
 }
 
+RenderGraph::UseRange RenderGraph::store(ImageUseList list) {
+    UseRange range{static_cast<uint32_t>(uses.size()), static_cast<uint32_t>(list.count)};
+    uses.insert(uses.end(), list.data, list.data + list.count);
+    return range;
+}
+
+RenderGraph::Node RenderGraph::makeNode(RenderNode&& node) {
+    Node stored;
+    stored.name = node.name;
+    stored.zone = node.zone;
+    stored.enabled = std::move(node.enabled);
+    stored.reads = store(node.reads);
+    stored.writes = store(node.writes);
+    stored.leaves = store(node.leaves);
+    stored.record = std::move(node.record);
+    return stored;
+}
+
 void RenderGraph::add(RenderNode node) {
-    nodes.push_back(std::move(node));
+    nodes.push_back(makeNode(std::move(node)));
 }
 
 void RenderGraph::addAfter(const char* anchor, RenderNode node) {
     for (size_t i = 0; i < nodes.size(); ++i) {
         if (std::strcmp(nodes[i].name, anchor) == 0) {
-            nodes.insert(nodes.begin() + static_cast<std::ptrdiff_t>(i) + 1, std::move(node));
+            nodes.insert(nodes.begin() + static_cast<std::ptrdiff_t>(i) + 1, makeNode(std::move(node)));
             return;
         }
     }
@@ -56,20 +75,21 @@ void RenderGraph::transition(VkCommandBuffer commandBuffer, const ImageUse& use,
 
 void RenderGraph::execute(VkCommandBuffer commandBuffer, GpuProfiler& profiler) {
     executed.clear();
-    for (RenderNode& node : nodes) {
+    for (Node& node : nodes) {
         if (node.enabled && !node.enabled()) {
             continue;
         }
         executed.push_back(node.name);
         uint32_t zone = node.zone != nullptr ? profiler.begin(node.zone, commandBuffer) : 0;
-        for (const ImageUse& use : node.reads) {
-            transition(commandBuffer, use, false);
+        for (uint32_t i = 0; i < node.reads.count; ++i) {
+            transition(commandBuffer, uses[node.reads.first + i], false);
         }
-        for (const ImageUse& use : node.writes) {
-            transition(commandBuffer, use, true);
+        for (uint32_t i = 0; i < node.writes.count; ++i) {
+            transition(commandBuffer, uses[node.writes.first + i], true);
         }
         node.record(commandBuffer);
-        for (const ImageUse& use : node.leaves) {
+        for (uint32_t i = 0; i < node.leaves.count; ++i) {
+            const ImageUse& use = uses[node.leaves.first + i];
             states[use.image] = State{use.layout, use.stage, use.access};
         }
         if (node.zone != nullptr) {

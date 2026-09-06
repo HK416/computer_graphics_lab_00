@@ -1,6 +1,9 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <unordered_map>
 #include <vector>
 
@@ -22,6 +25,16 @@ struct ImageUse {
     bool discard = false;
 };
 
+// 노드 등록에 넘기는 이미지 사용 목록. 중괄호 목록이나 벡터를 가리키기만 하고 add 가 그 자리에서 그래프의
+// 아레나로 복사한다. 중괄호 목록의 배열은 add(...) 식이 끝날 때까지 살아 있으므로 그 안에서만 쓴다.
+struct ImageUseList {
+    const ImageUse* data = nullptr;
+    size_t count = 0;
+    ImageUseList() = default;
+    ImageUseList(std::initializer_list<ImageUse> uses) : data(uses.begin()), count(uses.size()) {}
+    ImageUseList(const std::vector<ImageUse>& uses) : data(uses.data()), count(uses.size()) {}
+};
+
 // 프레임의 패스 하나. 이름은 수명이 프로그램 전체인 리터럴이어야 한다(ran·addAfter 가 이름으로 찾는다).
 struct RenderNode {
     const char* name = nullptr;
@@ -30,11 +43,11 @@ struct RenderNode {
     // 실행 직전에 평가한다. 앞 노드가 정한 값(가속 구조 준비 여부 등)에 기댈 수 있다. 비어 있으면 늘 돈다.
     std::function<bool()> enabled;
     // 기록 전에 이 상태로 옮긴다. reads 는 같은 레이아웃의 읽기가 이어지면 배리어를 내지 않고, writes 는 늘 낸다.
-    std::vector<ImageUse> reads;
-    std::vector<ImageUse> writes;
+    ImageUseList reads;
+    ImageUseList writes;
     // 기록 뒤의 상태. 패스 안에서 스스로 전이하고 나온 이미지(층·밉 단위 전이, 컴퓨트가 도로 첨부물로 돌린
     // 것)를 그래프에 알린다. 배리어는 내지 않는다.
-    std::vector<ImageUse> leaves;
+    ImageUseList leaves;
     std::function<void(VkCommandBuffer)> record;
 };
 
@@ -48,7 +61,9 @@ struct RenderNode {
 // 표현되어 DAG 정렬이 필요 없다.
 // ponytail: 층·밉 단위 전이(그림자 아틀라스, HZB, Bloom)는 패스 안에 남는다. 그런 패스는 leaves 로 자기가
 // 남긴 상태를 알려야 한다. 스왑체인 이미지는 프레임마다 새로 받으므로 추적하지 않고 노드 안에서 전이한다.
-// ponytail: 노드 목록을 프레임마다 다시 짠다(std::function 30여 개). 프레임 CPU 시간에서 보이지 않는다.
+// 노드 목록은 프레임마다 다시 짠다(std::function 40여 개). 이미지 사용 목록은 노드마다 벡터를 잡지 않고 그래프가
+// 든 아레나 하나에 이어 담아 프레임당 힙 할당이 없다. «그래프 구성» 구간이 0.01 ms 대라(헬멧·조명 64·천 장면) 노드
+// 목록을 프레임 너머로 남기는 일은 하지 않는다 — 노드가 지역 변수를 참조로 잡는 지금 구조가 더 단순하다.
 class RenderGraph {
 public:
     void clear();
@@ -70,9 +85,27 @@ private:
         VkPipelineStageFlags2 stage = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
         VkAccessFlags2 access = VK_ACCESS_2_NONE;
     };
+    // 아레나 안의 구간.
+    struct UseRange {
+        uint32_t first = 0;
+        uint32_t count = 0;
+    };
+    struct Node {
+        const char* name = nullptr;
+        const char* zone = nullptr;
+        std::function<bool()> enabled;
+        UseRange reads;
+        UseRange writes;
+        UseRange leaves;
+        std::function<void(VkCommandBuffer)> record;
+    };
+    UseRange store(ImageUseList list);
+    Node makeNode(RenderNode&& node);
     void transition(VkCommandBuffer commandBuffer, const ImageUse& use, bool write);
 
-    std::vector<RenderNode> nodes;
+    std::vector<Node> nodes;
+    // 모든 노드의 reads/writes/leaves 를 이어 담는다. clear 가 비우기만 하고 용량은 남긴다.
+    std::vector<ImageUse> uses;
     std::vector<const char*> executed;
     std::unordered_map<VkImage, State> states;
 };
