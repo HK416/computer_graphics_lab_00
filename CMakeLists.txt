@@ -212,6 +212,12 @@ add_executable(cg_lab
     src/core/error.cpp
     src/core/job_system.cpp
     src/editor/editor.cpp
+    src/editor/editor_hierarchy.cpp
+    src/editor/editor_history.cpp
+    src/editor/editor_inspector.cpp
+    src/editor/editor_menu.cpp
+    src/editor/editor_scene_view.cpp
+    src/editor/editor_settings.cpp
     src/gfx/context.cpp
     src/gfx/debug_lines.cpp
     src/gfx/environment.cpp
