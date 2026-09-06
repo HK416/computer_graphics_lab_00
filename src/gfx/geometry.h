@@ -66,8 +66,17 @@ struct GpuMaterial {
     uint32_t emissiveTexture;
     uint32_t alphaMode;
     uint32_t flags; // MATERIAL_FLAG_*
-    uint32_t padding;
+    uint32_t transmissionTexture;
+    // x 투과, y 굴절률, z 클리어코트, w 클리어코트 거칠기.
+    glm::vec4 transmissionIorClearcoat;
+    // xyz 시인 색, w 시인 거칠기.
+    glm::vec4 sheenColorRoughness;
+    uint32_t clearcoatTexture;
+    uint32_t clearcoatRoughnessTexture;
+    uint32_t sheenColorTexture;
+    uint32_t sheenRoughnessTexture;
 };
+static_assert(sizeof(GpuMaterial) == 128, "재질 배치가 셰이더와 어긋난다");
 
 // GpuMaterial::flags. shaders/scene_types.glsl 의 MATERIAL_FLAG_* 와 같아야 한다.
 inline constexpr uint32_t MATERIAL_FLAG_DOUBLE_SIDED = 1U;

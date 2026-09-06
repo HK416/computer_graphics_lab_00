@@ -118,7 +118,13 @@ struct Material {
     uint emissiveTexture;
     uint alphaMode;
     uint flags;
-    uint padding;
+    uint transmissionTexture;
+    vec4 transmissionIorClearcoat; // x 투과, y 굴절률, z 클리어코트, w 클리어코트 거칠기
+    vec4 sheenColorRoughness;      // xyz 시인 색, w 시인 거칠기
+    uint clearcoatTexture;
+    uint clearcoatRoughnessTexture;
+    uint sheenColorTexture;
+    uint sheenRoughnessTexture;
 };
 
 // 스킨이 없는 인스턴스의 조인트 오프셋.

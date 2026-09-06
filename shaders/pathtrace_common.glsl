@@ -25,6 +25,14 @@ struct PathPayload {
     // 흡수로 잇는다.
     bool water;
     vec3 absorption;
+    // 확장 재질. transmission 이 0 보다 크면 그 확률로 유전체 굴절(ior)을 고른다. backFace 는 굴절의 안팎 판정.
+    float transmission;
+    float ior;
+    bool backFace;
+    float clearcoat;
+    float clearcoatRoughness;
+    vec3 sheenColor;
+    float sheenRoughness;
 };
 
 // 1차 히트에서 건져 두는 값들. 경로 루프가 페이로드를 덮어쓰기 전에 복사해 둔다.

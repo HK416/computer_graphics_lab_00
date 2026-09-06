@@ -66,4 +66,11 @@ void main() {
     payload.uv = hit.uv;
     payload.hitDistance = gl_HitTEXT;
     payload.missed = false;
+    payload.transmission = surface.transmission;
+    payload.ior = surface.ior;
+    payload.backFace = gl_HitKindEXT == gl_HitKindBackFacingTriangleEXT;
+    payload.clearcoat = surface.clearcoat;
+    payload.clearcoatRoughness = surface.clearcoatRoughness;
+    payload.sheenColor = surface.sheenColor;
+    payload.sheenRoughness = surface.sheenRoughness;
 }

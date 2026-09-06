@@ -56,6 +56,10 @@ vec4 shadeSurface(out vec4 normalRoughness, out vec3 reflectionWeight, out vec4 
     surface.albedo = sampled.albedo;
     surface.metallic = sampled.metallic;
     surface.roughness = sampled.roughness;
+    surface.clearcoat = sampled.clearcoat;
+    surface.clearcoatRoughness = sampled.clearcoatRoughness;
+    surface.sheenColor = sampled.sheenColor;
+    surface.sheenRoughness = sampled.sheenRoughness;
 
     // 조명이 많아도 그냥 훑는다. ReSTIR 직접광(camera.flags.y)이 켜져 있으면 불투명·컷오프 픽셀은 restir_di.comp
     // 가 직접광을 맡으므로 건너뛴다. 반투명은 화면 공간 표면이 없어 루프를 그대로 돈다.
@@ -100,7 +104,20 @@ vec4 shadeSurface(out vec4 normalRoughness, out vec3 reflectionWeight, out vec4 
                      -surface.view,
                      length(inWorldPosition - cameraPosition));
 
-    float alpha = ALPHA_MODE_VARIANT == ALPHA_MODE_TRANSLUCENT ? sampled.alpha : 1.0;
+    // 투과 재질은 OIT 로 그리고 투과만큼 알파를 깎되, 유리의 반사가 보이도록 프레넬(F0 0.04, 매끈할수록 강하게)만큼은
+    // 남긴다. 굴절은 없다(경로 추적만).
+    //
+    // ponytail: 얇은 유리의 스페큘러는 알파와 무관하게 더해져야 맞다. OIT 누적이 색에 알파를 곱하는 한 벌이라 프레넬로
+    // 알파를 떠받치는 근사를 쓴다. 가장자리는 반사가, 가운데는 뒤가 보인다.
+    float alpha = 1.0;
+    if (ALPHA_MODE_VARIANT == ALPHA_MODE_TRANSLUCENT) {
+        alpha = sampled.alpha * (1.0 - sampled.transmission);
+        if (sampled.transmission > 0.0) {
+            float nDotV = max(dot(surface.normal, surface.view), 0.0);
+            float glassFresnel = 0.04 + 0.96 * pow(1.0 - nDotV, 5.0);
+            alpha = max(alpha, glassFresnel * (1.0 - surface.roughness) * sampled.transmission);
+        }
+    }
     return vec4(color, alpha);
 }
 

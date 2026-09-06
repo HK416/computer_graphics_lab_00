@@ -213,6 +213,12 @@ std::vector<bool> collectSrgbFlags(const cgltf_data& data) {
         if (emissive != INVALID_TEXTURE) {
             srgb[emissive] = true;
         }
+        if (material.has_sheen != 0) {
+            uint32_t sheen = textureIndex(material.sheen.sheen_color_texture, data);
+            if (sheen != INVALID_TEXTURE) {
+                srgb[sheen] = true;
+            }
+        }
     }
     return srgb;
 }
@@ -239,6 +245,33 @@ Material convertMaterial(const cgltf_material& source, const cgltf_data& data) {
         material.baseColorTexture = textureIndex(source.pbr_metallic_roughness.base_color_texture, data);
         material.metallicRoughnessTexture =
             textureIndex(source.pbr_metallic_roughness.metallic_roughness_texture, data);
+    }
+    if (source.has_transmission != 0) {
+        material.transmissionFactor = source.transmission.transmission_factor;
+        material.transmissionTexture = textureIndex(source.transmission.transmission_texture, data);
+        // 래스터는 투과 재질을 OIT 로 그리고(알파 = 1 - 투과), 경로 추적은 안팎을 다 맞혀야 굴절해 나간다.
+        // ponytail: MASK 재질은 컷오프 경로에 남아 래스터가 투과를 무시한다(경로 추적은 굴절한다).
+        if (material.transmissionFactor > 0.0F || material.transmissionTexture != INVALID_TEXTURE) {
+            if (material.alphaMode == AlphaMode::SOLID) {
+                material.alphaMode = AlphaMode::TRANSLUCENT;
+            }
+            material.doubleSided = true;
+        }
+    }
+    if (source.has_ior != 0) {
+        material.ior = source.ior.ior;
+    }
+    if (source.has_clearcoat != 0) {
+        material.clearcoatFactor = source.clearcoat.clearcoat_factor;
+        material.clearcoatRoughnessFactor = source.clearcoat.clearcoat_roughness_factor;
+        material.clearcoatTexture = textureIndex(source.clearcoat.clearcoat_texture, data);
+        material.clearcoatRoughnessTexture = textureIndex(source.clearcoat.clearcoat_roughness_texture, data);
+    }
+    if (source.has_sheen != 0) {
+        material.sheenColorFactor = glm::make_vec3(source.sheen.sheen_color_factor);
+        material.sheenRoughnessFactor = source.sheen.sheen_roughness_factor;
+        material.sheenColorTexture = textureIndex(source.sheen.sheen_color_texture, data);
+        material.sheenRoughnessTexture = textureIndex(source.sheen.sheen_roughness_texture, data);
     }
     return material;
 }

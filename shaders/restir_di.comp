@@ -111,6 +111,8 @@ bool loadSurface(RestirSlots slots, Camera camera, vec2 uv, out Surface surface)
     surface.view = normalize(camera.position.xyz - surface.position);
     surface.albedo = albedoMetallic.rgb;
     surface.metallic = albedoMetallic.a;
+    // ponytail: G-버퍼에 코트·시인 자리가 없어 ReSTIR 직접광은 기본 로브만 본다.
+    clearSurfaceExtensions(surface);
     return true;
 }
 

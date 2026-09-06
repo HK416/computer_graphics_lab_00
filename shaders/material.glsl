@@ -13,6 +13,13 @@ struct MaterialSample {
     float roughness;
     float occlusion;
     vec3 emissive;
+    // KHR_materials_transmission / ior / clearcoat / sheen. 확장이 없는 재질은 전부 0(굴절률 1.5)이다.
+    float transmission;
+    float ior;
+    float clearcoat;
+    float clearcoatRoughness;
+    vec3 sheenColor;
+    float sheenRoughness;
 };
 
 MaterialSample sampleMaterial(Material material, vec2 uv) {
@@ -46,6 +53,31 @@ MaterialSample sampleMaterial(Material material, vec2 uv) {
     if (material.emissiveTexture != INVALID_TEXTURE) {
         result.emissive *= sampleBindless(material.emissiveTexture, uv).rgb;
     }
+
+    // 확장 재질. 텍스처 채널은 glTF 규격대로(투과 r, 클리어코트 r, 클리어코트 거칠기 g, 시인 색 rgb, 시인 거칠기 a).
+    result.transmission = material.transmissionIorClearcoat.x;
+    if (material.transmissionTexture != INVALID_TEXTURE) {
+        result.transmission *= sampleBindless(material.transmissionTexture, uv).r;
+    }
+    result.ior = material.transmissionIorClearcoat.y;
+    result.clearcoat = material.transmissionIorClearcoat.z;
+    if (material.clearcoatTexture != INVALID_TEXTURE) {
+        result.clearcoat *= sampleBindless(material.clearcoatTexture, uv).r;
+    }
+    result.clearcoatRoughness = material.transmissionIorClearcoat.w;
+    if (material.clearcoatRoughnessTexture != INVALID_TEXTURE) {
+        result.clearcoatRoughness *= sampleBindless(material.clearcoatRoughnessTexture, uv).g;
+    }
+    result.clearcoatRoughness = clamp(result.clearcoatRoughness, 0.03, 1.0);
+    result.sheenColor = material.sheenColorRoughness.rgb;
+    if (material.sheenColorTexture != INVALID_TEXTURE) {
+        result.sheenColor *= sampleBindless(material.sheenColorTexture, uv).rgb;
+    }
+    result.sheenRoughness = material.sheenColorRoughness.w;
+    if (material.sheenRoughnessTexture != INVALID_TEXTURE) {
+        result.sheenRoughness *= sampleBindless(material.sheenRoughnessTexture, uv).a;
+    }
+    result.sheenRoughness = clamp(result.sheenRoughness, 0.03, 1.0);
     return result;
 }
 

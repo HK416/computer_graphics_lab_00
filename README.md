@@ -725,6 +725,27 @@ Bloom 은 **임계값을 넘은 부분만** 번진다. 첫 다운샘플에서 `b
 `KHR_materials_emissive_strength` 를 읽어 곱한다. `tests/assets/emissive.gltf` 가 강도 12 짜리
 정육면체 하나로 이 경로를 확인하는 최소 자산이다.
 
+### 확장 재질
+
+`KHR_materials_transmission`·`ior`·`clearcoat`·`sheen` 을 읽는다. 값과 텍스처는 `GpuMaterial` 뒤쪽 48바이트에
+실리고, 셰이딩은 `material.glsl`(읽기)과 `lighting.glsl`(로브)에만 있어 래스터·경로 추적·반사·DDGI 가 같은
+식을 본다. 확장이 없는 재질은 로브를 분기로 건너뛰어 옛 결과와 비트 단위로 같다(헬멧 캡처가 전후 동일).
+
+- **클리어코트**: 기하 노멀 위의 얇은 유전체 층(F0 0.04, 자기 거칠기). 아래 층은 코트 프레넬만큼 깎이고, 직접광과
+  IBL 스페큘러 둘 다 코트 로브를 더한다. 광선 반사 컴퓨트는 코트를 모르므로 반사 대상 픽셀도 코트 반사는 IBL 로 넣는다.
+- **시인**: Charlie 분포 + Ashikhmin 가시성. 스치는 각도에서만 보이므로 정육면체로는 확인이 안 되고
+  `tests/assets/sheen.gltf` 의 구로 본다. 규격의 방향 알베도 표 대신 아래 층을 상수(0.25 × 시인 최대값)로 깎고, 환경광
+  시인은 없다(ponytail).
+- **투과**: 경로 추적은 투과 비율의 확률로 유전체 사건(굴절률 `ior`, 물과 같은 `sampleDielectric`)을 고르고 통과하는
+  빛에 기저 색을 곱한다(`KHR_materials_volume` 의 두께·흡수는 읽지 않는다). 투과 재질은 적재 때 양면·반투명으로 바꿔
+  래스터가 OIT 로 그리는데, 굴절은 없고 알파를 `(1 − 투과)` 로 깎되 유리의 반사가 보이도록 프레넬만큼은 남긴다.
+  MASK 재질의 투과는 래스터가 무시한다. 반사·프로브 광선이 맞힌 투과 재질은 불투명으로 셰이딩한다(ponytail).
+- ReSTIR 직접광은 G-버퍼에 코트·시인 자리가 없어 기본 로브만 본다(ponytail).
+
+점검 자산: `public/assets/ClearCoatTest.glb`(© 2020 Analytical Graphics, Inc., CC BY 4.0, Ed Mackey),
+`public/assets/TransmissionTest.glb`(© 2020 Adobe, CC0) — 둘 다 KhronosGroup/glTF-Sample-Assets 에서 가져왔다.
+`--model` 로 열고 `--pathtrace` 와 견준다. 시인 샘플은 전부 `KHR_texture_transform` 을 요구해(미지원) 위 구 자산을 쓴다.
+
 자동 노출은 **톤 매핑 앞의 HDR 원본**을 1/8 격자로 성기게 훑어 log2 휘도 히스토그램을 만든다.
 예전에는 Bloom 의 2단계 밉을 장면 휘도로 재사용했는데, Bloom 에 임계값이 생기면서 그 밉에는 밝은 곳만
 남아 노출이 무너진다. 시간축 업스케일이 없으면 화소 수와 디스패치 수가 예전과 정확히 같고, 있으면

@@ -196,6 +196,18 @@ struct Material {
     float occlusionStrength = 1.0F;
     AlphaMode alphaMode = AlphaMode::SOLID;
     bool doubleSided = false;
+    // KHR_materials_transmission / ior / clearcoat / sheen. 없으면 0 이라 셰이딩이 기본 재질과 비트 단위로 같다.
+    float transmissionFactor = 0.0F;
+    float ior = 1.5F;
+    float clearcoatFactor = 0.0F;
+    float clearcoatRoughnessFactor = 0.0F;
+    glm::vec3 sheenColorFactor{0.0F};
+    float sheenRoughnessFactor = 0.0F;
+    uint32_t transmissionTexture = INVALID_TEXTURE;
+    uint32_t clearcoatTexture = INVALID_TEXTURE;
+    uint32_t clearcoatRoughnessTexture = INVALID_TEXTURE;
+    uint32_t sheenColorTexture = INVALID_TEXTURE;
+    uint32_t sheenRoughnessTexture = INVALID_TEXTURE;
 
     // Model::textures 의 인덱스. 없으면 INVALID_TEXTURE.
     uint32_t baseColorTexture = INVALID_TEXTURE;

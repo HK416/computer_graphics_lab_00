@@ -34,6 +34,7 @@ void main() {
     surface.albedo = vec3(0.0);
     surface.metallic = 0.0;
     surface.roughness = clamp(push.waterColor.w, 0.02, 1.0);
+    clearSurfaceExtensions(surface);
 
     // 반사. 환경광과 조명 모두 다른 표면과 같은 함수를 쓴다. 두 함수가 이미 프레넬을 먹여 돌려주므로
     // 여기서 다시 곱하면 안 된다(0.04² 이 되어 물이 새까매진다).

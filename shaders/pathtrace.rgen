@@ -157,17 +157,17 @@ vec3 sampleBsdf(Surface surface, inout uint seed, out vec3 direction) {
     return (vec3(1.0) - fresnel) * (1.0 - surface.metallic) * surface.albedo / (1.0 - specularProbability);
 }
 
-// 물 표면의 다음 방향. 유전체(굴절률 1.33)의 프레넬 비중으로 반사와 굴절 가운데 하나를 고른다. 두 로브를
+// 유전체 표면(물, 투과 재질)의 다음 방향. 굴절률 ior 의 프레넬 비중으로 반사와 굴절 가운데 하나를 고른다. 두 로브를
 // 확률로 고르고 그 확률로 나누므로 가중치는 1 이다. 반사는 거칠기대로 GGX 반값 벡터를 흔들고, 굴절은
-// 완전 매끈하게 꺾는다. 안에서 나가며 전반사가 나면 반사만 남는다.
+// 완전 매끈하게 꺾는다. 안에서 나가며 전반사가 나면 반사만 남는다. refracted 로 굴절했는지 알린다.
 //
 // ponytail: 굴절에 거칠기를 넣지 않았다(물은 거의 매끈하다). 굴절률 변화에 따른 복사 휘도 배율(eta²)도
 // 카메라 경로 한 번에 들어갔다 나오므로 상쇄되어 생략했다.
-vec3 sampleWater(Surface surface, bool entering, inout uint seed, out vec3 direction) {
-    const float IOR_WATER = 1.33;
-    float eta = entering ? 1.0 / IOR_WATER : IOR_WATER;
-    // 매질 경계의 F0 = ((n1-n2)/(n1+n2))² ≈ 0.02.
-    float f0 = 0.02;
+vec3 sampleDielectric(Surface surface, bool entering, float ior, inout uint seed, out vec3 direction, out bool refractedOut) {
+    float eta = entering ? 1.0 / ior : ior;
+    // 매질 경계의 F0 = ((n1-n2)/(n1+n2))². 물 1.33 이면 ≈ 0.02.
+    float f0 = ((ior - 1.0) / (ior + 1.0)) * ((ior - 1.0) / (ior + 1.0));
+    refractedOut = false;
     float cosine = max(dot(surface.normal, surface.view), 1e-4);
     float fresnel = f0 + (1.0 - f0) * pow(1.0 - cosine, 5.0);
     vec3 refracted = refract(-surface.view, surface.normal, eta);
@@ -183,6 +183,7 @@ vec3 sampleWater(Surface surface, bool entering, inout uint seed, out vec3 direc
         return vec3(fresnel / reflectProbability);
     }
     direction = refracted;
+    refractedOut = true;
     return vec3((1.0 - fresnel) / (1.0 - reflectProbability));
 }
 
@@ -233,6 +234,10 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed, out PrimaryHit prim
         surface.albedo = payload.albedo;
         surface.metallic = payload.metallic;
         surface.roughness = payload.roughness;
+        surface.clearcoat = payload.clearcoat;
+        surface.clearcoatRoughness = payload.clearcoatRoughness;
+        surface.sheenColor = payload.sheenColor;
+        surface.sheenRoughness = payload.sheenRoughness;
         radiance += throughput * payload.emissive;
 
         // 1차 히트만 건져 둔다. 다음 바운스가 페이로드를 덮어쓰기 때문이다.
@@ -254,21 +259,30 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed, out PrimaryHit prim
 
         vec3 nextDirection;
         vec3 weight;
-        if (payload.water) {
-            // 물 표면은 순수 스페큘러라 다음 사건 추정을 건너뛴다. 진행 방향으로 들어가는지 나가는지를 가르고
-            // 법선을 광선 쪽으로 세운다.
-            bool entering = dot(surface.normal, direction) < 0.0;
-            if (!entering) {
+        // 투과 재질은 투과 비율의 확률로 유전체 사건을 고른다. 로브를 확률로 고르고 각 로브의 가중치를 그대로 쓰면
+        // 두 로브의 혼합을 편향 없이 추정한다. 물처럼 바운스 예산을 먹지 않는다.
+        bool transmit = !payload.water && payload.transmission > 0.0 && randomFloat(seed) < payload.transmission;
+        if (payload.water || transmit) {
+            // 유전체 표면은 순수 스페큘러라 다음 사건 추정을 건너뛴다. 진행 방향으로 들어가는지 나가는지를 가르고
+            // 법선을 광선 쪽으로 세운다(적중 셰이더가 이미 세워 두었으므로 재질은 면 방향으로 가른다).
+            bool entering = payload.water ? dot(surface.normal, direction) < 0.0 : !payload.backFace;
+            if (payload.water && !entering) {
                 surface.normal = -surface.normal;
             }
-            weight = sampleWater(surface, entering, seed, nextDirection);
+            bool refracted;
+            weight = sampleDielectric(surface, entering, payload.water ? 1.33 : payload.ior, seed, nextDirection, refracted);
             if (weight == vec3(0.0)) {
                 break;
             }
-            // 굴절했으면 매질이 바뀐다. 반사면 그대로다.
-            if (dot(nextDirection, surface.normal) < 0.0) {
-                insideWater = entering;
-                waterAbsorption = payload.absorption;
+            if (payload.water) {
+                // 굴절했으면 매질이 바뀐다. 반사면 그대로다.
+                if (refracted) {
+                    insideWater = entering;
+                    waterAbsorption = payload.absorption;
+                }
+            } else if (refracted) {
+                // 얇은 색유리: 통과하는 빛에 기저 색을 곱한다(KHR_materials_volume 의 흡수는 없다).
+                weight *= surface.albedo;
             }
         } else {
             if (useNextEvent) {
@@ -292,7 +306,7 @@ vec3 tracePath(vec3 origin, vec3 direction, inout uint seed, out PrimaryHit prim
 
         origin = surface.position;
         direction = nextDirection;
-        if (payload.water) {
+        if (payload.water || transmit) {
             ++waterEvents;
         } else {
             ++bounce;

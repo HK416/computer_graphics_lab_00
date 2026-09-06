@@ -53,6 +53,7 @@ vec3 shadeWaterHit(Camera camera, vec3 origin, vec3 direction, float hitDistance
     surface.albedo = vec3(0.0);
     surface.metallic = 0.0;
     surface.roughness = clamp(info.waterColor.w, 0.02, 1.0);
+    clearSurfaceExtensions(surface);
 
     vec3 reflection = environmentLight(camera, surface, 1.0, true) + sampleDirectLight(camera, surface, seed);
     WaterShade shade = shadeWater(reflection,
@@ -89,7 +90,12 @@ vec3 shadeHit(Camera camera, vec3 origin, vec3 direction, float hitDistance, uin
     surface.albedo = sampled.albedo;
     surface.metallic = sampled.metallic;
     surface.roughness = sampled.roughness;
+    surface.clearcoat = sampled.clearcoat;
+    surface.clearcoatRoughness = sampled.clearcoatRoughness;
+    surface.sheenColor = sampled.sheenColor;
+    surface.sheenRoughness = sampled.sheenRoughness;
 
+    // ponytail: 반사·프로브 광선이 맞힌 투과 재질은 불투명으로 셰이딩한다(유리 뒤가 보이지 않는다).
     vec3 color = sampled.emissive + sampleDirectLight(camera, surface, seed);
     color += environmentLight(camera, surface, sampled.occlusion, true);
     return applyFog(camera, color, origin, direction, hitDistance);

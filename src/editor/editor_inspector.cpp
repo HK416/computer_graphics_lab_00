@@ -169,6 +169,20 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
             ImGui::Text("재질: %s", material.name.c_str());
             ImGui::Text("알파 경로: %s%s", alphaModeName(material.alphaMode), material.doubleSided ? " (양면)" : "");
             ImGui::Text("금속성 %.2f / 거칠기 %.2f", material.metallicFactor, material.roughnessFactor);
+            if (material.transmissionFactor > 0.0F || material.transmissionTexture != asset::INVALID_TEXTURE) {
+                ImGui::Text("Transmission %.2f / IOR %.2f", material.transmissionFactor, material.ior);
+            }
+            if (material.clearcoatFactor > 0.0F || material.clearcoatTexture != asset::INVALID_TEXTURE) {
+                ImGui::Text(
+                    "Clearcoat %.2f / 거칠기 %.2f", material.clearcoatFactor, material.clearcoatRoughnessFactor);
+            }
+            if (material.sheenColorFactor != glm::vec3{0.0F} || material.sheenColorTexture != asset::INVALID_TEXTURE) {
+                ImGui::Text("Sheen (%.2f, %.2f, %.2f) / 거칠기 %.2f",
+                            material.sheenColorFactor.r,
+                            material.sheenColorFactor.g,
+                            material.sheenColorFactor.b,
+                            material.sheenRoughnessFactor);
+            }
             ImGui::ColorButton("기저 색",
                                ImVec4{material.baseColorFactor.r,
                                       material.baseColorFactor.g,

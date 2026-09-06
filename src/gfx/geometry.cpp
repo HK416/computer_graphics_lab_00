@@ -150,6 +150,14 @@ GeometryStore::ModelRange GeometryStore::addModel(const asset::Model& model,
         material.emissiveTexture = resolveTexture(source.emissiveTexture, textureSlots);
         material.alphaMode = static_cast<uint32_t>(source.alphaMode);
         material.flags = source.doubleSided ? MATERIAL_FLAG_DOUBLE_SIDED : 0U;
+        material.transmissionTexture = resolveTexture(source.transmissionTexture, textureSlots);
+        material.transmissionIorClearcoat =
+            glm::vec4{source.transmissionFactor, source.ior, source.clearcoatFactor, source.clearcoatRoughnessFactor};
+        material.sheenColorRoughness = glm::vec4{source.sheenColorFactor, source.sheenRoughnessFactor};
+        material.clearcoatTexture = resolveTexture(source.clearcoatTexture, textureSlots);
+        material.clearcoatRoughnessTexture = resolveTexture(source.clearcoatRoughnessTexture, textureSlots);
+        material.sheenColorTexture = resolveTexture(source.sheenColorTexture, textureSlots);
+        material.sheenRoughnessTexture = resolveTexture(source.sheenRoughnessTexture, textureSlots);
         if (source.normalTexture != asset::INVALID_TEXTURE && source.normalTexture < model.textures.size()) {
             asset::TextureFormat normalFormat = model.textures[source.normalTexture].format;
             if (normalFormat == asset::TextureFormat::BC4 || normalFormat == asset::TextureFormat::BC5) {

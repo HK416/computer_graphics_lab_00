@@ -14,7 +14,25 @@ struct Surface {
     vec3 albedo;
     float metallic;
     float roughness;
+    // 확장 재질 로브. 0 이면 아래 식들이 기본 재질과 비트 단위로 같은 값을 낸다(분기로 건너뛴다).
+    float clearcoat;
+    float clearcoatRoughness;
+    vec3 sheenColor;
+    float sheenRoughness;
 };
+
+// 확장 로브가 없는 표면(물, G-버퍼에서 복원한 표면). Surface 를 채우는 모든 자리가 이것 아니면 재질 값을 넣는다.
+void clearSurfaceExtensions(inout Surface surface) {
+    surface.clearcoat = 0.0;
+    surface.clearcoatRoughness = 1.0;
+    surface.sheenColor = vec3(0.0);
+    surface.sheenRoughness = 1.0;
+}
+
+// 클리어코트 층이 아래 층을 얼마나 덮는지. 코트 프레넬(F0 0.04)만큼 아래 층 빛이 깎인다.
+float clearcoatFresnel(float cosine) {
+    return 0.04 + 0.96 * pow(clamp(1.0 - cosine, 0.0, 1.0), 5.0);
+}
 
 vec3 evaluateBrdf(Surface surface, vec3 lightDirection, vec3 radiance) {
     vec3 halfway = normalize(surface.view + lightDirection);
@@ -33,7 +51,26 @@ vec3 evaluateBrdf(Surface surface, vec3 lightDirection, vec3 radiance) {
 
     vec3 specular = (distribution * geometry * fresnel) / max(4.0 * nDotV * nDotL, 1e-4);
     vec3 diffuse = (vec3(1.0) - fresnel) * (1.0 - surface.metallic) * surface.albedo / PI;
-    return (diffuse + specular) * radiance * nDotL;
+    vec3 color = (diffuse + specular) * radiance * nDotL;
+
+    // 시인: 기본 층 위에 더하고, 기본 층은 시인이 되반사한 만큼 깎는다.
+    //
+    // ponytail: 규격은 깎는 비율을 시인의 방향 알베도 표(E)에서 읽는다. 표 대신 상수 0.25 로 근사했다.
+    float sheenMax = max(max(surface.sheenColor.r, surface.sheenColor.g), surface.sheenColor.b);
+    if (sheenMax > 0.0) {
+        vec3 sheen = surface.sheenColor * distributionCharlie(nDotH, surface.sheenRoughness) *
+                     visibilityAshikhmin(nDotV, nDotL);
+        color = color * (1.0 - sheenMax * 0.25) + sheen * radiance * nDotL;
+    }
+    // 클리어코트: 기하 노멀 위의 얇은 유전체 층. 아래 층은 코트 프레넬만큼 가려진다.
+    if (surface.clearcoat > 0.0) {
+        float coatFresnel = clearcoatFresnel(vDotH);
+        float coat = distributionGgx(nDotH, surface.clearcoatRoughness) *
+                     geometrySmith(nDotV, nDotL, surface.clearcoatRoughness) * coatFresnel /
+                     max(4.0 * nDotV * nDotL, 1e-4);
+        color = color * (1.0 - surface.clearcoat * coatFresnel) + surface.clearcoat * coat * radiance * nDotL;
+    }
+    return color;
 }
 
 // 도달 거리에서 부드럽게 0 이 되는 역제곱 감쇠 (UE4 의 창 함수).
@@ -214,6 +251,21 @@ vec3 environmentLight(Camera camera, Surface surface, float occlusion, bool incl
             sampleBindlessCubeLod(environment.y, reflection, surface.roughness * float(environment.w - 1u)).rgb;
         vec2 integrated = sampleBindlessArray(environment.z, vec2(nDotV, surface.roughness), 0.0).rg;
         specular = prefiltered * (fresnel * integrated.x + integrated.y);
+    }
+    // 클리어코트의 환경 반사. 코트 거칠기로 프리필터를 읽고, 아래 층은 코트 프레넬만큼 깎는다.
+    //
+    // ponytail: 시인의 환경광은 넣지 않았다(직접광에만 있다). 광선 반사 대상(includeSpecular 거짓)에도 코트 반사는
+    // 여기서 IBL 로 넣는다 — 반사 컴퓨트는 코트를 모른다.
+    if (surface.clearcoat > 0.0 && environment.w != 0u) {
+        float coatFresnel = clearcoatFresnel(nDotV);
+        vec3 reflection = reflect(-surface.view, surface.normal);
+        vec3 coatPrefiltered =
+            sampleBindlessCubeLod(environment.y, reflection, surface.clearcoatRoughness * float(environment.w - 1u)).rgb;
+        vec2 coatIntegrated = sampleBindlessArray(environment.z, vec2(nDotV, surface.clearcoatRoughness), 0.0).rg;
+        vec3 coat = coatPrefiltered * (coatFresnel * coatIntegrated.x + coatIntegrated.y);
+        float cover = 1.0 - surface.clearcoat * coatFresnel;
+        diffuse *= cover;
+        specular = specular * cover + surface.clearcoat * coat;
     }
     // 프로브가 없을 때의 곱셈 순서는 옛 코드와 같다(바이트 동일). 프로브 확산광은 실제 조명이라 색조를 곱하지
     // 않지만 스페큘러는 여전히 미리 구운 IBL 이라 색조(환경광 세기)를 그대로 받는다.
