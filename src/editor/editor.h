@@ -200,6 +200,9 @@ private:
     bool snapAlways = false;
     // 렌더 설정 패널의 그룹 검색어. 비어 있으면 모든 그룹을 접었다 펼 수 있게 보여 준다.
     std::array<char, 64> settingsFilter{};
+    // 계층 패널과 «메쉬» 메뉴의 검색어. 비어 있으면 전부 보인다.
+    std::array<char, 64> hierarchyFilter{};
+    std::array<char, 64> meshFilter{};
     float frameTimeMilliseconds = 0.0F;
     LoadStatus loadStatus;
 

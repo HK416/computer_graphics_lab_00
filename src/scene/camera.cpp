@@ -178,4 +178,28 @@ glm::mat4 Camera::gizmoProjectionMatrix(float aspect) const {
     return glm::perspectiveRH_ZO(glm::radians(fovYDegrees), aspect, nearPlane, GIZMO_FAR_PLANE);
 }
 
+float rayTriangle(const Ray& ray, const glm::vec3& a, const glm::vec3& b, const glm::vec3& c) {
+    // Möller–Trumbore.
+    glm::vec3 edge1 = b - a;
+    glm::vec3 edge2 = c - a;
+    glm::vec3 p = glm::cross(ray.direction, edge2);
+    float determinant = glm::dot(edge1, p);
+    if (std::abs(determinant) < 1.0e-12F) {
+        return -1.0F;
+    }
+    float inverse = 1.0F / determinant;
+    glm::vec3 s = ray.origin - a;
+    float u = glm::dot(s, p) * inverse;
+    if (u < 0.0F || u > 1.0F) {
+        return -1.0F;
+    }
+    glm::vec3 q = glm::cross(s, edge1);
+    float v = glm::dot(ray.direction, q) * inverse;
+    if (v < 0.0F || u + v > 1.0F) {
+        return -1.0F;
+    }
+    float t = glm::dot(edge2, q) * inverse;
+    return t >= 0.0F ? t : -1.0F;
+}
+
 } // namespace scene

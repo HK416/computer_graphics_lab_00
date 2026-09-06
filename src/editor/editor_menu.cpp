@@ -207,16 +207,22 @@ void Editor::buildCreateItems(scene::Scene& active, const gfx::GeometryStore& ge
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("메쉬")) {
-        // ponytail: 메쉬가 수백 개면 메뉴가 화면을 넘는다. 그때는 검색 칸을 둔다.
         if (geometry.meshCount() == 0) {
             ImGui::TextDisabled("올라온 메쉬가 없습니다");
         }
+        // 메쉬가 수백 개면 메뉴가 화면을 넘는다. 이름·재질로 걸러 보인다.
+        // ponytail: 메뉴 안의 입력 칸은 키보드로 메뉴를 오갈 때 어색하다. 마우스로는 문제없다.
+        ImGui::SetNextItemWidth(220.0F);
+        ImGui::InputTextWithHint("##meshFilter", "이름 검색", meshFilter.data(), meshFilter.size());
         for (uint32_t meshIndex = 0; meshIndex < geometry.meshCount(); ++meshIndex) {
             if (!geometry.meshLive(meshIndex)) {
                 continue;
             }
             const asset::Material& material = geometry.material(geometry.mesh(meshIndex).materialIndex);
             std::string label = std::to_string(meshIndex) + ": " + geometry.meshName(meshIndex) + " / " + material.name;
+            if (!containsNoCase(label, meshFilter.data())) {
+                continue;
+            }
             if (ImGui::MenuItem(label.c_str())) {
                 deferred = [this, &active, &geometry, meshIndex, parent] {
                     createMeshObject(active, geometry, meshIndex, parent);

@@ -3,9 +3,9 @@
 #include <cstdio>
 
 #include <glm/geometric.hpp>
-#include <glm/trigonometric.hpp>
 #include <glm/mat4x4.hpp>
 #include <glm/matrix.hpp>
+#include <glm/trigonometric.hpp>
 
 #include "scene/camera.h"
 
@@ -38,6 +38,20 @@ bool finite(glm::vec3 value) {
 } // namespace
 
 int main() {
+    // 광선·삼각형. 정면·뒷면 다 맞고, 빗나가면 음수다. 정규화하지 않은 방향의 t 는 그 배율 그대로다.
+    {
+        scene::Ray ray{glm::vec3{0.2F, 0.2F, 2.0F}, glm::vec3{0.0F, 0.0F, -2.0F}};
+        float hit = scene::rayTriangle(ray, {0.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F});
+        assert(std::abs(hit - 1.0F) < 1e-5F && "t 는 direction 배율이어야 한다");
+        float back = scene::rayTriangle(ray, {0.0F, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F}, {1.0F, 0.0F, 0.0F});
+        assert(std::abs(back - 1.0F) < 1e-5F && "뒷면도 맞아야 한다");
+        scene::Ray miss{glm::vec3{2.0F, 2.0F, 2.0F}, glm::vec3{0.0F, 0.0F, -1.0F}};
+        assert(scene::rayTriangle(miss, {0.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F}) < 0.0F);
+        scene::Ray behind{glm::vec3{0.2F, 0.2F, -2.0F}, glm::vec3{0.0F, 0.0F, -1.0F}};
+        assert(scene::rayTriangle(behind, {0.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F}) < 0.0F &&
+               "뒤에 있는 삼각형은 맞지 않아야 한다");
+    }
+
     scene::Camera camera;
     camera.position = glm::vec3{0.0F, 1.0F, 3.0F};
     float aspect = 16.0F / 9.0F;

@@ -4,11 +4,13 @@
 // (renderer_internal.h 와 같은 방식). 다른 곳에서 include 하지 않는다.
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <glm/gtc/quaternion.hpp>
@@ -44,5 +46,17 @@ inline constexpr const char* WINDOW_CONSOLE = "콘솔";
 inline constexpr const char* WINDOW_SETTINGS = "렌더 설정";
 // 플러그인이 여는 창. 이름은 ProfilerPlugin::window 의 리터럴과 같아야 기본 배치에 도킹된다.
 inline constexpr const char* WINDOW_PROFILER = "프로파일러";
+
+// 대소문자를 무시한 부분 문자열 검사(ASCII 만, 한글은 그대로). 검색 칸들이 함께 쓴다. 검색어가 비면 참이다.
+inline bool containsNoCase(std::string_view haystack, std::string_view needle) {
+    if (needle.empty()) {
+        return true;
+    }
+    auto lower = [](unsigned char c) { return static_cast<char>(std::tolower(c)); };
+    auto found = std::search(haystack.begin(), haystack.end(), needle.begin(), needle.end(), [&](char a, char b) {
+        return lower(static_cast<unsigned char>(a)) == lower(static_cast<unsigned char>(b));
+    });
+    return found != haystack.end();
+}
 
 } // namespace editor

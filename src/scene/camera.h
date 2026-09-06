@@ -13,6 +13,10 @@ struct Ray {
     glm::vec3 direction{0.0F, 0.0F, -1.0F};
 };
 
+// 광선과 삼각형의 교차. 맞으면 direction 배율 t(0 이상)를, 아니면 음수를 돌려준다. direction 은 정규화하지
+// 않아도 되고, 그러면 t 는 같은 배율로 다른 공간과 견줄 수 있다(픽킹이 지역 공간에서 쓴다). 뒷면도 맞는다.
+float rayTriangle(const Ray& ray, const glm::vec3& a, const glm::vec3& b, const glm::vec3& c);
+
 // 궤도(orbit)는 대상 주위를 도는 기본 조작이고, 자유(fly)는 1인칭처럼 직접 날아다닌다.
 enum class CameraMode {
     ORBIT,

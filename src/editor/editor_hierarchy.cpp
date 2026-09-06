@@ -115,6 +115,31 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
 
     scene::Scene& active = scenes.active();
 
+    // 검색어가 있으면 트리 대신 이름이 맞는 오브젝트를 평평한 목록으로 보인다. 계층 안 어디에 있든 찾는 게 목적이다.
+    ImGui::SetNextItemWidth(-1.0F);
+    ImGui::InputTextWithHint("##hierarchyFilter", "이름 검색", hierarchyFilter.data(), hierarchyFilter.size());
+    if (hierarchyFilter[0] != '\0') {
+        for (int i = 0; i < static_cast<int>(active.objects.size()); ++i) {
+            scene::Object& object = active.objects[static_cast<size_t>(i)];
+            if (!containsNoCase(object.name, hierarchyFilter.data())) {
+                continue;
+            }
+            ImGui::PushID(i);
+            ImGui::Checkbox("##visible", &object.visible);
+            ImGui::SameLine();
+            if (ImGui::Selectable(object.name.c_str(), isSelected(i))) {
+                if (ImGui::GetIO().KeyCtrl) {
+                    toggleSelect(i);
+                } else {
+                    selectOnly(i);
+                }
+            }
+            ImGui::PopID();
+        }
+        ImGui::End();
+        return;
+    }
+
     // 여기부터는 오브젝트의 부모-자식 구조만 보여준다. 만들기·복제·삭제는 우클릭 메뉴와 메뉴바에 있다.
     // 부모별 자식 목록을 한 번 만든다. 노드마다 전체를 훑으면 오브젝트 만 개에서 프레임당 수백 ms 다.
     std::vector<std::vector<int>> children(active.objects.size());

@@ -533,7 +533,7 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
 
 bool Editor::settingsSection(const char* name) {
     if (settingsFilter[0] != '\0') {
-        if (std::strstr(name, settingsFilter.data()) == nullptr) {
+        if (!containsNoCase(name, settingsFilter.data())) {
             return false;
         }
         ImGui::SeparatorText(name);

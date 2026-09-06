@@ -23,10 +23,11 @@ float raySphere(const scene::Ray& ray, const glm::vec4& sphere) {
     return near >= 0.0F ? near : (far >= 0.0F ? far : -1.0F);
 }
 
-// 광선에 걸리는 가장 가까운 오브젝트. 없으면 -1.
+// 광선에 걸리는 가장 가까운 오브젝트. 없으면 -1. 경계 구로 거른 뒤 메쉬 콜라이더 표(강체 메쉬 콜라이더가 쓰는
+// 상한 아래의 가장 고운 LOD, 위치만)의 삼각형과 교차시킨다. 지역 공간에서 정규화하지 않은 방향으로 재면 t 가
+// 세계 공간 배율 그대로라 오브젝트끼리 견줄 수 있다.
 //
-// ponytail: 메쉬 경계 구까지만 본다. 더 정확히 하려면 meshlet 경계 구로 한 단계 좁힌 뒤
-// LOD 0 삼각형과 교차시키면 된다. 스킨 메쉬는 CPU 정점이 바인드 포즈라 구로만 다뤄야 한다.
+// ponytail: 스킨·천 오브젝트는 CPU 정점이 바인드 포즈·초기 격자라 구로만 판정한다. 변형 정점을 되읽으면 정확해진다.
 int pickObject(const scene::Scene& scene, const gfx::GeometryStore& geometry, const scene::Ray& ray) {
     int best = -1;
     float bestDistance = std::numeric_limits<float>::max();
@@ -43,10 +44,33 @@ int pickObject(const scene::Scene& scene, const gfx::GeometryStore& geometry, co
                                           glm::dot(glm::vec3(world[1]), glm::vec3(world[1])),
                                           glm::dot(glm::vec3(world[2]), glm::vec3(world[2]))}));
         float distance = raySphere(ray, glm::vec4{center, local.w * scale});
-        if (distance >= 0.0F && distance < bestDistance) {
-            bestDistance = distance;
-            best = static_cast<int>(index);
+        if (distance < 0.0F || distance >= bestDistance) {
+            continue;
         }
+        const scene::Object& object = scene.objects[index];
+        const scene::ColliderMesh* collider = scene.colliderMesh(index);
+        // 스케일이 0 인 축이 있으면 역행렬이 없다. 그때는 구 판정으로 남긴다.
+        if (collider != nullptr && object.animator < 0 && object.cloth < 0 &&
+            std::abs(glm::determinant(world)) > 1.0e-12F) {
+            glm::mat4 inverse = glm::inverse(world);
+            scene::Ray localRay{glm::vec3(inverse * glm::vec4{ray.origin, 1.0F}),
+                                glm::vec3(inverse * glm::vec4{ray.direction, 0.0F})};
+            distance = -1.0F;
+            for (size_t i = 0; i + 2 < collider->indices.size(); i += 3) {
+                float hit = scene::rayTriangle(localRay,
+                                               collider->positions[collider->indices[i]],
+                                               collider->positions[collider->indices[i + 1]],
+                                               collider->positions[collider->indices[i + 2]]);
+                if (hit >= 0.0F && (distance < 0.0F || hit < distance)) {
+                    distance = hit;
+                }
+            }
+            if (distance < 0.0F || distance >= bestDistance) {
+                continue;
+            }
+        }
+        bestDistance = distance;
+        best = static_cast<int>(index);
     }
     return best;
 }
