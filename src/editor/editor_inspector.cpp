@@ -370,6 +370,27 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         ImGui::TextDisabled("입자는 GPU 에서 계산해 내장 구로 그린다. Path Tracing에도 보인다");
     }
 
+    if (object.forceField >= 0 && object.forceField < static_cast<int>(active.forceFields.size()) &&
+        componentHeader("Force Field", &scene::Object::forceField)) {
+        scene::ForceField& field = active.forceFields[static_cast<size_t>(object.forceField)];
+        constexpr std::array<const char*, 3> TYPE_NAMES{"Wind", "Vortex", "Point"};
+        int type = static_cast<int>(field.type);
+        if (ImGui::Combo("종류", &type, TYPE_NAMES.data(), static_cast<int>(TYPE_NAMES.size()))) {
+            field.type = static_cast<scene::ForceFieldType>(type);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Wind 는 오브젝트 앞(-Z)으로 밀고, Vortex 는 +Y 축 둘레로 돌리며, Point 는 위치로 "
+                              "끌어당긴다(음수면 밀어냄)");
+        }
+        ImGui::DragFloat("세기", &field.strength, 0.1F, -100.0F, 100.0F, "%.2f m/s²");
+        ImGui::DragFloat("반지름", &field.radius, 0.05F, 0.0F, 100.0F, "%.2f");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("0 이면 무한");
+        }
+        ImGui::DragFloat("감쇠 지수", &field.falloff, 0.05F, 0.0F, 8.0F, "%.2f");
+        ImGui::TextDisabled("천·유체·입자가 읽는다. 강체는 읽지 않는다");
+    }
+
     if (object.particleSystem >= 0 && object.particleSystem < static_cast<int>(active.particleSystems.size()) &&
         componentHeader("입자", &scene::Object::particleSystem)) {
         scene::ParticleSystem& system = active.particleSystems[static_cast<size_t>(object.particleSystem)];
@@ -516,6 +537,11 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         ImGui::BeginDisabled(object.particleSystem >= 0);
         if (ImGui::MenuItem("입자")) {
             active.attachParticleSystem(objectIndex);
+        }
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(object.forceField >= 0);
+        if (ImGui::MenuItem("Force Field")) {
+            active.attachForceField(objectIndex);
         }
         ImGui::EndDisabled();
         ImGui::BeginDisabled(object.cloth >= 0);

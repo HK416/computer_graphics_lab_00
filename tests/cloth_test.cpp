@@ -84,6 +84,37 @@ int main() {
     core::JobSystem jobs(8);
     core::JobSystem single(1);
 
+    // ---- 힘 마당: 바람은 방향 × 세기, 반지름 밖은 0, 소용돌이는 축과 반지름에 수직, 점은 중심을 향한다 ----
+    {
+        physics::ForceFieldSample wind;
+        wind.type = scene::ForceFieldType::WIND;
+        wind.axis = glm::vec3{1.0F, 0.0F, 0.0F};
+        wind.strength = 4.0F;
+        wind.radius = 2.0F;
+        wind.falloff = 1.0F;
+        glm::vec3 inside = physics::forceFieldAcceleration(wind, glm::vec3{0.0F, 1.0F, 0.0F});
+        assert(std::abs(inside.x - 2.0F) < 1e-5F && inside.y == 0.0F && "반지름 절반에서 감쇠 1 이면 세기의 절반");
+        assert((physics::forceFieldAcceleration(wind, glm::vec3{0.0F, 3.0F, 0.0F}) == glm::vec3{0.0F}) &&
+               "반지름 밖은 0");
+        wind.radius = 0.0F;
+        assert((physics::forceFieldAcceleration(wind, glm::vec3{0.0F, 30.0F, 0.0F}) == glm::vec3{4.0F, 0.0F, 0.0F}));
+
+        physics::ForceFieldSample vortex;
+        vortex.type = scene::ForceFieldType::VORTEX;
+        vortex.axis = glm::vec3{0.0F, 1.0F, 0.0F};
+        vortex.strength = 3.0F;
+        glm::vec3 swirl = physics::forceFieldAcceleration(vortex, glm::vec3{2.0F, 5.0F, 0.0F});
+        assert(std::abs(glm::dot(swirl, vortex.axis)) < 1e-5F && std::abs(swirl.x) < 1e-5F &&
+               std::abs(std::abs(swirl.z) - 3.0F) < 1e-5F);
+
+        physics::ForceFieldSample point;
+        point.type = scene::ForceFieldType::POINT;
+        point.strength = 2.0F;
+        glm::vec3 pull = physics::forceFieldAcceleration(point, glm::vec3{0.0F, 0.0F, 4.0F});
+        assert(std::abs(pull.z + 2.0F) < 1e-5F && "점은 중심 쪽으로 세기만큼");
+        std::printf("  힘 마당 식 통과\n");
+    }
+
     // ---- 위상: 격자 16 의 제약 수와 정지 길이, 슬롯 ----
     {
         scene::Scene scene = makeScene();

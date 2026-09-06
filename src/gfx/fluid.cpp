@@ -531,6 +531,8 @@ void FluidSimulator::fillParams(GpuFluidParams& params, const State& state, cons
         collider.world = source.world;
         collider.inverseWorld = source.inverseWorld;
     }
+    params.fieldCount = shared.fieldCount;
+    fillForceFields(shared.fields, shared.fieldCount, params.fields);
 }
 
 void FluidSimulator::record(VkCommandBuffer commandBuffer,

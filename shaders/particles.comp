@@ -65,7 +65,11 @@ void main() {
     }
 
     float dt = params.dt;
-    particle.velocity += params.gravityDrag.xyz * dt;
+    vec3 acceleration = params.gravityDrag.xyz;
+    for (uint f = 0u; f < params.fieldCount; ++f) {
+        acceleration += forceFieldAcceleration(params.fields[f], particle.position);
+    }
+    particle.velocity += acceleration * dt;
     particle.velocity *= max(1.0 - params.gravityDrag.w * dt, 0.0);
     vec3 step = particle.velocity * dt;
     float stepLength = length(step);

@@ -214,6 +214,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `GpuFluidCollider` `GpuFluidParams` `FluidPushConstants` (`src/gfx/fluid.h`) | `FluidCollider` `FluidParams` `FluidPushConstants` (`shaders/fluid_common.glsl`) |
 | `GpuParticle` `GpuParticleParams` `ParticlePushConstants` (`src/gfx/particles.h`) | `Particle` `ParticleParams` `ParticlePushConstants` (`shaders/particle_common.glsl`) — 컴퓨트와 스프라이트 정점·프래그먼트가 같은 블록 |
 | `physics::ClothConstraint` `ClothVertexInfo` `CLOTH_COLORS` (`src/physics/cloth.h`), `GpuClothParams` `ClothPushConstants` `CLOTH_SELF_RAY_MASK` (`src/gfx/cloth.h`) | 동명 구조체·상수 (`shaders/cloth_common.glsl`); 제약 색 규칙은 `buildClothTopology` 와 `cloth_constraint.comp` 디스패치 순서 |
+| `physics::ForceFieldSample` `forceFieldAcceleration` (`src/physics/force_field.h`), `GpuForceField` (`src/gfx/fluid.h`) | `ForceField` `forceFieldAcceleration` (`shaders/force_field.glsl`) — 천·유체·입자 설정 뒤에 같은 배열 |
 | `GpuRigidBody` `RigidPushConstants` (`src/gfx/rigid_body_gpu.h`) | `RigidBody` `RigidPushConstants` (`shaders/rigid_common.glsl`) |
 | `physics::Triangle` (`src/physics/rigid_body.h`) | `RigidTriangle` (`rigid_common.glsl`) |
 | `collideBoxBox` 등 접촉 생성 (`src/physics/rigid_body.cpp`) | `rigidCollide` (`shaders/rigid_common.glsl`) |

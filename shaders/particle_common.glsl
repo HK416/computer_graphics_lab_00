@@ -1,6 +1,7 @@
 #ifndef PARTICLE_COMMON_GLSL
 #define PARTICLE_COMMON_GLSL
 
+#include "force_field.glsl"
 #include "scene_types.glsl"
 
 // 아래 셋은 src/gfx/particles.h 의 GpuParticle / GpuParticleParams / ParticlePushConstants 와 배치가 같아야
@@ -37,6 +38,11 @@ struct ParticleParams {
     MeshBuffer meshes;
     MeshLodBuffer lods;
     InstanceBuffer instances;
+    uint fieldCount;
+    uint fieldPad0;
+    uint fieldPad1;
+    uint fieldPad2;
+    ForceField fields[FORCE_FIELD_MAX];
 };
 
 layout(buffer_reference, scalar) buffer ParticleBuffer {

@@ -8,6 +8,7 @@
 #include <glm/vec4.hpp>
 #include <vulkan/vulkan.h>
 
+#include "gfx/fluid.h"
 #include "gfx/resources.h"
 #include "scene/scene.h"
 
@@ -57,8 +58,14 @@ struct GpuParticleParams {
     VkDeviceAddress meshes = 0;
     VkDeviceAddress lods = 0;
     VkDeviceAddress instances = 0;
+    // 힘 마당. 천·유체와 같은 배치(GpuForceField).
+    uint32_t fieldCount = 0;
+    uint32_t fieldPad0 = 0;
+    uint32_t fieldPad1 = 0;
+    uint32_t fieldPad2 = 0;
+    std::array<GpuForceField, physics::MAX_FORCE_FIELDS> fields{};
 };
-static_assert(sizeof(GpuParticleParams) == 208, "입자 설정 배치가 셰이더와 어긋난다");
+static_assert(sizeof(GpuParticleParams) == 608, "입자 설정 배치가 셰이더와 어긋난다");
 
 // 컴퓨트와 스프라이트 정점·프래그먼트가 같은 블록을 쓴다.
 struct ParticlePushConstants {

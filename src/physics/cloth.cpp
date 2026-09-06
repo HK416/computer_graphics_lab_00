@@ -186,6 +186,7 @@ ClothParams deriveClothParams(const scene::Cloth& settings, const scene::Scene& 
     params.iterations = std::clamp(settings.iterations, 1U, 32U);
     params.frameStep = std::min(std::max(deltaSeconds, 0.0F), CLOTH_MAX_FRAME_STEP);
     params.colliderCount = collectShapeColliders(scene, params.colliders);
+    params.fieldCount = collectForceFields(scene, params.fields);
     return params;
 }
 
@@ -241,7 +242,9 @@ void ClothSolver::step(const ClothTopology& topology,
                     velocity[i] = glm::vec3{0.0F};
                     continue;
                 }
-                velocity[i] += acceleration * h;
+                // 힘 마당은 정점 위치마다 다르다. GPU(cloth_predict.comp)와 같은 순서로 더한다.
+                velocity[i] +=
+                    (acceleration + forceFieldsAcceleration(params.fields, params.fieldCount, current[i])) * h;
                 velocity[i] *= std::max(1.0F - params.damping * h, 0.0F);
                 predicted[i] = current[i] + velocity[i] * h;
             }

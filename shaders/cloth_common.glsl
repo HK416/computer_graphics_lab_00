@@ -35,6 +35,11 @@ struct ClothParams {
     uint resolution;
     uint colliderCount;
     FluidCollider colliders[FLUID_MAX_COLLIDERS];
+    uint fieldCount;
+    uint fieldPad0;
+    uint fieldPad1;
+    uint fieldPad2;
+    ForceField fields[FORCE_FIELD_MAX];
 };
 
 layout(buffer_reference, scalar) readonly buffer ClothParamsBuffer {

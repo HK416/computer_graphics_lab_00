@@ -41,6 +41,11 @@ struct GpuClothParams {
     uint32_t resolution = 0;
     uint32_t colliderCount = 0;
     std::array<GpuFluidCollider, FLUID_MAX_COLLIDERS> colliders{};
+    uint32_t fieldCount = 0;
+    uint32_t fieldPad0 = 0;
+    uint32_t fieldPad1 = 0;
+    uint32_t fieldPad2 = 0;
+    std::array<GpuForceField, physics::MAX_FORCE_FIELDS> fields{};
 };
 
 struct ClothPushConstants {

@@ -56,6 +56,7 @@
     ]
   },
   "fluids": [],
+  "forceFields": [],
   "lights": [
     {
       "castsShadow": true,
@@ -361,5 +362,5 @@
       "useGravity": true
     }
   ],
-  "version": 3
+  "version": 4
 }

@@ -1,0 +1,245 @@
+{
+ "version": 4,
+ "name": "천 cpu + 바람",
+ "models": [
+  "<builtin:plane>",
+  "<builtin:box>",
+  "<builtin:cloth32>"
+ ],
+ "camera": {
+  "position": [
+   0.0,
+   1.6,
+   4.5
+  ],
+  "yaw": -90.0,
+  "pitch": -12.0,
+  "fovY": 60.0,
+  "near": 0.05,
+  "moveSpeed": 2.0,
+  "mode": "orbit",
+  "target": [
+   0.0,
+   1.0,
+   0.0
+  ],
+  "distance": 4.5
+ },
+ "ambient": {
+  "color": [
+   0.25,
+   0.25,
+   0.25
+  ],
+  "intensity": 1.0
+ },
+ "lights": [
+  {
+   "type": "directional",
+   "color": [
+    1.0,
+    0.97,
+    0.9
+   ],
+   "intensity": 3.0,
+   "range": 20.0,
+   "innerCone": 20.0,
+   "outerCone": 30.0,
+   "size": [
+    2.0,
+    2.0
+   ],
+   "castsShadow": true
+  }
+ ],
+ "animators": [],
+ "fluids": [],
+ "particleSystems": [],
+ "rigidBodies": [
+  {
+   "backend": "auto",
+   "shape": "mesh",
+   "mass": 1.0,
+   "useGravity": false,
+   "kinematic": true,
+   "restitution": 0.3,
+   "friction": 0.5,
+   "radius": 0.5,
+   "halfExtents": [
+    0.5,
+    0.5,
+    0.5
+   ]
+  },
+  {
+   "backend": "auto",
+   "shape": "box",
+   "mass": 1.0,
+   "useGravity": false,
+   "kinematic": true,
+   "restitution": 0.3,
+   "friction": 0.5,
+   "radius": 0.5,
+   "halfExtents": [
+    1.0,
+    1.0,
+    1.0
+   ]
+  }
+ ],
+ "cloths": [
+  {
+   "backend": "cpu",
+   "resolution": 32,
+   "mass": 1.0,
+   "stretchCompliance": 0.0,
+   "shearCompliance": 0.001,
+   "bendCompliance": 0.01,
+   "damping": 0.5,
+   "substeps": 4,
+   "iterations": 8,
+   "pin": "twoCorners",
+   "thickness": 0.02,
+   "friction": 0.5,
+   "gravity": [
+    0,
+    -9.81,
+    0
+   ],
+   "wind": [
+    0.0,
+    0.0,
+    0.0
+   ]
+  }
+ ],
+ "objects": [
+  {
+   "name": "태양",
+   "parent": -1,
+   "position": [
+    0,
+    5,
+    0
+   ],
+   "rotation": [
+    -0.383,
+    0.0,
+    0.0,
+    0.924
+   ],
+   "scale": [
+    1,
+    1,
+    1
+   ],
+   "visible": true,
+   "light": 0
+  },
+  {
+   "name": "바닥",
+   "parent": -1,
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation": [
+    0,
+    0,
+    0,
+    1
+   ],
+   "scale": [
+    3.0,
+    1.0,
+    3.0
+   ],
+   "visible": true,
+   "model": 0,
+   "mesh": 0,
+   "skin": -1,
+   "rigidBody": 0
+  },
+  {
+   "name": "상자",
+   "parent": -1,
+   "position": [
+    0.0,
+    0.4,
+    0.0
+   ],
+   "rotation": [
+    0,
+    0.2,
+    0,
+    0.98
+   ],
+   "scale": [
+    0.4,
+    0.4,
+    0.4
+   ],
+   "visible": true,
+   "model": 1,
+   "mesh": 0,
+   "skin": -1,
+   "rigidBody": 1
+  },
+  {
+   "name": "천",
+   "parent": -1,
+   "position": [
+    0.0,
+    2.2,
+    0.0
+   ],
+   "rotation": [
+    0.7071067811865476,
+    0.0,
+    0.0,
+    0.7071067811865476
+   ],
+   "scale": [
+    0.9,
+    1.0,
+    0.9
+   ],
+   "visible": true,
+   "model": 2,
+   "mesh": 0,
+   "skin": -1,
+   "cloth": 0
+  },
+  {
+   "name": "바람",
+   "parent": -1,
+   "position": [
+    -2.0,
+    1.5,
+    0.0
+   ],
+   "rotation": [
+    0.0,
+    -0.7071,
+    0.0,
+    0.7071
+   ],
+   "scale": [
+    1,
+    1,
+    1
+   ],
+   "visible": true,
+   "forceField": 0
+  }
+ ],
+ "forceFields": [
+  {
+   "type": "wind",
+   "strength": 6.0,
+   "radius": 0.0,
+   "falloff": 1.0
+  }
+ ]
+}

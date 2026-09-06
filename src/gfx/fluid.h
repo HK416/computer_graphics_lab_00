@@ -12,6 +12,7 @@
 
 #include "gfx/resources.h"
 #include "physics/fluid_sph.h"
+#include "physics/force_field.h"
 #include "scene/scene.h"
 
 namespace core {
@@ -54,6 +55,29 @@ struct GpuFluidCollider {
     uint32_t pad2 = 0;
 };
 
+// shaders/force_field.glsl 의 ForceField 와 배치가 같아야 한다(scalar). 천·유체·입자 설정이 같은 배열을 담는다.
+struct GpuForceField {
+    glm::vec4 positionRadius{0.0F}; // xyz 중심, w 반지름(0 이면 무한)
+    glm::vec4 axisStrength{0.0F};   // xyz 방향/축, w 세기
+    float falloff = 1.0F;
+    uint32_t type = 0;
+    uint32_t pad0 = 0;
+    uint32_t pad1 = 0;
+};
+static_assert(sizeof(GpuForceField) == 48, "힘 마당 배치가 셰이더와 어긋난다");
+
+// physics::ForceFieldSample → GpuForceField. 세 시뮬레이터가 같은 변환을 쓴다.
+inline void fillForceFields(const std::array<physics::ForceFieldSample, physics::MAX_FORCE_FIELDS>& source,
+                            uint32_t count,
+                            std::array<GpuForceField, physics::MAX_FORCE_FIELDS>& out) {
+    for (uint32_t i = 0; i < count; ++i) {
+        out[i].positionRadius = glm::vec4{source[i].position, source[i].radius};
+        out[i].axisStrength = glm::vec4{source[i].axis, source[i].strength};
+        out[i].falloff = source[i].falloff;
+        out[i].type = static_cast<uint32_t>(source[i].type);
+    }
+}
+
 struct GpuFluidParams {
     glm::mat4 emitterWorld{1.0F};
     glm::vec4 emitterHalfExtents{0.0F}; // xyz 반쪽 크기, w 입자 간격
@@ -70,6 +94,11 @@ struct GpuFluidParams {
     uint32_t pad1 = 0;
     uint32_t pad2 = 0;
     std::array<GpuFluidCollider, FLUID_MAX_COLLIDERS> colliders{};
+    uint32_t fieldCount = 0;
+    uint32_t fieldPad0 = 0;
+    uint32_t fieldPad1 = 0;
+    uint32_t fieldPad2 = 0;
+    std::array<GpuForceField, physics::MAX_FORCE_FIELDS> fields{};
 };
 
 struct FluidPushConstants {

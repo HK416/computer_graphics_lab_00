@@ -271,6 +271,9 @@ void ParticleSimulator::record(VkCommandBuffer commandBuffer,
     params.meshes = buffers.meshes;
     params.lods = buffers.lods;
     params.instances = buffers.instances;
+    std::array<physics::ForceFieldSample, physics::MAX_FORCE_FIELDS> fields{};
+    params.fieldCount = physics::collectForceFields(scene, fields);
+    fillForceFields(fields, params.fieldCount, params.fields);
     std::memcpy(state.params[frameSlot].mapped, &params, sizeof(params));
 
     // 지난 프레임의 스프라이트 정점 읽기가 끝나야 입자를 덮어쓸 수 있다.

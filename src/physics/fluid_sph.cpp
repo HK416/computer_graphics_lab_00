@@ -95,6 +95,7 @@ FluidParams deriveFluidParams(const scene::Fluid& settings,
     params.lattice = glm::uvec3{nx, ny, nz};
 
     params.colliderCount = collectShapeColliders(scene, params.colliders);
+    params.fieldCount = collectForceFields(scene, params.fields);
     return params;
 }
 
@@ -256,7 +257,8 @@ void FluidSolver::substep(const FluidParams& params, float dt, core::JobSystem* 
                 }
             }
 
-            glm::vec3 acceleration = force / density + params.gravity;
+            glm::vec3 acceleration =
+                force / density + params.gravity + forceFieldsAcceleration(params.fields, params.fieldCount, position);
             velocity += acceleration * dt;
             // 한 스텝에 커널 반지름의 일부 이상 움직이지 못하게 잘라 폭주를 막는다.
             float maxSpeed = 0.4F * h / dt;

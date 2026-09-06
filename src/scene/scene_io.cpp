@@ -268,6 +268,16 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
     }
     document["cloths"] = cloths;
 
+    json forceFields = json::array();
+    for (const ForceField& field : scene.forceFields) {
+        constexpr std::array<const char*, 3> TYPE_NAMES{"wind", "vortex", "point"};
+        forceFields.push_back({{"type", TYPE_NAMES[std::min(static_cast<size_t>(field.type), TYPE_NAMES.size() - 1)]},
+                               {"strength", field.strength},
+                               {"radius", field.radius},
+                               {"falloff", field.falloff}});
+    }
+    document["forceFields"] = forceFields;
+
     json objects = json::array();
     for (uint32_t objectIndex = 0; objectIndex < scene.objects.size(); ++objectIndex) {
         const Object& object = scene.objects[objectIndex];
@@ -302,6 +312,9 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
         }
         if (object.cloth >= 0) {
             entry["cloth"] = object.cloth;
+        }
+        if (object.forceField >= 0) {
+            entry["forceField"] = object.forceField;
         }
         objects.push_back(std::move(entry));
     }
@@ -465,6 +478,18 @@ SceneFile readScene(const std::string& text) {
         file.scene.particleSystems.push_back(system);
     }
 
+    for (const json& entry : document.value("forceFields", json::array())) {
+        ForceField field;
+        std::string type = entry.value("type", std::string{"wind"});
+        field.type = type == "vortex"  ? ForceFieldType::VORTEX
+                     : type == "point" ? ForceFieldType::POINT
+                                       : ForceFieldType::WIND;
+        field.strength = entry.value("strength", field.strength);
+        field.radius = std::max(entry.value("radius", field.radius), 0.0F);
+        field.falloff = std::max(entry.value("falloff", field.falloff), 0.0F);
+        file.scene.forceFields.push_back(field);
+    }
+
     for (const json& entry : document.value("cloths", json::array())) {
         Cloth cloth;
         cloth.backend = toBackend(entry.value("backend", std::string{"auto"}));
@@ -505,6 +530,7 @@ SceneFile readScene(const std::string& text) {
         object.fluid = handle(entry.value("fluid", -1), file.scene.fluids.size());
         object.particleSystem = handle(entry.value("particleSystem", -1), file.scene.particleSystems.size());
         object.cloth = handle(entry.value("cloth", -1), file.scene.cloths.size());
+        object.forceField = handle(entry.value("forceField", -1), file.scene.forceFields.size());
         auto skin = entry.value("skin", -1);
         file.scene.objects.push_back(std::move(object));
         file.objectModels.push_back(entry.value("model", -1));

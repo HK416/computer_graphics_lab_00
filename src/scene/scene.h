@@ -282,6 +282,28 @@ struct Cloth {
     bool operator==(const Cloth&) const = default;
 };
 
+// 힘 마당의 종류. 바람은 오브젝트의 앞(-Z) 방향으로 일정하게 밀고, 소용돌이는 오브젝트 +Y 축 둘레로 돌리며,
+// 점은 오브젝트 위치로 끌어당긴다(세기가 음수면 밀어낸다).
+enum class ForceFieldType : uint32_t {
+    WIND = 0,
+    VORTEX = 1,
+    POINT = 2,
+};
+
+// 힘 마당 부품. 천·유체·GPU 입자가 같은 식으로 읽는다(physics/force_field.h ↔ shaders/force_field.glsl). 강체는
+// 읽지 않는다. 방향과 중심은 오브젝트 월드 변환에서 온다.
+struct ForceField {
+    ForceFieldType type = ForceFieldType::WIND;
+    // 단위 질량당 힘(가속도, m/s²).
+    float strength = 5.0F;
+    // 닿는 반지름(월드). 0 이면 무한이다.
+    float radius = 0.0F;
+    // 가장자리로 갈수록 (1 - d/r)^falloff 로 약해진다. 0 이면 반지름 안에서 일정하다.
+    float falloff = 1.0F;
+
+    bool operator==(const ForceField&) const = default;
+};
+
 struct Object {
     std::string name;
     // 부모 기준 지역 변환. 세계 변환은 Scene::worldMatrix 가 부모를 거슬러 올라가 만든다.
@@ -297,6 +319,7 @@ struct Object {
     int32_t fluid = -1;
     int32_t particleSystem = -1;
     int32_t cloth = -1;
+    int32_t forceField = -1;
 
     bool operator==(const Object&) const = default;
 };
@@ -360,6 +383,7 @@ struct SceneSnapshot {
     std::vector<Fluid> fluids;
     std::vector<ParticleSystem> particleSystems;
     std::vector<Cloth> cloths;
+    std::vector<ForceField> forceFields;
     glm::vec3 ambientColor{0.25F};
     float ambientIntensity = 1.0F;
     Environment environment;
@@ -379,6 +403,7 @@ struct Scene {
     std::vector<Fluid> fluids;
     std::vector<ParticleSystem> particleSystems;
     std::vector<Cloth> cloths;
+    std::vector<ForceField> forceFields;
     Camera camera;
     // 재생 중인지. 참일 때만 물리가 돌고, 편집기는 되돌리기 기록을 멈춘다. 저장하지 않는다.
     bool simulating = false;
@@ -449,6 +474,7 @@ struct Scene {
     int32_t attachFluid(uint32_t index, const Fluid& fluid = {});
     int32_t attachParticleSystem(uint32_t index, const ParticleSystem& system = {});
     int32_t attachCloth(uint32_t index, const Cloth& cloth = {});
+    int32_t attachForceField(uint32_t index, const ForceField& field = {});
     // 부품을 뗀다. 아무도 가리키지 않게 된 부품은 배열에서 빠지고 첨자가 다시 맞춰진다.
     void detachComponent(uint32_t index, int32_t Object::* handle);
     // 오브젝트에 붙은 T 부품. 없거나 첨자가 범위 밖이면 nullptr. 첨자를 손으로 가드하는 관용구를 대신한다.
@@ -508,6 +534,7 @@ template <typename SceneType, typename F> void forEachComponentKind(SceneType& s
     f(scene.fluids, &Object::fluid);
     f(scene.particleSystems, &Object::particleSystem);
     f(scene.cloths, &Object::cloth);
+    f(scene.forceFields, &Object::forceField);
 }
 
 // 부품 타입 → Object 의 첨자 멤버와 Scene 의 배열.
@@ -525,6 +552,7 @@ CG_LAB_COMPONENT_SLOT(RigidBody, rigidBody, rigidBodies);
 CG_LAB_COMPONENT_SLOT(Fluid, fluid, fluids);
 CG_LAB_COMPONENT_SLOT(ParticleSystem, particleSystem, particleSystems);
 CG_LAB_COMPONENT_SLOT(Cloth, cloth, cloths);
+CG_LAB_COMPONENT_SLOT(ForceField, forceField, forceFields);
 #undef CG_LAB_COMPONENT_SLOT
 
 template <typename T> T* Scene::component(uint32_t index) {

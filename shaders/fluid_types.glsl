@@ -15,6 +15,7 @@
 #define FLUID_SURFACE_GROUP_SIZE 4
 
 #include "collider_shapes.glsl"
+#include "force_field.glsl"
 #include "spatial_hash.glsl"
 
 // scene::ColliderShape 와 같은 번호. collider_shapes.glsl 이 정의를 갖는다.
@@ -63,6 +64,11 @@ struct FluidParams {
     uint pad1;
     uint pad2;
     FluidCollider colliders[FLUID_MAX_COLLIDERS];
+    uint fieldCount;
+    uint fieldPad0;
+    uint fieldPad1;
+    uint fieldPad2;
+    ForceField fields[FORCE_FIELD_MAX];
 };
 
 // VkAccelerationStructureInstanceKHR 와 같은 64 바이트. 주소는 uint 둘로 나눠 담는다.

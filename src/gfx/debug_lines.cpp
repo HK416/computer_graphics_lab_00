@@ -181,6 +181,40 @@ void buildDebugLines(const scene::Scene& scene, const DebugLineOptions& options,
             }
         }
 
+        // 힘 마당. 바람은 앞(-Z) 화살표, 소용돌이는 +Y 축과 둘레 원, 점은 세 축 원. 반지름 0(무한)은 1 로 그린다.
+        if (options.fluidBounds && object.forceField >= 0 &&
+            static_cast<size_t>(object.forceField) < scene.forceFields.size()) {
+            const scene::ForceField& field = scene.forceFields[static_cast<size_t>(object.forceField)];
+            glm::vec3 center = glm::vec3(world[3]);
+            auto unit = [](glm::vec3 v) {
+                return glm::length(v) > 1.0e-6F ? glm::normalize(v) : glm::vec3{0.0F, 1.0F, 0.0F};
+            };
+            glm::vec3 forward = unit(-glm::vec3(world[2]));
+            glm::vec3 up = unit(glm::vec3(world[1]));
+            glm::vec3 right = unit(glm::vec3(world[0]));
+            float radius = field.radius > 0.0F ? field.radius : 1.0F;
+            uint32_t color = DEBUG_COLOR_FORCE_FIELD;
+            switch (field.type) {
+            case scene::ForceFieldType::WIND: {
+                glm::vec3 tip = center + forward * radius;
+                line(out, center, tip, color);
+                line(out, tip, tip - forward * (0.2F * radius) + right * (0.1F * radius), color);
+                line(out, tip, tip - forward * (0.2F * radius) - right * (0.1F * radius), color);
+                circle(out, center, right, up, radius, color);
+                break;
+            }
+            case scene::ForceFieldType::VORTEX:
+                line(out, center - up * (0.5F * radius), center + up * (0.5F * radius), color);
+                circle(out, center, right, forward, radius, color);
+                break;
+            case scene::ForceFieldType::POINT:
+                circle(out, center, right, up, radius, color);
+                circle(out, center, right, forward, radius, color);
+                circle(out, center, up, forward, radius, color);
+                break;
+            }
+        }
+
         if (options.fluidBounds && object.fluid >= 0 && static_cast<size_t>(object.fluid) < scene.fluids.size()) {
             const scene::Fluid& fluid = scene.fluids[static_cast<size_t>(object.fluid)];
             // 용기는 월드 공간, 방출 상자는 오브젝트 지역 공간이다(scene::Fluid 주석).

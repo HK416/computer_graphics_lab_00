@@ -22,6 +22,7 @@ inline constexpr uint32_t DEBUG_COLOR_COLLIDER = 0xFF40D040U;
 inline constexpr uint32_t DEBUG_COLOR_COLLIDER_SELECTED = 0xFF80FF80U;
 inline constexpr uint32_t DEBUG_COLOR_FLUID_CONTAINER = 0xFFD0D040U;
 inline constexpr uint32_t DEBUG_COLOR_FLUID_EMITTER = 0xFF40D0D0U;
+inline constexpr uint32_t DEBUG_COLOR_FORCE_FIELD = 0xFFF060F0U;
 
 struct DebugLineOptions {
     bool colliders = true;

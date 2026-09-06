@@ -9,6 +9,7 @@
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
+#include "physics/force_field.h"
 #include "scene/scene.h"
 
 namespace core {
@@ -61,6 +62,8 @@ struct FluidParams {
     uint32_t cellCount = 1024;
     uint32_t colliderCount = 0;
     std::array<FluidCollider, FLUID_MAX_COLLIDERS> colliders{};
+    uint32_t fieldCount = 0;
+    std::array<ForceFieldSample, MAX_FORCE_FIELDS> fields{};
 };
 
 FluidParams deriveFluidParams(const scene::Fluid& settings,

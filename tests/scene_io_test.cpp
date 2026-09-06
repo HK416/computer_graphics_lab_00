@@ -94,6 +94,12 @@ scene::Scene makeScene() {
     particles.color = glm::vec4{0.1F, 0.2F, 0.3F, 0.5F};
     particles.collide = false;
     scene.attachParticleSystem(1, particles);
+    scene::ForceField field;
+    field.type = scene::ForceFieldType::VORTEX;
+    field.strength = -2.5F;
+    field.radius = 3.0F;
+    field.falloff = 0.5F;
+    scene.attachForceField(0, field);
     return scene;
 }
 
@@ -156,6 +162,11 @@ int main() {
     assert(loaded.scene.particleSystems[0].maxParticles == 2048 && !loaded.scene.particleSystems[0].collide);
     assert(std::abs(loaded.scene.particleSystems[0].emitRate - 55.0F) < 1e-5F);
     assert(std::abs(loaded.scene.particleSystems[0].color.a - 0.5F) < 1e-5F);
+    assert(loaded.scene.forceFields.size() == 1 && loaded.scene.objects[0].forceField == 0);
+    assert(loaded.scene.forceFields[0].type == scene::ForceFieldType::VORTEX);
+    assert(std::abs(loaded.scene.forceFields[0].strength + 2.5F) < 1e-5F);
+    assert(std::abs(loaded.scene.forceFields[0].radius - 3.0F) < 1e-5F);
+    assert(std::abs(loaded.scene.forceFields[0].falloff - 0.5F) < 1e-5F);
 
     // 부품이 없던 옛 판(1) 파일도 그대로 읽힌다.
     scene::SceneFile old = scene::readScene(R"({"version":1,"name":"옛 장면","objects":[{"name":"a"}]})");

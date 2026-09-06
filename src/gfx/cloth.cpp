@@ -378,6 +378,8 @@ void ClothSimulator::record(VkCommandBuffer commandBuffer,
         collider.world = source.world;
         collider.inverseWorld = source.inverseWorld;
     }
+    gpuParams.fieldCount = params.fieldCount;
+    fillForceFields(params.fields, params.fieldCount, gpuParams.fields);
     std::memcpy(state.params[frameSlot].mapped, &gpuParams, sizeof(gpuParams));
 
     rayQuery = rayQuery && finishRayQueryPipeline != VK_NULL_HANDLE;

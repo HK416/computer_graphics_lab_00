@@ -27,7 +27,12 @@ void main() {
     }
     float h = push.dt;
     vec3 velocity = push.velocities.items[i].xyz;
-    velocity += params.accelerationDamping.xyz * h;
+    // 힘 마당은 정점 위치마다 다르다. CPU(physics/cloth.cpp)와 같은 순서로 더한다.
+    vec3 acceleration = params.accelerationDamping.xyz;
+    for (uint f = 0u; f < params.fieldCount; ++f) {
+        acceleration += forceFieldAcceleration(params.fields[f], position.xyz);
+    }
+    velocity += acceleration * h;
     velocity *= max(1.0 - params.accelerationDamping.w * h, 0.0);
     push.velocities.items[i] = vec4(velocity, 0.0);
     push.predicted.items[i] = vec4(position.xyz + velocity * h, position.w);

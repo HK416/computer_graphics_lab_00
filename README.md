@@ -486,6 +486,15 @@ CPU 는 표본마다 입자 전부를 훑던 것을 이렇게 바꿔 8192 입자
 ./build/release/cg_lab --open tests/scenes/particles.json --play --screenshot particles.png --screenshot-frame 120
 ```
 
+### 힘 마당 (Force Field)
+
+오브젝트에 붙이는 부품으로, 천·유체·GPU 입자가 같은 식으로 읽는다(`physics/force_field.h` ↔ `shaders/force_field.glsl`,
+세 시뮬레이터의 설정 구조체 끝에 같은 배열이 붙는다). 강체는 읽지 않는다. 종류는 셋이다: **Wind** 는 오브젝트의
+앞(-Z)으로 일정하게 밀고, **Vortex** 는 오브젝트 +Y 축 둘레로 돌리며, **Point** 는 오브젝트 위치로 끌어당긴다(세기가
+음수면 밀어낸다). 세기는 단위 질량당 힘(m/s²), 반지름 0 은 무한, 가장자리로 갈수록 `(1 − d/r)^감쇠` 로 약해진다.
+콜라이더 표시를 켜면 자홍색 기즈모(바람 화살표, 소용돌이 축과 원, 점의 구)로 보인다. 장면마다 8 개까지 읽는다(ponytail:
+입자마다 선형 순회). `tests/scenes/forcefield_cloth_cpu.json` / `_gpu.json` 이 옆바람을 받는 천이다.
+
 ### 천 (XPBD)
 
 «천» 부품은 내장 **천 격자**(16·32·64 분할, `<builtin:cloth32>` 같은 이름) 메쉬를 XPBD 로 움직인다. 크기는

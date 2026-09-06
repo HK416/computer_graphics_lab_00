@@ -9,6 +9,7 @@
 #include <glm/vec4.hpp>
 
 #include "physics/fluid_sph.h"
+#include "physics/force_field.h"
 #include "scene/scene.h"
 
 namespace core {
@@ -79,6 +80,8 @@ struct ClothParams {
     float frameStep = 0.0F;
     uint32_t colliderCount = 0;
     std::array<FluidCollider, CLOTH_MAX_COLLIDERS> colliders{};
+    uint32_t fieldCount = 0;
+    std::array<ForceFieldSample, MAX_FORCE_FIELDS> fields{};
 };
 
 // 세계 공간 삼각형. CPU 백엔드의 메쉬 콜라이더 충돌이 읽는다.
