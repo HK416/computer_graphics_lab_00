@@ -1,0 +1,280 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_ray_query : require
+
+#include "bindless.glsl"
+#include "fluid_types.glsl"
+#include "fog.glsl"
+#include "lighting.glsl"
+#include "material.glsl"
+#include "ray_query.glsl"
+#include "restir.glsl"
+#include "sampling.glsl"
+#include "scene_types.glsl"
+#include "water_shading.glsl"
+
+// DDGI 프로브 갱신. 장면 경계 상자에 깔린 프로브 격자(camera.probe*)에서 프레임마다 프로브당 광선 N개를 광선
+// 질의로 쏘고(STAGE 0), 결과를 8면체 조도 아틀라스(STAGE 1, 8×8)와 가시성 아틀라스(STAGE 2, 16×16, 평균 거리와
+// 거리²)에 히스테리시스로 섞은 뒤 테두리 텍셀을 채운다(STAGE 3). 읽는 쪽은 lighting.glsl 의 probeIrradiance 다.
+// 히트 셰이딩은 반사와 같은 hit_shading.glsl 이고, 그 안의 환경광이 지난 프레임 프로브를 읽어 다중 반사가 한
+// 프레임씩 번져 간다.
+layout(local_size_x = 64) in;
+layout(constant_id = 0) const uint STAGE = 0;
+
+layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevel;
+
+// 프로브 × 광선의 추적 결과. rgb 복사휘도, w 히트 거리(미스는 MISS_DISTANCE, 뒷면 히트는 음수).
+layout(buffer_reference, scalar) buffer DdgiResultBuffer {
+    vec4 items[];
+};
+
+layout(push_constant) uniform DdgiPushConstants {
+    VertexBuffer vertices;
+    VertexBuffer skinnedVertices;
+    IndexBuffer indices;
+    MeshBuffer meshes;
+    InstanceBuffer instances;
+    MaterialBuffer materials;
+    MeshLodBuffer lods;
+    CameraBuffer camera;
+    LightBuffer lights;
+    FluidSurfaceInfoBuffer fluidSurfaces;
+    DdgiResultBuffer results;
+    uint frameIndex;
+    // 하위 8비트 직접광 후보 수, 비트 8 히스토리 버림(볼륨이 바뀜), 비트 16~31 프로브당 광선 수.
+    uint params;
+    // 하위 16비트 조도 아틀라스 스토리지 슬롯, 상위 16비트 가시성 아틀라스 스토리지 슬롯.
+    uint atlasStorage;
+} push;
+
+uint hitLightCandidates() {
+    return max(push.params & 0xFFu, 1u);
+}
+bool ddgiReset() {
+    return (push.params & (1u << 8u)) != 0u;
+}
+uint ddgiRayCount() {
+    return max(push.params >> 16u, 1u);
+}
+uint irradianceStorage() {
+    return push.atlasStorage & 0xFFFFu;
+}
+uint visibilityStorage() {
+    return push.atlasStorage >> 16u;
+}
+
+#include "hit_shading.glsl"
+
+// 뒷면 히트의 거리는 이 배수로 줄여 가시성에 넣는다. 벽 속에 박힌 프로브가 «아주 가깝다»로 보여 무시된다.
+const float BACKFACE_DISTANCE_SCALE = 0.2;
+// 가시성 거리의 상한은 간격 길이의 이 배수다.
+const float VISIBILITY_RANGE_SCALE = 1.5;
+
+vec3 rotateByQuaternion(vec4 q, vec3 v) {
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+
+// 프레임마다 다른 균일 회전. 시드가 frameIndex 뿐이라 실행마다 같다.
+vec4 frameRotation() {
+    uint seed = pcgHash(push.frameIndex * 31337u + 7u);
+    float u1 = randomFloat(seed);
+    float u2 = randomFloat(seed) * 6.28318530718;
+    float u3 = randomFloat(seed) * 6.28318530718;
+    float a = sqrt(1.0 - u1);
+    float b = sqrt(u1);
+    return vec4(a * sin(u2), a * cos(u2), b * sin(u3), b * cos(u3));
+}
+
+// 구면 피보나치 방향을 프레임 회전으로 돌린다. 갱신 단계가 같은 방향을 다시 만들어 광선 결과와 짝을 맞춘다.
+vec3 probeRayDirection(uint ray, uint rayCount, vec4 rotation) {
+    float i = float(ray) + 0.5;
+    float cosTheta = 1.0 - 2.0 * i / float(rayCount);
+    float sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
+    float phi = i * 2.39996322973;
+    return rotateByQuaternion(rotation, vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
+}
+
+// 8면체 텍셀 중심의 방향. lighting.glsl 의 probeOctahedralUv 와 역이다.
+vec3 octahedralDirection(vec2 uv) {
+    vec2 p = uv * 2.0 - 1.0;
+    vec3 n = vec3(p, 1.0 - abs(p.x) - abs(p.y));
+    float t = clamp(-n.z, 0.0, 1.0);
+    n.xy += vec2(n.x >= 0.0 ? -t : t, n.y >= 0.0 ? -t : t);
+    return normalize(n);
+}
+
+void traceStage(Camera camera, uint gid) {
+    uvec3 counts = probeCounts(camera);
+    uint rayCount = ddgiRayCount();
+    uint probeTotal = counts.x * counts.y * counts.z;
+    if (gid >= probeTotal * rayCount) {
+        return;
+    }
+    uint probe = gid / rayCount;
+    uint ray = gid - probe * rayCount;
+    vec3 origin = probePosition(camera, probeCoordOf(probe, counts));
+    vec3 direction = probeRayDirection(ray, rayCount, frameRotation());
+    uint seed = pcgHash(gid + push.frameIndex * 9781u);
+
+    // 뒷면도 맞힌다. 프로브가 벽 뒤에 있으면 그것을 알아야 가시성이 그 프로브를 지운다.
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, topLevel, gl_RayFlagsNoneEXT, 0xFFu, origin, 1.0e-4, direction, MISS_DISTANCE);
+    CONFIRM_CUTOFF_CANDIDATES(query)
+    vec4 result;
+    if (rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+        uvec4 environment = camera.environment;
+        vec3 sky = environment.w != 0u ? sampleBindlessCube(camera.shading.w, direction).rgb : camera.ambient.rgb;
+        result = vec4(sky, MISS_DISTANCE);
+    } else {
+        float hitDistance = rayQueryGetIntersectionTEXT(query, true);
+        if (!rayQueryGetIntersectionFrontFaceEXT(query, true)) {
+            result = vec4(0.0, 0.0, 0.0, -hitDistance);
+        } else {
+            result = vec4(shadeCommittedHit(camera,
+                                            origin,
+                                            direction,
+                                            hitDistance,
+                                            uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, true)),
+                                            uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, true)),
+                                            rayQueryGetIntersectionBarycentricsEXT(query, true),
+                                            seed),
+                          hitDistance);
+        }
+    }
+    push.results.items[gid] = result;
+}
+
+// 조도 텍셀 하나. 텍셀 방향 쪽 광선을 코사인으로 가중해 평균한다(= E/π, IBL 조도 큐브와 같은 뜻).
+void irradianceStage(Camera camera, uint gid) {
+    uvec3 counts = probeCounts(camera);
+    uint probeTotal = counts.x * counts.y * counts.z;
+    uint texelsPerProbe = uint(PROBE_IRRADIANCE_TEXELS * PROBE_IRRADIANCE_TEXELS);
+    if (gid >= probeTotal * texelsPerProbe) {
+        return;
+    }
+    uint probe = gid / texelsPerProbe;
+    uint texel = gid - probe * texelsPerProbe;
+    ivec2 local = ivec2(int(texel % uint(PROBE_IRRADIANCE_TEXELS)), int(texel / uint(PROBE_IRRADIANCE_TEXELS)));
+    vec3 direction = octahedralDirection((vec2(local) + 0.5) / float(PROBE_IRRADIANCE_TEXELS));
+    uint rayCount = ddgiRayCount();
+    vec4 rotation = frameRotation();
+
+    vec3 sum = vec3(0.0);
+    float weightSum = 0.0;
+    for (uint ray = 0u; ray < rayCount; ++ray) {
+        vec4 hit = push.results.items[probe * rayCount + ray];
+        if (hit.w < 0.0) {
+            continue;
+        }
+        float weight = max(dot(direction, probeRayDirection(ray, rayCount, rotation)), 0.0);
+        sum += hit.rgb * weight;
+        weightSum += weight;
+    }
+    vec3 irradiance = weightSum > 1.0e-4 ? sum / weightSum : vec3(0.0);
+
+    ivec2 pixel = probeAtlasCell(counts, probeCoordOf(probe, counts), PROBE_IRRADIANCE_TEXELS) + 1 + local;
+    uint slot = irradianceStorage();
+    vec3 previous = imageLoad(bindlessStorageImagesRgba16[nonuniformEXT(slot)], pixel).rgb;
+    float hysteresis = ddgiReset() ? 0.0 : camera.probeSpacing.w;
+    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slot)], pixel, vec4(mix(irradiance, previous, hysteresis), 1.0));
+}
+
+// 가시성 텍셀 하나. 방향 쪽으로 좁게 가중한 평균 거리와 거리². Chebyshev 검사가 읽는다.
+void visibilityStage(Camera camera, uint gid) {
+    uvec3 counts = probeCounts(camera);
+    uint probeTotal = counts.x * counts.y * counts.z;
+    uint texelsPerProbe = uint(PROBE_VISIBILITY_TEXELS * PROBE_VISIBILITY_TEXELS);
+    if (gid >= probeTotal * texelsPerProbe) {
+        return;
+    }
+    uint probe = gid / texelsPerProbe;
+    uint texel = gid - probe * texelsPerProbe;
+    ivec2 local = ivec2(int(texel % uint(PROBE_VISIBILITY_TEXELS)), int(texel / uint(PROBE_VISIBILITY_TEXELS)));
+    vec3 direction = octahedralDirection((vec2(local) + 0.5) / float(PROBE_VISIBILITY_TEXELS));
+    uint rayCount = ddgiRayCount();
+    vec4 rotation = frameRotation();
+    float maxDistance = camera.probeOrigin.w * VISIBILITY_RANGE_SCALE;
+
+    vec2 sum = vec2(0.0);
+    float weightSum = 0.0;
+    for (uint ray = 0u; ray < rayCount; ++ray) {
+        vec4 hit = push.results.items[probe * rayCount + ray];
+        float distance = hit.w < 0.0 ? -hit.w * BACKFACE_DISTANCE_SCALE : hit.w;
+        distance = min(distance, maxDistance);
+        float weight = pow(max(dot(direction, probeRayDirection(ray, rayCount, rotation)), 0.0), 50.0);
+        sum += vec2(distance, distance * distance) * weight;
+        weightSum += weight;
+    }
+    vec2 moments = weightSum > 1.0e-6 ? sum / weightSum : vec2(maxDistance, maxDistance * maxDistance);
+
+    ivec2 pixel = probeAtlasCell(counts, probeCoordOf(probe, counts), PROBE_VISIBILITY_TEXELS) + 1 + local;
+    uint slot = visibilityStorage();
+    vec2 previous = imageLoad(bindlessStorageImagesRg16[nonuniformEXT(slot)], pixel).rg;
+    float hysteresis = ddgiReset() ? 0.0 : camera.probeSpacing.w;
+    imageStore(bindlessStorageImagesRg16[nonuniformEXT(slot)], pixel, vec4(mix(moments, previous, hysteresis), 0.0, 0.0));
+}
+
+// 8면체 접기 규칙으로 테두리를 채운다. 안쪽 텍셀 (1..n) 좌표계에서 가장자리는 맞은편을 뒤집어 복사하고 모서리는
+// 대각선 반대편이다. 그래야 이중 선형 샘플이 셀 경계를 넘어도 이어진다.
+ivec2 borderSource(ivec2 border, int n) {
+    bool left = border.x == 0;
+    bool right = border.x == n + 1;
+    bool top = border.y == 0;
+    bool bottom = border.y == n + 1;
+    if ((left || right) && (top || bottom)) {
+        return ivec2(left ? n : 1, top ? n : 1);
+    }
+    if (left || right) {
+        return ivec2(left ? 1 : n, n + 1 - border.y);
+    }
+    return ivec2(n + 1 - border.x, top ? 1 : n);
+}
+
+void borderStage(Camera camera, uint gid) {
+    uvec3 counts = probeCounts(camera);
+    uint probeTotal = counts.x * counts.y * counts.z;
+    if (gid >= probeTotal) {
+        return;
+    }
+    uvec3 coord = probeCoordOf(gid, counts);
+    {
+        int n = PROBE_IRRADIANCE_TEXELS;
+        ivec2 cell = probeAtlasCell(counts, coord, n);
+        uint slot = irradianceStorage();
+        for (int i = 0; i < n + 2; ++i) {
+            ivec2 edges[4] = ivec2[4](ivec2(i, 0), ivec2(i, n + 1), ivec2(0, i), ivec2(n + 1, i));
+            for (int e = 0; e < 4; ++e) {
+                vec4 value = imageLoad(bindlessStorageImagesRgba16[nonuniformEXT(slot)], cell + borderSource(edges[e], n));
+                imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slot)], cell + edges[e], value);
+            }
+        }
+    }
+    {
+        int n = PROBE_VISIBILITY_TEXELS;
+        ivec2 cell = probeAtlasCell(counts, coord, n);
+        uint slot = visibilityStorage();
+        for (int i = 0; i < n + 2; ++i) {
+            ivec2 edges[4] = ivec2[4](ivec2(i, 0), ivec2(i, n + 1), ivec2(0, i), ivec2(n + 1, i));
+            for (int e = 0; e < 4; ++e) {
+                vec4 value = imageLoad(bindlessStorageImagesRg16[nonuniformEXT(slot)], cell + borderSource(edges[e], n));
+                imageStore(bindlessStorageImagesRg16[nonuniformEXT(slot)], cell + edges[e], value);
+            }
+        }
+    }
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    Camera camera = push.camera.item;
+    if (STAGE == 0u) {
+        traceStage(camera, gid);
+    } else if (STAGE == 1u) {
+        irradianceStage(camera, gid);
+    } else if (STAGE == 2u) {
+        visibilityStage(camera, gid);
+    } else {
+        borderStage(camera, gid);
+    }
+}

@@ -100,6 +100,7 @@ Renderer::Renderer(Context& context,
     createFluidSurfacePipelines();
     createReflectionPipelines();
     createRestirPipelines();
+    createDdgiPipelines();
     createCullPipeline();
     createSkinPipeline();
     createShadowPipeline();
@@ -156,6 +157,11 @@ Renderer::~Renderer() {
     vkDestroyPipelineLayout(context.device, skinPipelineLayout, nullptr);
     destroyBuffer(context, skinnedBoundsBuffer);
     destroyBuffer(context, skinnedVertexBuffer);
+    for (VkPipeline pipeline : ddgiPipelines) {
+        vkDestroyPipeline(context.device, pipeline, nullptr);
+    }
+    vkDestroyPipelineLayout(context.device, ddgiPipelineLayout, nullptr);
+    destroyDdgiResources();
     vkDestroyPipeline(context.device, restirSpatialPipeline, nullptr);
     vkDestroyPipeline(context.device, restirTemporalPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, restirPipelineLayout, nullptr);
@@ -556,6 +562,22 @@ void Renderer::recordCommands(Frame& frame,
                {},
                {},
                [&](VkCommandBuffer cmd) { recordShadowPass(cmd); }});
+
+    // DDGI 프로브 갱신. 불투명 패스가 아틀라스를 읽으므로 그 앞이고, 히트 셰이딩이 그림자 대신 광선을 쓰므로
+    // 그림자 뒤에 있을 이유는 없지만 TLAS 가 필요해 여기서 먼저 세운다. 아틀라스는 그래프가 추적하지 않고
+    // 패스 안에서 GENERAL 로 고정한다.
+    graph.add({"DDGI",
+               nullptr,
+               [&] { return !pathTracing && ddgiActive() && sceneHasBounds; },
+               {},
+               {},
+               {},
+               [&](VkCommandBuffer cmd) {
+                   updateAccelerationStructures(cmd, scene);
+                   if (rayTracer->ready()) {
+                       recordDdgiPass(cmd, frame);
+                   }
+               }});
 
     // ---- 경로 추적 경로. 모션 벡터와 깊이는 광선 생성 셰이더가 직접 쓰고 읽기 전용으로 남긴다.
     graph.add({"경로 추적",

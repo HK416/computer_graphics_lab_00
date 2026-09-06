@@ -187,7 +187,38 @@ struct Camera {
     // x 디버그 뷰(DEBUG_MODE_*). 푸시 상수가 128 바이트에 꽉 차서 프레임에 한 번 정해지는 값은 여기로
     // 온다. y ReSTIR 직접광이 켜져 있으면 1(불투명 픽셀은 광원 루프를 건너뛴다). zw 예약.
     uvec4 flags;
+    // DDGI 프로브 격자. probeOrigin xyz 원점, w 간격 길이. probeSpacing xyz 간격, w 히스테리시스.
+    // probe x 축별 개수(8비트씩 x|y<<8|z<<16), y 조도 아틀라스 샘플 슬롯, z 가시성 아틀라스 샘플 슬롯, w 켜짐
+    // (0 이면 확산 조도는 IBL 큐브).
+    vec4 probeOrigin;
+    vec4 probeSpacing;
+    uvec4 probe;
 };
+
+// DDGI 프로브 격자 헬퍼. src/gfx/renderer_ddgi.cpp 의 상수·아틀라스 배치와 같아야 한다. 프로브 (x, y, z) 는
+// 아틀라스 칸 (x + nx·z, y) 에 놓이고 칸 한 변은 텍셀 수 + 테두리 2 다.
+#define PROBE_IRRADIANCE_TEXELS 8
+#define PROBE_VISIBILITY_TEXELS 16
+
+uvec3 probeCounts(Camera camera) {
+    uint packed = camera.probe.x;
+    return uvec3(packed & 0xFFu, (packed >> 8u) & 0xFFu, (packed >> 16u) & 0xFFu);
+}
+
+uvec3 probeCoordOf(uint index, uvec3 counts) {
+    uint x = index % counts.x;
+    uint y = (index / counts.x) % counts.y;
+    uint z = index / (counts.x * counts.y);
+    return uvec3(x, y, z);
+}
+
+vec3 probePosition(Camera camera, uvec3 coord) {
+    return camera.probeOrigin.xyz + vec3(coord) * camera.probeSpacing.xyz;
+}
+
+ivec2 probeAtlasCell(uvec3 counts, uvec3 coord, int texels) {
+    return ivec2(int(coord.x + counts.x * coord.z), int(coord.y)) * (texels + 2);
+}
 
 // 화면 UV 와 깊이에서 월드 위치를 되돌린다. 역 뷰프로젝션 하나면 되므로 시야 공간을 따로 두지 않는다.
 // SSAO 와 반사 컴퓨트가 함께 쓴다.
@@ -240,6 +271,8 @@ struct DrawCommand {
 #define DEBUG_MODE_REFLECTION_FILTERED 12u
 // ReSTIR 가 픽셀마다 고른 광원 번호를 색으로.
 #define DEBUG_MODE_RESTIR_LIGHT 13u
+// 표면 위치·노멀에서 읽은 DDGI 프로브 조도.
+#define DEBUG_MODE_PROBE_IRRADIANCE 14u
 
 // 두 패스 오클루전 컬링의 단계. 컬 컴퓨트·태스크 셰이더가 판정에 쓰고 프래그먼트가 디버그 뷰에 쓴다.
 #define CULL_PHASE_NONE 0u   // 오클루전 끔. 후보면 그린다.

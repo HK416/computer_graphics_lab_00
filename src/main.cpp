@@ -72,6 +72,12 @@ int main(int argc, char* argv[]) {
         } else if (argument == "--no-restir") {
             options.restir = false;
             options.restirGiven = true;
+        } else if (argument == "--ddgi") {
+            options.ddgi = true;
+            options.ddgiGiven = true;
+        } else if (argument == "--no-ddgi") {
+            options.ddgi = false;
+            options.ddgiGiven = true;
         } else if (argument == "--light-candidates" && i + 1 < argc) {
             options.lightCandidates = static_cast<uint32_t>(std::atoi(argv[++i]));
         } else if (argument == "--no-colliders") {

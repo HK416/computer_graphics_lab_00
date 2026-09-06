@@ -144,6 +144,7 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
         settings.useReflections = options.reflections;
         settings.reflectionDenoise = options.reflectionDenoise;
         settings.useRestir = options.restir;
+        settings.useDdgi = options.ddgi;
         if (options.lightCandidates > 0) {
             settings.restirCandidates = options.lightCandidates;
             settings.pathTrace.lightCandidates = options.lightCandidates;
@@ -313,6 +314,9 @@ void Application::applyHardwareProfile() {
     settings.useRayQueryShadows = hardwareProfile.rayQueryShadows;
     if (!options.restirGiven) {
         settings.useRestir = hardwareProfile.restir;
+    }
+    if (!options.ddgiGiven) {
+        settings.useDdgi = hardwareProfile.ddgi;
     }
 
     spdlog::info("자동 튜닝({}): 등급 {}", gfx::autoTuneName(options.autoTune), gfx::tierName(hardwareProfile.tier));

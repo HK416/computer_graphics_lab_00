@@ -198,8 +198,11 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
         hasBounds = true;
     }
     glm::vec3 sceneCenter = hasBounds ? (minimum + maximum) * 0.5F : glm::vec3{0.0F};
-    // 멤버에 담아 SSAO 반지름을 장면 크기에 맞추는 데도 쓴다.
+    // 멤버에 담아 SSAO 반지름을 장면 크기에 맞추는 데도 쓴다. 경계 상자는 DDGI 프로브 격자가 쓴다.
     sceneRadius = hasBounds ? std::max(glm::length(maximum - minimum) * 0.5F, 1.0F) : 1.0F;
+    sceneMinimum = minimum;
+    sceneMaximum = maximum;
+    sceneHasBounds = hasBounds;
 
     bool sunAssigned = false;
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
@@ -785,6 +788,33 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     camera->fogParameters = glm::vec4{scene.post.fogHeight, scene.post.fogFalloff, 0.0F, 0.0F};
     // y: ReSTIR 가 직접광을 맡으면 1. 래스터의 불투명 픽셀은 광원 루프를 건너뛴다.
     camera->flags = glm::uvec4{settings.debugMode, restirActive() ? 1U : 0U, 0U, 0U};
+    // DDGI 프로브 격자. 장면 경계 상자를 조금 넓혀 축마다 n 개를 깐다. 원점·간격이 바뀐 프레임은 아틀라스를
+    // 히스테리시스 없이 덮어쓴다.
+    camera->probeOrigin = glm::vec4{0.0F};
+    camera->probeSpacing = glm::vec4{0.0F};
+    camera->probe = glm::uvec4{0U};
+    ddgiResetThisFrame = false;
+    if (ddgiActive() && sceneHasBounds) {
+        uint32_t probes = std::clamp(settings.ddgiProbes, 2U, 16U);
+        uint32_t rays = std::clamp(settings.ddgiRays, 8U, 256U);
+        ensureDdgiResources(probes, rays);
+        glm::vec3 extent = glm::max(sceneMaximum - sceneMinimum, glm::vec3{1.0e-3F});
+        glm::vec3 pad = extent * 0.05F;
+        glm::vec3 origin = sceneMinimum - pad;
+        glm::vec3 spacing = (extent + 2.0F * pad) / static_cast<float>(probes - 1);
+        bool moved = glm::any(glm::greaterThan(glm::abs(origin - ddgiOrigin), glm::vec3{1.0e-3F})) ||
+                     glm::any(glm::greaterThan(glm::abs(spacing - ddgiSpacing), glm::vec3{1.0e-3F}));
+        ddgiResetThisFrame = moved || !ddgiVolumeValid;
+        ddgiOrigin = origin;
+        ddgiSpacing = spacing;
+        ddgiVolumeValid = true;
+        camera->probeOrigin = glm::vec4{origin, glm::length(spacing)};
+        camera->probeSpacing = glm::vec4{spacing, std::clamp(settings.ddgiHysteresis, 0.0F, 0.99F)};
+        camera->probe = glm::uvec4{
+            probes | (probes << 8U) | (probes << 16U), targets.ddgiIrradianceSlot, targets.ddgiVisibilitySlot, 1U};
+    } else {
+        ddgiVolumeValid = false;
+    }
     previousViewProjection = unjitteredViewProjection;
     temporalResetThisFrame = temporalReset;
 

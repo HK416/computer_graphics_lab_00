@@ -59,6 +59,7 @@ inline constexpr uint32_t DEBUG_MODE_REFLECTION_RAW = 10;
 inline constexpr uint32_t DEBUG_MODE_REFLECTION = 11;
 inline constexpr uint32_t DEBUG_MODE_REFLECTION_FILTERED = 12;
 inline constexpr uint32_t DEBUG_MODE_RESTIR_LIGHT = 13;
+inline constexpr uint32_t DEBUG_MODE_PROBE_IRRADIANCE = 14;
 
 // 경로 추적이 그릴 수 있는 디버그 뷰인지. meshlet 과 LOD 는 하위 가속 구조가 메쉬 단위 LOD 0 이라
 // 개념 자체가 없고, 캐스케이드는 그림자 맵을 읽지 않으며, 모션 벡터는 경로 추적 프레임에 갱신되지
@@ -221,6 +222,14 @@ struct RenderTargets {
     std::array<uint32_t, 2> restirReservoirStorageSlots{};
     std::array<uint32_t, 2> restirGeometryStorageSlots{};
     std::array<Buffer, 2> restirSlotBuffers;
+    // DDGI 아틀라스(조도 rgba16f, 가시성 rg16f)와 프로브 × 광선 결과. 프로브·광선 수가 바뀔 때 다시 잡는다.
+    Image ddgiIrradiance;
+    Image ddgiVisibility;
+    Buffer ddgiResults;
+    uint32_t ddgiIrradianceSlot = 0;
+    uint32_t ddgiVisibilitySlot = 0;
+    uint32_t ddgiIrradianceStorageSlot = 0;
+    uint32_t ddgiVisibilityStorageSlot = 0;
     // 반사 컴퓨트가 HDR 색상에 직접 더할 때 쓰는 rgba16f 스토리지 슬롯.
     uint32_t colorStorageSlot = 0;
 
@@ -321,6 +330,8 @@ public:
     bool reflectionsActive() const;
     // ReSTIR 직접광이 이번 프레임 도는지. 설정이 켜져 있고 광선 질의가 있으며 경로 추적이 아닐 때.
     bool restirActive() const;
+    // DDGI 가 도는지. 같은 조건에 장면 경계가 있어야 한다.
+    bool ddgiActive() const;
     LodNetwork lodNetwork;
     uint32_t lastSelectedTriangles = 0;
 
@@ -451,6 +462,10 @@ private:
     void recordReflectionPass(VkCommandBuffer commandBuffer, const Frame& frame);
     void createRestirPipelines();
     void recordRestirPass(VkCommandBuffer commandBuffer, const Frame& frame);
+    void createDdgiPipelines();
+    void destroyDdgiResources();
+    void ensureDdgiResources(uint32_t probesPerAxis, uint32_t raysPerProbe);
+    void recordDdgiPass(VkCommandBuffer commandBuffer, const Frame& frame);
     // Bloom 밉 사슬과 자동 노출. 톤 매핑이 읽을 이미지를 원본으로 받는다.
     void recordPostEffects(VkCommandBuffer commandBuffer,
                            const scene::PostProcess& post,
@@ -512,6 +527,17 @@ private:
     // ReSTIR 히스토리가 이어지는지와 지난 프레임 광원 수(광원 번호가 어긋나면 버린다).
     bool restirHistoryValid = false;
     uint32_t restirLastLightCount = 0;
+    VkPipelineLayout ddgiPipelineLayout = VK_NULL_HANDLE;
+    std::array<VkPipeline, 4> ddgiPipelines{};
+    // 지금 아틀라스가 담는 프로브·광선 수, 아틀라스 첫 전이 여부, 볼륨(원점·간격)이 지난 프레임과 같은지.
+    uint32_t ddgiProbesPerAxis = 0;
+    uint32_t ddgiRaysPerProbe = 0;
+    bool ddgiSlotsAllocated = false;
+    bool ddgiAtlasInitialized = false;
+    bool ddgiVolumeValid = false;
+    bool ddgiResetThisFrame = false;
+    glm::vec3 ddgiOrigin{0.0F};
+    glm::vec3 ddgiSpacing{1.0F};
     // 지난 프레임에 반사 히스토리를 남겼는지. 아니면 이번 해결은 히스토리를 버린다.
     bool reflectionHistoryValid = false;
     VkPipelineLayout bloomPipelineLayout = VK_NULL_HANDLE;
@@ -608,6 +634,10 @@ private:
     VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
     // buildLights 가 재는 장면 반지름. SSAO 반지름을 장면 크기에 맞추는 데 쓴다.
     float sceneRadius = 1.0F;
+    // buildLights 가 재는 보이는 메쉬의 세계 경계 상자. DDGI 프로브 격자가 여기에 맞춘다.
+    glm::vec3 sceneMinimum{0.0F};
+    glm::vec3 sceneMaximum{0.0F};
+    bool sceneHasBounds = false;
     bool ssaoNeedsClear = true;
     // 그림자 층을 한 번 읽기 좋은 레이아웃으로 옮겨 둔다. 그 뒤로는 층마다 따로 전이한다.
     bool shadowNeedsInit = true;

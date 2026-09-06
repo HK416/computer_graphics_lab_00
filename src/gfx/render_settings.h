@@ -68,6 +68,12 @@ struct RenderSettings {
     uint32_t restirCandidates = 8;
     bool restirTemporal = true;
     bool restirSpatial = true;
+    // DDGI 프로브 GI: 장면 경계 상자에 축마다 ddgiProbes 개의 프로브를 깔고 프레임마다 프로브당 ddgiRays 광선을 쏘아
+    // 조도·가시성 아틀라스를 히스테리시스로 갱신한다. 확산 조도가 IBL 큐브 대신 이것을 읽는다. 경로 추적 중에는 쉰다.
+    bool useDdgi = false;
+    uint32_t ddgiProbes = 8;
+    uint32_t ddgiRays = 64;
+    float ddgiHysteresis = 0.97F;
     // 장면 반지름에 대한 비율. 장면 크기가 제각각이라 절대 길이로 두지 않는다.
     float ssaoRadius = 0.04F;
     float ssaoIntensity = 1.0F;

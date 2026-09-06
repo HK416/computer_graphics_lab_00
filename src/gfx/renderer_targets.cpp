@@ -541,6 +541,9 @@ const char* Renderer::debugModeBlockedReason(uint32_t mode) const {
     if (mode == DEBUG_MODE_RESTIR_LIGHT && !rayQueryShadowsAvailable()) {
         return "광선 질의가 없어 ReSTIR 가 돌지 않는다";
     }
+    if (mode == DEBUG_MODE_PROBE_IRRADIANCE && !rayQueryShadowsAvailable()) {
+        return "광선 질의가 없어 DDGI 가 돌지 않는다";
+    }
     // mesh shader 경로는 meshlet 번호를 mesh 셰이더가 직접 넘기므로 gl_DrawID 가 필요 없다.
     if ((mode == DEBUG_MODE_MESHLET || mode == DEBUG_MODE_LOD) && !useMeshPath() && !context.caps.shaderDrawIndex) {
         return "gl_DrawID 가 없어 고전 경로는 meshlet 을 메쉬 단위로만 안다";

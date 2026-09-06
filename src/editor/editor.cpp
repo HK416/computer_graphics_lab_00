@@ -1581,6 +1581,32 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         }
     }
 
+    if (section("DDGI")) {
+        ImGui::BeginDisabled(!rayQueryReady);
+        ImGui::Checkbox("DDGI", &renderer.settings.useDdgi);
+        ImGui::BeginDisabled(!renderer.settings.useDdgi);
+        int probes = static_cast<int>(renderer.settings.ddgiProbes);
+        if (ImGui::SliderInt("축당 프로브", &probes, 2, 16)) {
+            renderer.settings.ddgiProbes = static_cast<uint32_t>(probes);
+        }
+        int rays = static_cast<int>(renderer.settings.ddgiRays);
+        if (ImGui::SliderInt("프로브당 광선", &rays, 8, 256)) {
+            renderer.settings.ddgiRays = static_cast<uint32_t>(rays);
+        }
+        ImGui::SliderFloat("히스테리시스", &renderer.settings.ddgiHysteresis, 0.5F, 0.99F, "%.2f");
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        if (rasterOnly) {
+            ImGui::TextDisabled("Path Tracing이 간접광을 직접 계산한다");
+        } else if (!rayQueryReady) {
+            ImGui::TextDisabled("이 장치는 Ray Query를 지원하지 않는다");
+        } else {
+            ImGui::TextDisabled(
+                "장면 경계 상자의 프로브 격자가 프레임마다 광선을 쏘아 조도·가시성 아틀라스를 갱신한다. "
+                "확산 조도가 IBL 큐브 대신 이것을 읽는다. 디버그 뷰 «Probe Irradiance»");
+        }
+    }
+
     if (section("환경 (IBL)")) {
         scene::Environment& env = active.environment;
         ImGui::Checkbox("IBL 사용", &renderer.settings.useIbl);
@@ -1848,7 +1874,8 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
                                                            "Reflection Raw",
                                                            "Reflection Accumulated",
                                                            "Reflection Filtered",
-                                                           "ReSTIR Light"};
+                                                           "ReSTIR Light",
+                                                           "Probe Irradiance"};
         // Path Tracing이나 이 장치가 못 만드는 값은 개별로 잠그고 사유를 보인다.
         if (ImGui::BeginCombo("디버그 뷰", DEBUG_MODE_NAMES[renderer.settings.debugMode])) {
             for (uint32_t mode = 0; mode < IM_ARRAYSIZE(DEBUG_MODE_NAMES); ++mode) {

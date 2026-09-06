@@ -16,6 +16,15 @@ vec4 debugColor() {
     switch (sceneDebugMode()) {
     case DEBUG_MODE_MESHLET:
         return vec4(debugPalette(inMeshletIndex), 1.0);
+    case DEBUG_MODE_PROBE_IRRADIANCE: {
+        Camera camera = pushConstants.camera.item;
+        vec3 normal = normalize(gl_FrontFacing ? inNormal : -inNormal);
+        vec3 irradiance;
+        if (probeIrradiance(camera, inWorldPosition, normal, normalize(camera.position.xyz - inWorldPosition), irradiance)) {
+            return vec4(irradiance, 1.0);
+        }
+        return vec4(1.0, 0.0, 1.0, 1.0);
+    }
     case DEBUG_MODE_NORMAL:
         return vec4(normalize(inNormal) * 0.5 + 0.5, 1.0);
     case DEBUG_MODE_LOD:

@@ -100,8 +100,13 @@ struct GpuCamera {
     // 높이 안개. rgb 색, w 밀도. fogParameters 는 x 기준 높이, y 감쇠.
     glm::vec4 fog;
     glm::vec4 fogParameters;
-    // x 디버그 뷰. 푸시 상수가 128 바이트에 꽉 차서 여기로 옮겼다.
+    // x 디버그 뷰. 푸시 상수가 128 바이트에 꽉 차서 여기로 옮겼다. y ReSTIR 켜짐.
     glm::uvec4 flags;
+    // DDGI 프로브 격자. probeOrigin xyz 원점, w 간격 길이. probeSpacing xyz 간격, w 히스테리시스.
+    // probe x 축별 개수(8비트씩), y 조도 아틀라스 샘플 슬롯, z 가시성 샘플 슬롯, w 켜짐.
+    glm::vec4 probeOrigin;
+    glm::vec4 probeSpacing;
+    glm::uvec4 probe;
 };
 
 // shaders/scene_data.glsl 의 MeshletGroup 과 배치가 같아야 한다.
@@ -293,6 +298,27 @@ struct RestirPushConstants {
     // 하위 8비트 후보 수, 비트 8 시간 재사용, 비트 9 공간 재사용, 비트 10 히스토리 버림, 비트 20 부터 디버그 모드.
     uint32_t params;
 };
+
+// shaders/ddgi.comp 의 동명 블록과 배치가 같아야 한다. 앞 열 개는 ReflectPushConstants 와 같다(hit_shading.glsl 공유).
+struct DdgiPushConstants {
+    VkDeviceAddress vertices;
+    VkDeviceAddress skinnedVertices;
+    VkDeviceAddress indices;
+    VkDeviceAddress meshes;
+    VkDeviceAddress instances;
+    VkDeviceAddress materials;
+    VkDeviceAddress lods;
+    VkDeviceAddress camera;
+    VkDeviceAddress lights;
+    VkDeviceAddress fluidSurfaces;
+    VkDeviceAddress results;
+    uint32_t frameIndex;
+    // 하위 8비트 직접광 후보 수, 비트 8 히스토리 버림, 비트 16~31 프로브당 광선 수.
+    uint32_t params;
+    // 하위 16비트 조도 아틀라스 스토리지 슬롯, 상위 16비트 가시성 스토리지 슬롯.
+    uint32_t atlasStorage;
+};
+static_assert(sizeof(DdgiPushConstants) <= 128, "DDGI 푸시 상수는 128 바이트 안이어야 한다");
 
 struct ReflectPushConstants {
     VkDeviceAddress vertices;

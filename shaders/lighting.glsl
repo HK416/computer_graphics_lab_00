@@ -117,10 +117,80 @@ vec3 specularAlbedo(Camera camera, Surface surface) {
 // 환경광. 프리필터 밉 수가 0 이면 IBL 이 꺼진 것이라 균일 환경광만 남긴다. ambient 는 IBL 에
 // 곱하는 색조 겸 세기로 계속 쓰인다. includeSpecular 를 끄면 확산만 돌려주고, 스페큘러는 부르는
 // 쪽이 추적한 반사에 specularAlbedo 를 곱해 대신 넣는다.
+// 8면체 방향 → [0,1]² uv. scene_types.glsl 의 8진법 접기와 같은 규칙(pack 없이).
+vec2 probeOctahedralUv(vec3 direction) {
+    vec3 n = direction / (abs(direction.x) + abs(direction.y) + abs(direction.z));
+    vec2 p = n.z >= 0.0 ? n.xy : octahedralWrap(n.xy);
+    return p * 0.5 + 0.5;
+}
+
+// 프로브 아틀라스 안의 샘플 uv. 칸의 테두리 안쪽 텍셀 영역으로 들어가야 이중 선형이 칸을 넘지 않는다.
+vec2 probeAtlasUv(uvec3 counts, uvec3 coord, vec3 direction, int texels) {
+    vec2 cell = vec2(probeAtlasCell(counts, coord, texels));
+    vec2 atlas = vec2(float(counts.x * counts.z * uint(texels + 2)), float(counts.y * uint(texels + 2)));
+    return (cell + 1.0 + probeOctahedralUv(direction) * float(texels)) / atlas;
+}
+
+// DDGI 프로브 볼륨에서 확산 조도(E/π)를 읽는다. 여덟 이웃 프로브를 삼선형 × 뒷면 × Chebyshev 가시성으로 가중한다.
+// 볼륨 밖이거나 꺼져 있으면 거짓을 돌려주고 IBL 조도로 간다.
+bool probeIrradiance(Camera camera, vec3 position, vec3 normal, vec3 view, out vec3 irradiance) {
+    irradiance = vec3(0.0);
+    if (camera.probe.w == 0u) {
+        return false;
+    }
+    uvec3 counts = probeCounts(camera);
+    vec3 origin = camera.probeOrigin.xyz;
+    vec3 spacing = camera.probeSpacing.xyz;
+    // 자기 그림자를 피하려고 노멀과 시선 쪽으로 조금 띄운다.
+    float minSpacing = min(spacing.x, min(spacing.y, spacing.z));
+    vec3 biased = position + (normal * 0.2 + view * 0.8) * (0.25 * minSpacing);
+    vec3 grid = (biased - origin) / spacing;
+    vec3 maxCoord = vec3(counts) - 1.0;
+    if (any(lessThan(grid, vec3(-0.5))) || any(greaterThan(grid, maxCoord + 0.5))) {
+        return false;
+    }
+    grid = clamp(grid, vec3(0.0), maxCoord);
+    uvec3 base = uvec3(min(floor(grid), maxCoord - 1.0));
+    vec3 alpha = clamp(grid - vec3(base), vec3(0.0), vec3(1.0));
+
+    vec3 sum = vec3(0.0);
+    float weightSum = 0.0;
+    for (uint i = 0u; i < 8u; ++i) {
+        uvec3 offset = uvec3(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u);
+        uvec3 coord = base + offset;
+        vec3 probe = origin + vec3(coord) * spacing;
+        vec3 trilinear = mix(vec3(1.0) - alpha, alpha, vec3(offset));
+        float weight = trilinear.x * trilinear.y * trilinear.z;
+        // 프로브가 표면 뒤쪽에 있으면 거의 안 본다.
+        vec3 toProbe = normalize(probe - position);
+        float wrap = (dot(toProbe, normal) + 1.0) * 0.5;
+        weight *= wrap * wrap + 0.2;
+        // Chebyshev: 프로브가 본 평균 거리보다 점이 더 멀면 가려진 것으로 친다.
+        vec3 toPoint = biased - probe;
+        float distance = length(toPoint);
+        vec2 moments = sampleBindless(camera.probe.z,
+                                      probeAtlasUv(counts, coord, toPoint / max(distance, 1.0e-4), PROBE_VISIBILITY_TEXELS))
+                           .rg;
+        float variance = abs(moments.y - moments.x * moments.x);
+        float chebyshev = 1.0;
+        if (distance > moments.x) {
+            float gap = distance - moments.x;
+            chebyshev = variance / (variance + gap * gap);
+            chebyshev = max(chebyshev * chebyshev * chebyshev, 0.0);
+        }
+        weight *= max(chebyshev, 0.05);
+        vec3 probeSample = sampleBindless(camera.probe.y, probeAtlasUv(counts, coord, normal, PROBE_IRRADIANCE_TEXELS)).rgb;
+        sum += probeSample * weight;
+        weightSum += weight;
+    }
+    irradiance = weightSum > 1.0e-5 ? sum / weightSum : vec3(0.0);
+    return true;
+}
+
 vec3 environmentLight(Camera camera, Surface surface, float occlusion, bool includeSpecular) {
     vec3 tint = camera.ambient.rgb;
     uvec4 environment = camera.environment;
-    if (environment.w == 0u) {
+    if (environment.w == 0u && camera.probe.w == 0u) {
         return tint * surface.albedo * occlusion;
     }
 
@@ -129,18 +199,28 @@ vec3 environmentLight(Camera camera, Surface surface, float occlusion, bool incl
     vec3 fresnel = fresnelSchlickRoughness(nDotV, f0, surface.roughness);
     vec3 diffuseWeight = (vec3(1.0) - fresnel) * (1.0 - surface.metallic);
 
-    vec3 irradiance = sampleBindlessCube(environment.x, surface.normal).rgb;
+    // 확산 조도: 프로브 볼륨 안이면 DDGI(실제 조명이라 색조를 곱하지 않는다), 아니면 IBL 조도 큐브(색조는 끝에서).
+    vec3 irradiance;
+    bool fromProbes = probeIrradiance(camera, surface.position, surface.normal, surface.view, irradiance);
+    if (!fromProbes) {
+        irradiance = environment.w != 0u ? sampleBindlessCube(environment.x, surface.normal).rgb : vec3(1.0);
+    }
     vec3 diffuse = diffuseWeight * irradiance * surface.albedo;
 
     vec3 specular = vec3(0.0);
-    if (includeSpecular) {
+    if (includeSpecular && environment.w != 0u) {
         vec3 reflection = reflect(-surface.view, surface.normal);
         vec3 prefiltered =
             sampleBindlessCubeLod(environment.y, reflection, surface.roughness * float(environment.w - 1u)).rgb;
         vec2 integrated = sampleBindlessArray(environment.z, vec2(nDotV, surface.roughness), 0.0).rg;
         specular = prefiltered * (fresnel * integrated.x + integrated.y);
     }
-    return (diffuse + specular) * occlusion * tint;
+    // 프로브가 없을 때의 곱셈 순서는 옛 코드와 같다(바이트 동일). 프로브 확산광은 실제 조명이라 색조를 곱하지
+    // 않지만 스페큘러는 여전히 미리 구운 IBL 이라 색조(환경광 세기)를 그대로 받는다.
+    if (!fromProbes) {
+        return (diffuse + specular) * occlusion * tint;
+    }
+    return (diffuse + specular * tint) * occlusion;
 }
 
 // 그림자를 뺀 조명 하나의 기여. attenuation 은 그림자 계산에도 쓰라고 따로 돌려준다.
