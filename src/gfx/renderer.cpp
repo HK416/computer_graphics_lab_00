@@ -6,7 +6,6 @@
 #include <bit>
 #include <cmath>
 #include <cstddef>
-#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -184,6 +183,8 @@ Renderer::~Renderer() {
     vkDestroyPipeline(context.device, bloomUpsamplePipeline, nullptr);
     vkDestroyPipeline(context.device, bloomDownsamplePipeline, nullptr);
     vkDestroyPipelineLayout(context.device, bloomPipelineLayout, nullptr);
+    vkDestroyPipeline(context.device, dofMotionPipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, dofMotionPipelineLayout, nullptr);
     destroyBuffer(context, exposureBuffer);
     destroyBuffer(context, histogramBuffer);
     vkDestroyPipeline(context.device, ssaoBlurPipeline, nullptr);
@@ -1000,6 +1001,62 @@ void Renderer::recordCommands(Frame& frame,
                {},
                {},
                [&](VkCommandBuffer cmd) { recordSsaoPass(cmd, frame); }});
+
+    // 4.5) 피사계 심도·모션 블러(래스터만). 색상을 깊이·모션 벡터로 모아 반사 필터 이미지에 쓰고 색상으로 되복사한다.
+    //      업스케일러·톤 매핑 입력을 바꾸지 않으려고 복사한다. 반사 필터 이미지는 다음 프레임 반사 패스가 GENERAL 로
+    //      기대하므로 되돌려 둔다.
+    auto dofRuns = [&] { return !pathTracing && (scene.post.aperture > 0.0F || scene.post.motionBlur > 0.0F); };
+    graph.add(
+        {"피사계 심도",
+         "피사계 심도",
+         dofRuns,
+         {sampled(targets.color, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT),
+          sampled(targets.velocity, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT),
+          depthSampled(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)},
+         {storage(
+             targets.reflectionFiltered, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)},
+         {},
+         [&](VkCommandBuffer cmd) { recordDofMotionPass(cmd, frame); }});
+    graph.add({"피사계 심도 되쓰기",
+               nullptr,
+               dofRuns,
+               {ImageUse{targets.reflectionFiltered.handle,
+                         VK_IMAGE_ASPECT_COLOR_BIT,
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_COPY_BIT,
+                         VK_ACCESS_2_TRANSFER_READ_BIT}},
+               {ImageUse{targets.color.handle,
+                         VK_IMAGE_ASPECT_COLOR_BIT,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_COPY_BIT,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         true}},
+               {storage(targets.reflectionFiltered,
+                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)},
+               [&](VkCommandBuffer cmd) {
+                   VkImageCopy2 region{VK_STRUCTURE_TYPE_IMAGE_COPY_2};
+                   region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                   region.dstSubresource = region.srcSubresource;
+                   region.extent = {currentRenderExtent.width, currentRenderExtent.height, 1};
+                   VkCopyImageInfo2 copyInfo{VK_STRUCTURE_TYPE_COPY_IMAGE_INFO_2};
+                   copyInfo.srcImage = targets.reflectionFiltered.handle;
+                   copyInfo.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                   copyInfo.dstImage = targets.color.handle;
+                   copyInfo.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                   copyInfo.regionCount = 1;
+                   copyInfo.pRegions = &region;
+                   vkCmdCopyImage2(cmd, &copyInfo);
+                   imageBarrier(cmd,
+                                targets.reflectionFiltered.handle,
+                                VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                VK_IMAGE_LAYOUT_GENERAL,
+                                VK_PIPELINE_STAGE_2_COPY_BIT,
+                                VK_ACCESS_2_TRANSFER_READ_BIT,
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+               }});
 
     // ---- 여기부터 두 경로가 다시 합쳐진다.
     // 5) 시간축 업스케일러는 톤 매핑 앞에서 선형 HDR 을 받아 표시 해상도로 늘린다. 노출과 톤

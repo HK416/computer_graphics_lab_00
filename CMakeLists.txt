@@ -103,6 +103,7 @@ set(shader_sources
     shaders/reflect.comp
     shaders/restir_di.comp
     shaders/atrous.comp
+    shaders/dof_motion.comp
     shaders/ddgi.comp
     shaders/cull_meshlets.comp
     shaders/skin.comp

@@ -222,12 +222,15 @@ int main() {
         scene::readScene(R"({"version":2,"name":"Bloom 끔","post":{"bloomIntensity":0.0},"objects":[]})");
     assert(oldOff.scene.post.bloomIntensity == 0.0F && "옛 판이라도 «끔»은 뜻이 같아 그대로 둔다");
     scene::SceneFile newBloom = scene::readScene(
-        R"({"version":3,"name":"새 후처리","post":{"bloomIntensity":1.5,"bloomThreshold":2.0,"bloomKnee":0.25},
-            "objects":[]})");
+        R"({"version":3,"name":"새 후처리","post":{"bloomIntensity":1.5,"bloomThreshold":2.0,"bloomKnee":0.25,
+            "focusDistance":2.5,"aperture":0.02,"motionBlur":0.5},"objects":[]})");
     assert(std::abs(newBloom.scene.post.bloomIntensity - 1.5F) < 1e-5F);
     assert(std::abs(newBloom.scene.post.bloomThreshold - 2.0F) < 1e-5F);
     assert(std::abs(newBloom.scene.post.bloomKnee - 0.25F) < 1e-5F);
     assert(newBloom.scene.post.bloomScatter == scene::PostProcess{}.bloomScatter && "적지 않은 값은 기본값이다");
+    assert(std::abs(newBloom.scene.post.focusDistance - 2.5F) < 1e-5F &&
+           std::abs(newBloom.scene.post.aperture - 0.02F) < 1e-5F);
+    assert(std::abs(newBloom.scene.post.motionBlur - 0.5F) < 1e-5F);
 
     // 범위 밖을 가리키는 첨자는 «안 붙은 것»으로 읽어야 한다. 그대로 두면 배열 밖을 짚는다.
     scene::SceneFile broken = scene::readScene(

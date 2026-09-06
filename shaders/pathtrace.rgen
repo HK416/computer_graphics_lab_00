@@ -369,6 +369,21 @@ void main() {
     vec3 radiance = vec3(0.0);
     PrimaryHit primary;
 
+    // 얇은 렌즈 기저. 화면 중앙 근·원점으로 앞 방향을, 오른쪽 가장자리 근점으로 오른쪽을 얻는다(inverseViewProjection 만
+    // 있어 뷰 행렬 없이 만든다). 렌즈 반지름이 0 이면 쓰지 않는다.
+    vec3 lensRight = vec3(0.0);
+    vec3 lensUp = vec3(0.0);
+    vec3 lensForward = vec3(0.0);
+    if (camera.lens.y > 0.0) {
+        vec4 centerNear = camera.inverseViewProjection * vec4(0.0, 0.0, 1.0, 1.0);
+        vec4 centerFar = camera.inverseViewProjection * vec4(0.0, 0.0, 0.5, 1.0);
+        vec4 rightNear = camera.inverseViewProjection * vec4(1.0, 0.0, 1.0, 1.0);
+        vec3 centerPoint = centerNear.xyz / centerNear.w;
+        lensForward = normalize(centerFar.xyz / centerFar.w - centerPoint);
+        lensRight = normalize(rightNear.xyz / rightNear.w - centerPoint);
+        lensUp = normalize(cross(lensForward, lensRight));
+    }
+
     for (uint sampleIndex = 0; sampleIndex < samplesPerFrame; ++sampleIndex) {
         // 픽셀 안에서 표본 위치를 흔들어 누적하면서 앤티에일리어싱이 된다. RR 은 자기가 기대하는
         // 지터 수열이 있으므로 그때는 렌더러가 넘긴 값을 쓴다. camera.jitter 는 NDC 평행이동이라
@@ -383,6 +398,15 @@ void main() {
         vec4 farPoint = camera.inverseViewProjection * vec4(ndc, 0.5, 1.0);
         vec3 origin = nearPoint.xyz / nearPoint.w;
         vec3 direction = normalize(farPoint.xyz / farPoint.w - origin);
+        // 얇은 렌즈 피사계 심도. 렌즈 원판 위 점에서 초점면의 같은 점을 겨눈다. 래스터 dof_motion.comp 와 같은
+        // 초점 거리·반지름이라 착란원이 맞는다. 반지름 0 이면 난수를 쓰지 않아 옛 결과와 같다.
+        if (camera.lens.y > 0.0) {
+            vec3 focal = origin + direction * (camera.lens.x / max(dot(direction, lensForward), 1.0e-4));
+            float diskRadius = sqrt(randomFloat(seed)) * camera.lens.y;
+            float diskAngle = randomFloat(seed) * 6.28318530718;
+            origin += (lensRight * cos(diskAngle) + lensUp * sin(diskAngle)) * diskRadius;
+            direction = normalize(focal - origin);
+        }
 
         // 반딧불이 표본이 누적을 오래 흔들지 않도록 잘라 낸다.
         vec3 pathRadiance = min(tracePath(origin, direction, seed, primary), vec3(pathTrace.radianceClamp));

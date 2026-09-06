@@ -213,6 +213,8 @@ struct Camera {
     uvec4 lightCluster;
     // x 근평면, y 클러스터 원거리(마지막 조각은 그 너머까지). 깊이 조각은 로그 간격.
     vec4 lightClusterParams;
+    // 얇은 렌즈. x 초점 거리, y 렌즈 반지름(0 이면 핀홀), z 모션 블러 배율(래스터만), w projection[0][0].
+    vec4 lens;
 };
 
 // 광원 클러스터. src/gfx/renderer_internal.h 의 LIGHT_CLUSTER_* 와 같아야 한다. 클러스터마다 [개수, 번호 × 64].

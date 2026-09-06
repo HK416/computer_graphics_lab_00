@@ -182,6 +182,15 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     if (options.play) {
         scenes.active().simulating = true;
     }
+    if (options.focusDistance >= 0.0F) {
+        scenes.active().post.focusDistance = options.focusDistance;
+    }
+    if (options.aperture >= 0.0F) {
+        scenes.active().post.aperture = options.aperture;
+    }
+    if (options.motionBlur >= 0.0F) {
+        scenes.active().post.motionBlur = options.motionBlur;
+    }
     registerPlugins();
 }
 

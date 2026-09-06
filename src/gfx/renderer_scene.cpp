@@ -864,6 +864,11 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         float far = std::clamp(4.0F * sceneRadius, 20.0F, 500.0F);
         camera->lightClusterParams = glm::vec4{scene.camera.nearPlane, far, 0.0F, 0.0F};
     }
+    // 얇은 렌즈. 착란원을 픽셀로 환산하는 projection[0][0] 은 시야각과 종횡비에서 바로 나온다.
+    camera->lens = glm::vec4{std::max(scene.post.focusDistance, 0.01F),
+                             std::max(scene.post.aperture, 0.0F),
+                             std::max(scene.post.motionBlur, 0.0F),
+                             1.0F / (std::tan(glm::radians(scene.camera.fovYDegrees) * 0.5F) * aspect)};
     // DDGI 프로브 격자. 장면 경계 상자를 조금 넓혀 축마다 n 개를 깐다. 원점·간격이 바뀐 프레임은 아틀라스를
     // 히스테리시스 없이 덮어쓴다.
     camera->probeOrigin = glm::vec4{0.0F};

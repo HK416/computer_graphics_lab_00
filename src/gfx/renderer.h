@@ -501,6 +501,8 @@ private:
         float inputScale;
     };
     void createAtrousPipeline();
+    // 피사계 심도·모션 블러 gather(dof_motion.comp). 색상을 반사 필터 이미지로 모으고 노드가 다시 복사한다.
+    void recordDofMotionPass(VkCommandBuffer commandBuffer, const Frame& frame);
     void recordAtrous(VkCommandBuffer commandBuffer,
                       VkDeviceAddress camera,
                       uint32_t normalTexture,
@@ -576,6 +578,8 @@ private:
     VkPipeline restirSpatialPipeline = VK_NULL_HANDLE;
     VkPipelineLayout atrousPipelineLayout = VK_NULL_HANDLE;
     VkPipeline atrousPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout dofMotionPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline dofMotionPipeline = VK_NULL_HANDLE;
     // ReSTIR 히스토리가 이어지는지와 지난 프레임 광원 수(광원 번호가 어긋나면 버린다).
     bool restirHistoryValid = false;
     uint32_t restirLastLightCount = 0;

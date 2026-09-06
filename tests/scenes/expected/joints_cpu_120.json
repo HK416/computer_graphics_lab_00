@@ -432,6 +432,7 @@
   "particleSystems": [],
   "post": {
     "adaptationSpeed": 2.0,
+    "aperture": 0.0,
     "autoExposure": false,
     "bloomIntensity": 0.6000000238418579,
     "bloomKnee": 0.5,
@@ -439,6 +440,7 @@
     "bloomThreshold": 1.0,
     "exposureMaxEv": 12.0,
     "exposureMinEv": -4.0,
+    "focusDistance": 3.0,
     "fogColor": [
       0.6200000047683716,
       0.699999988079071,
@@ -447,7 +449,8 @@
     "fogDensity": 0.0,
     "fogFalloff": 0.5,
     "fogHeight": 0.0,
-    "fogSunScatter": 0.0
+    "fogSunScatter": 0.0,
+    "motionBlur": 0.0
   },
   "rigidBodies": [
     {

@@ -119,7 +119,20 @@ struct GpuCamera {
     glm::uvec4 lightCluster;
     // x 근평면, y 클러스터 원거리(마지막 깊이 조각은 그 너머까지). 깊이 조각은 로그 간격이다.
     glm::vec4 lightClusterParams;
+    // 얇은 렌즈. x 초점 거리, y 렌즈 반지름(0 이면 핀홀), z 모션 블러 배율(래스터만), w projection[0][0](착란원 픽셀
+    // 환산).
+    glm::vec4 lens;
 };
+
+// shaders/dof_motion.comp 의 동명 블록과 배치가 같아야 한다(scalar).
+struct DofMotionPushConstants {
+    VkDeviceAddress camera;
+    uint32_t colorTexture;
+    uint32_t depthTexture;
+    uint32_t velocityTexture;
+    uint32_t outputStorage;
+};
+static_assert(sizeof(DofMotionPushConstants) == 24, "피사계 심도 푸시 상수 배치가 셰이더와 어긋난다");
 
 // 광원 클러스터 격자. shaders/scene_types.glsl 의 LIGHT_CLUSTER_* 와 같아야 한다. 화면을 16×9 타일, 깊이 24 조각으로
 // 나누고 클러스터마다 개수 하나 + 광원 번호 64 개를 둔다. 개수가 0xFFFFFFFF 면 넘친 클러스터다.

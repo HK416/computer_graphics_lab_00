@@ -1,0 +1,80 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_nonuniform_qualifier : require
+
+#include "bindless.glsl"
+#include "scene_types.glsl"
+
+// 피사계 심도 + 모션 블러 한 패스(래스터 경로). 렌더 해상도 HDR 색상을 깊이의 착란원(얇은 렌즈)과 모션 벡터의
+// 선분으로 모은다(gather). 탭은 원판 나선 16개를 착란원 반지름으로 벌리고 같은 탭을 모션 벡터를 따라 흩는다.
+// 탭의 착란원이 중심까지 거리보다 작으면(초점 맞은 이웃) 그 탭은 빼서 또렷한 이웃이 흐린 화소로 새지 않게 한다.
+// 경로 추적은 광선 생성이 얇은 렌즈로 같은 착란원을 직접 낸다(pathtrace.rgen).
+//
+// ponytail: 탭 16 고정, 전경·배경 층 분리 없음. 큰 착란원에서는 띠가 보인다.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// src/gfx/renderer_internal.h 의 DofMotionPushConstants 와 배치가 같아야 한다.
+layout(push_constant, scalar) uniform DofMotionPushConstants {
+    CameraBuffer camera;
+    uint colorTexture;
+    uint depthTexture;
+    uint velocityTexture;
+    uint outputStorage;
+} push;
+
+const uint TAPS = 16u;
+const float MAX_RADIUS = 16.0;
+
+// 착란원 지름(픽셀). 무한 원거리 reverse-Z 라 시야 깊이 = 근평면 / 깊이. 하늘(깊이 0)은 무한대로 본다.
+float circleOfConfusion(Camera camera, float depth) {
+    float viewDepth = depth > 0.0 ? camera.parameters.x / depth : 1.0e6;
+    float focus = camera.lens.x;
+    float radius = camera.lens.y;
+    return radius * abs(viewDepth - focus) / (viewDepth * focus) * camera.lens.w * camera.viewport.x;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    Camera camera = push.camera.item;
+    ivec2 size = ivec2(camera.viewport.xy);
+    if (pixel.x >= size.x || pixel.y >= size.y) {
+        return;
+    }
+    vec2 texel = camera.viewport.zw;
+    vec2 uv = (vec2(pixel) + 0.5) * texel;
+    float centerCoc = min(circleOfConfusion(camera, sampleBindless(push.depthTexture, uv).r) * 0.5, MAX_RADIUS);
+    // 모션 벡터는 지난 위치를 향한 UV 변위다. 배율만큼 늘려 양쪽으로 흩는다.
+    vec2 motion = sampleBindless(push.velocityTexture, uv).rg * camera.lens.z;
+    vec2 motionPixels = motion / texel;
+    float motionLength = min(length(motionPixels), MAX_RADIUS * 2.0);
+    if (motionLength > 0.0) {
+        motionPixels *= motionLength / length(motionPixels);
+    }
+
+    vec3 center = sampleBindless(push.colorTexture, uv).rgb;
+    if (centerCoc < 0.5 && motionLength < 0.5) {
+        imageStore(bindlessStorageImagesRgba16[nonuniformEXT(push.outputStorage)], pixel, vec4(center, 1.0));
+        return;
+    }
+
+    // 픽셀마다 다른 회전으로 띠를 잡음으로 바꾼다.
+    float rotation = fract(sin(dot(vec2(pixel), vec2(12.9898, 78.233))) * 43758.5453) * 6.28318530718;
+    vec3 sum = center;
+    float weightSum = 1.0;
+    for (uint i = 0u; i < TAPS; ++i) {
+        float t = (float(i) + 0.5) / float(TAPS);
+        float angle = rotation + float(i) * 2.39996323;
+        vec2 disk = vec2(cos(angle), sin(angle)) * sqrt(t) * centerCoc;
+        vec2 offset = disk + (t - 0.5) * motionPixels;
+        vec2 tapUv = clamp(uv + offset * texel, vec2(0.0), vec2(1.0));
+        float tapCoc = min(circleOfConfusion(camera, sampleBindless(push.depthTexture, tapUv).r) * 0.5, MAX_RADIUS);
+        float distance = length(disk);
+        // 탭 자신의 착란원(또는 모션)이 중심까지 닿아야 그 탭의 빛이 여기로 온다.
+        float reach = max(tapCoc, motionLength * 0.5);
+        float weight = clamp(reach - distance + 1.0, 0.0, 1.0);
+        sum += sampleBindless(push.colorTexture, tapUv).rgb * weight;
+        weightSum += weight;
+    }
+    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(push.outputStorage)], pixel, vec4(sum / weightSum, 1.0));
+}

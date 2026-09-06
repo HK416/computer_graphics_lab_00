@@ -66,6 +66,12 @@ int main(int argc, char* argv[]) {
             options.reflectionsGiven = true;
         } else if (argument == "--no-denoise") {
             options.reflectionDenoise = false;
+        } else if (argument == "--focus" && i + 1 < argc) {
+            options.focusDistance = static_cast<float>(std::atof(argv[++i]));
+        } else if (argument == "--aperture" && i + 1 < argc) {
+            options.aperture = static_cast<float>(std::atof(argv[++i]));
+        } else if (argument == "--motion-blur" && i + 1 < argc) {
+            options.motionBlur = static_cast<float>(std::atof(argv[++i]));
         } else if (argument == "--no-restir-denoise") {
             options.restirDenoise = false;
         } else if (argument == "--no-pathtrace-denoise") {

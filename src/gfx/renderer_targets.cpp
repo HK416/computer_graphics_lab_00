@@ -125,7 +125,9 @@ void Renderer::createRenderTargets() {
     ImageDesc colorDesc;
     colorDesc.extent = extent;
     colorDesc.format = COLOR_FORMAT;
-    colorDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+    // 피사계 심도 되쓰기가 반사 필터 이미지에서 색상으로 복사한다.
+    colorDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
+                      VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     targets.color = createImage(context, colorDesc, "HDR 색상");
 
     ImageDesc depthDesc;
@@ -160,7 +162,7 @@ void Renderer::createRenderTargets() {
     destroyImage(context, targets.reflectionHistory[0]);
     destroyImage(context, targets.reflectionHistory[1]);
     ImageDesc reflectionDesc = colorDesc;
-    reflectionDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    reflectionDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     targets.reflectionRaw = createImage(context, reflectionDesc, "반사 원본");
     targets.reflectionHistory[0] = createImage(context, reflectionDesc, "반사 누적 0");
     targets.reflectionHistory[1] = createImage(context, reflectionDesc, "반사 누적 1");

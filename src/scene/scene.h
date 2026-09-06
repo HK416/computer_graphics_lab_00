@@ -435,6 +435,11 @@ struct PostProcess {
     float fogFalloff = 0.5F;
     // 첫 방향광 쪽 안개 인스캐터 세기. 0 이면 안개 색이 방향과 무관한 상수다.
     float fogSunScatter = 0.0F;
+    // 얇은 렌즈 피사계 심도. 초점 거리(m)와 렌즈 반지름(m, 0 이면 핀홀). 래스터는 후처리 gather, 경로 추적은 광선 원점.
+    float focusDistance = 3.0F;
+    float aperture = 0.0F;
+    // 모션 벡터 길이에 곱하는 배율. 0 이면 끈다. 래스터만(경로 추적은 없다).
+    float motionBlur = 0.0F;
 
     bool operator==(const PostProcess&) const = default;
 };

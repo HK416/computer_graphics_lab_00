@@ -38,6 +38,23 @@ void Renderer::createBloomPipelines() {
     histogramPipeline = createPipeline("exposure_histogram.comp.spv", histogramPipelineLayout);
     exposurePipelineLayout = createLayout(sizeof(ExposurePushConstants));
     exposurePipeline = createPipeline("exposure_average.comp.spv", exposurePipelineLayout);
+    dofMotionPipelineLayout = createLayout(sizeof(DofMotionPushConstants));
+    dofMotionPipeline = createPipeline("dof_motion.comp.spv", dofMotionPipelineLayout);
+}
+
+void Renderer::recordDofMotionPass(VkCommandBuffer commandBuffer, const Frame& frame) {
+    DofMotionPushConstants push{};
+    push.camera = frame.cameraBuffer.address;
+    push.colorTexture = targets.colorSlot;
+    push.depthTexture = targets.depthSlot;
+    push.velocityTexture = targets.velocitySlot;
+    push.outputStorage = targets.reflectionFilteredStorageSlot;
+    VkDescriptorSet bindlessSet = bindless.set();
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, dofMotionPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, dofMotionPipeline);
+    vkCmdPushConstants(commandBuffer, dofMotionPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+    vkCmdDispatch(commandBuffer, (currentRenderExtent.width + 7) / 8, (currentRenderExtent.height + 7) / 8, 1);
 }
 
 void Renderer::recordPostEffects(VkCommandBuffer commandBuffer,

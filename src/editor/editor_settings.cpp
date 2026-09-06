@@ -78,6 +78,20 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::SliderFloat("적응 속도", &post.adaptationSpeed, 0.1F, 10.0F, "%.1f /s");
         ImGui::DragFloatRange2("EV 범위", &post.exposureMinEv, &post.exposureMaxEv, 0.1F, -10.0F, 20.0F, "%.1f");
         ImGui::EndDisabled();
+        ImGui::SeparatorText("Depth of Field / Motion Blur");
+        ImGui::SliderFloat("렌즈 반지름", &post.aperture, 0.0F, 0.05F, "%.3f m", ImGuiSliderFlags_Logarithmic);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "얇은 렌즈의 반지름. 0 이면 핀홀. 래스터는 후처리 gather, Path Tracing 은 광선 원점을 흩는다");
+        }
+        ImGui::BeginDisabled(post.aperture <= 0.0F);
+        ImGui::DragFloat(
+            "초점 거리", &post.focusDistance, 0.05F, 0.05F, 1000.0F, "%.2f m", ImGuiSliderFlags_Logarithmic);
+        ImGui::EndDisabled();
+        ImGui::SliderFloat("모션 블러", &post.motionBlur, 0.0F, 2.0F, "%.2f");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("모션 벡터 길이에 곱하는 배율. 0 이면 끈다. 래스터만(Path Tracing 은 없다)");
+        }
     }
 
     if (section("높이 안개")) {

@@ -37,10 +37,14 @@ Windows 에서 Ninja + MSVC 는 `cl.exe` 가 `INCLUDE` 환경 변수로 표준 �
 CMake Tools 는 알아서 맞춰 주지만, 직접 부를 때는 VS 개발자 프롬프트를 쓰거나 그 셸에서
 `vcvars64.bat` 을 먼저 실행한다.
 
-헤더를 고쳤는데 `.cpp` 가 다시 컴파일되지 않고 링커가 옛 시그니처를 못 찾는다면, ninja 가 그
-오브젝트의 헤더 의존성을 기록하지 못한 것이다. `ninja -t deps <오브젝트>` 가 `#deps 0` 이면
-그렇다. `cmake --build --preset release --clean-first` 로 한 번 전체를 다시 만들면 그 뒤로는
-정상 기록된다.
+헤더를 고쳤는데 `.cpp` 가 다시 컴파일되지 않으면(링커가 옛 시그니처를 못 찾거나, 클래스 배치가 어긋나
+**멤버가 갑자기 null 인 것처럼 크래시**한다) ninja 가 그 오브젝트의 헤더 의존성을 기록하지 못한 것이다.
+`ninja -t deps <오브젝트>` 가 `#deps 0` 이면 그렇다. `--clean-first` 로도 그 오브젝트는 지워지지 않으니
+**`.obj` 를 직접 지우고** 다시 빌드한다. 그 뒤로는 정상 기록된다.
+
+```sh
+find build/release/CMakeFiles -name "*.obj" -delete && cmake --build --preset release
+```
 
 ```sh
 ctest --test-dir build/debug                        # 전체
@@ -231,6 +235,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `DdgiPushConstants` (`src/gfx/renderer_internal.h`) | 동명 블록 (`shaders/ddgi.comp`) — 앞 열 개 주소는 `ReflectPushConstants` 와 같아 `hit_shading.glsl` 을 공유 |
 | `RestirPushConstants` `RestirSlots` (`src/gfx/renderer_internal.h`) | 동명 블록·구조체 (`shaders/restir_di.comp`); 저장소 인코딩은 `shaders/restir.glsl` 의 `Reservoir` |
 | `AtrousPushConstants` (`src/gfx/renderer_internal.h`) | 동명 블록 (`shaders/atrous.comp`) — ReSTIR 직접광·경로 추적 표시용 디노이즈 |
+| `DofMotionPushConstants` (`src/gfx/renderer_internal.h`) | 동명 블록 (`shaders/dof_motion.comp`); 착란원 식은 `pathtrace.rgen` 얇은 렌즈와 같은 `Camera.lens` |
 | `ReflectPushConstants` `ReflectSlots` (`src/gfx/renderer_internal.h`) | 동명 블록·구조체 (`shaders/reflect.comp`) — 슬롯은 버퍼로 넘기고 `samplesResetDebug`·`filterStep` 에 비트를 묶는다 |
 | `FluidDrawPushConstants` (`src/gfx/renderer_internal.h`) | 동명 블록 (`shaders/fluid_draw_common.glsl`) |
 | `physics::SurfaceVertex` (`src/physics/marching_cubes.h`) | `FluidSurfaceVertex` (`shaders/fluid_types.glsl`) |
