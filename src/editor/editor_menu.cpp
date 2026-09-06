@@ -22,6 +22,10 @@ void Editor::buildMenuBar(scene::SceneManager& scenes, const gfx::GeometryStore&
         if (ImGui::MenuItem("장면 저장...", "Ctrl+S")) {
             popupRequest = PopupRequest::SAVE_SCENE;
         }
+        // 마지막 장면과 재생 중인 장면은 닫지 않는다(정지가 먼저).
+        if (ImGui::MenuItem("장면 닫기", nullptr, false, scenes.count() > 1 && !scenes.active().simulating)) {
+            deferred = [this, &scenes] { closeScene(scenes, scenes.current()); };
+        }
         ImGui::Separator();
         if (ImGui::MenuItem("모델 불러오기...")) {
             popupRequest = PopupRequest::LOAD_MODEL;
@@ -39,7 +43,8 @@ void Editor::buildMenuBar(scene::SceneManager& scenes, const gfx::GeometryStore&
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("편집")) {
-        const History* history = scenes.current() < histories.size() ? &histories[scenes.current()] : nullptr;
+        auto found = histories.find(scenes.active().id);
+        const History* history = found != histories.end() ? &found->second : nullptr;
         if (ImGui::MenuItem("되돌리기", "Ctrl+Z", false, history != nullptr && !history->undoStack.empty())) {
             menuUndo = true;
         }
@@ -384,13 +389,29 @@ void Editor::setSceneIo(std::filesystem::path root,
     sceneOpener = std::move(opener);
 }
 
+void Editor::closeScene(scene::SceneManager& scenes, size_t index) {
+    if (index >= scenes.count() || scenes.at(index).simulating) {
+        return;
+    }
+    uint64_t closedId = scenes.at(index).id;
+    if (!scenes.close(index)) {
+        return;
+    }
+    histories.erase(closedId);
+    clearSelection();
+    // 닫힌 장면만 쓰던 모델을 내린다. 기록은 방금 지웠으니 붙들지 않는다.
+    if (modelCollector) {
+        modelCollector();
+    }
+}
+
 void Editor::startSimulation(scene::SceneManager& scenes) {
     scene::Scene& active = scenes.active();
     if (active.simulating) {
         return;
     }
     playSnapshot = active.capture();
-    playSceneIndex = scenes.current();
+    playSceneId = active.id;
     // GPU 강체 솔버는 다음 프레임 머리에서 이 변화를 보고 제 상태를 버린다(PhysicsPlugin).
     active.simulating = true;
 }
@@ -399,11 +420,12 @@ void Editor::stopSimulation(scene::SceneManager& scenes) {
     scene::Scene& active = scenes.active();
     active.simulating = false;
     // 시작할 때 떠 둔 장면으로 되돌린다. 다른 장면으로 옮긴 채 멈췄으면 그 장면은 건드리지 않는다.
-    if (playSnapshot && playSceneIndex == scenes.current()) {
+    if (playSnapshot && playSceneId == active.id) {
         active.restore(*playSnapshot);
         // 되돌린 상태가 곧 기록의 기준이다. 안 그러면 되돌리기 항목이 하나 더 생긴다.
-        if (playSceneIndex < histories.size() && histories[playSceneIndex].started) {
-            histories[playSceneIndex].baseline = active.capture();
+        auto found = histories.find(active.id);
+        if (found != histories.end() && found->second.started) {
+            found->second.baseline = active.capture();
         }
     }
     playSnapshot.reset();

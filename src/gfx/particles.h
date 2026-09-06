@@ -149,7 +149,7 @@ private:
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipeline rayQueryPipeline = VK_NULL_HANDLE;
     std::vector<State> states;
-    const scene::Scene* lastScene = nullptr;
+    uint64_t lastSceneId = 0;
     uint64_t lastComponentRevision = UINT64_MAX;
     bool wasSimulating = false;
 };

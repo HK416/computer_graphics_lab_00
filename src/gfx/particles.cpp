@@ -124,12 +124,12 @@ bool ParticleSimulator::prepare(const scene::Scene& scene, bool sceneSwitched, f
         return false;
     }
     // 장면이 바뀌면 상태를 통째로 버린다. 부품 번호가 다른 장면 것과 겹치기 때문이다.
-    if (sceneSwitched || &scene != lastScene) {
+    if (sceneSwitched || scene.id != lastSceneId) {
         for (State& state : states) {
             destroyState(state);
         }
         states.clear();
-        lastScene = &scene;
+        lastSceneId = scene.id;
     }
     for (size_t i = scene.particleSystems.size(); i < states.size(); ++i) {
         destroyState(states[i]);

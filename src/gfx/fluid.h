@@ -266,7 +266,7 @@ private:
     BindlessTextures& bindless;
     core::JobSystem& jobs;
     std::vector<State> states;
-    const scene::Scene* lastScene = nullptr;
+    uint64_t lastSceneId = 0;
     // 마지막으로 본 부품 배치 번호. 부품을 붙이거나 떼면 유체 첨자가 밀려 states 의 슬롯이 다른
     // 유체에게 넘어가므로, 값이 달라진 프레임에는 전부 다시 뿌린다.
     uint64_t lastComponentRevision = 0;

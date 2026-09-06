@@ -593,7 +593,8 @@ private:
     // 인스턴스는 버킷 순서로 채워지므로 장면 순서와 다르고, TLAS 가 이 표를 그대로 써야 한다.
     std::vector<uint32_t> objectInstanceSlots;
     // 장면이 바뀌었는지 판단하는 기준. 경로 추적 누적과 TLAS 재빌드가 함께 본다.
-    const scene::Scene* lastScene = nullptr;
+    // 지난 프레임에 그린 장면의 번호(Scene::id). 0 이면 아직 없다.
+    uint64_t lastSceneId = 0;
     uint64_t lastSceneRevision = 0;
     bool sceneChangedThisFrame = true;
 

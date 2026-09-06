@@ -274,7 +274,7 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
     // 넘긴다. 이 프레임의 렌더는 build 가 끝난 다음이다.
     renderer.selectedObject = primarySelection();
 
-    updateHistory(scenes.active(), scenes.current());
+    updateHistory(scenes.active());
 
     ImGui::Render();
 }

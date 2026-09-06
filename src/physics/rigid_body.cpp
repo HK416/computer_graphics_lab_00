@@ -705,9 +705,12 @@ void writeBackRigidBodies(scene::Scene& scene, const std::vector<RigidBodyState>
     // 드물어 위상 순서 정렬은 두지 않았다.
     for (const RigidBodyState& body : bodies) {
         scene::Object& object = scene.objects[body.object];
-        scene::RigidBody& component = scene.rigidBodies[static_cast<size_t>(object.rigidBody)];
-        component.velocity = body.velocity;
-        component.angularVelocity = body.angularVelocity;
+        scene::RigidBody* component = scene.component<scene::RigidBody>(body.object);
+        if (component == nullptr) {
+            continue;
+        }
+        component->velocity = body.velocity;
+        component->angularVelocity = body.angularVelocity;
         if (!isDynamic(body)) {
             continue;
         }

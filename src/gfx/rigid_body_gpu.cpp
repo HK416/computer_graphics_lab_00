@@ -207,7 +207,7 @@ void RigidBodySimulator::reserveGrid(uint32_t cellCount) {
 bool RigidBodySimulator::applyReadback(scene::Scene& scene, uint64_t completedFrames) {
     // 되읽기는 몇 프레임 늦다. 그 사이에 장면이 바뀌거나 부품이 붙었다 떨어졌으면 이 결과는 남의
     // 것이라 오브젝트 번호부터 맞지 않는다.
-    if (&scene != readbackScene || scene.componentRevision() != readbackComponents) {
+    if (scene.id != readbackSceneId || scene.componentRevision() != readbackComponents) {
         return false;
     }
     // 끝난 슬롯 가운데 가장 최근 것을 고른다. 이미 적용한 것보다 오래된 슬롯은 «지나간 상태»라
@@ -266,7 +266,7 @@ bool RigidBodySimulator::applyReadback(scene::Scene& scene, uint64_t completedFr
 void RigidBodySimulator::invalidate() {
     resident.clear();
     readbackFrame.fill(UINT64_MAX);
-    readbackScene = nullptr;
+    readbackSceneId = 0;
     appliedFrame = 0;
 }
 
@@ -339,11 +339,11 @@ void RigidBodySimulator::prepare(const scene::Scene& scene, uint32_t steps, floa
     }
 
     // 장면이 바뀌었거나 부품이 붙었다 떨어졌으면 첨자가 밀렸을 수 있다. GPU 에 남은 것은 남의 상태다.
-    if (&scene != readbackScene || scene.componentRevision() != readbackComponents) {
+    if (scene.id != readbackSceneId || scene.componentRevision() != readbackComponents) {
         invalidate();
     }
     physics::collectRigidBodies(scene, scene::SimulationBackend::GPU, bodies, triangles);
-    readbackScene = &scene;
+    readbackSceneId = scene.id;
     readbackComponents = scene.componentRevision();
     if (bodies.empty()) {
         resident.clear();

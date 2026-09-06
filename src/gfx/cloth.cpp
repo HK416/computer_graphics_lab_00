@@ -221,12 +221,12 @@ bool ClothSimulator::prepare(const scene::Scene& scene,
                              bool sceneSwitched,
                              float deltaSeconds,
                              const GeometryStore& geometry) {
-    if (sceneSwitched || &scene != lastScene) {
+    if (sceneSwitched || scene.id != lastSceneId) {
         for (State& state : states) {
             destroyState(state);
         }
         states.clear();
-        lastScene = &scene;
+        lastSceneId = scene.id;
     }
     for (size_t i = scene.cloths.size(); i < states.size(); ++i) {
         destroyState(states[i]);

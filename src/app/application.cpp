@@ -682,7 +682,7 @@ void Application::startNextLoad() {
         pendingLoad = std::make_unique<PendingLoad>();
         pendingLoad->path = std::move(path);
         pendingLoad->startTicks = SDL_GetTicksNS();
-        pendingLoad->sceneIndex = scenes.current();
+        pendingLoad->sceneId = scenes.active().id;
         PendingLoad* load = pendingLoad.get();
         // 스레드는 load 가 가리키는 것만 만진다. pendingLoad 는 스레드를 합류한 뒤에만 비운다.
         load->worker = std::thread([this, load]() {
@@ -716,8 +716,9 @@ void Application::pumpLoads() {
 
 void Application::completeLoad() {
     PendingLoad& load = *pendingLoad;
-    // 장면이 지워지는 일은 없지만, 방어적으로 범위를 벗어나면 활성 장면에 붙인다.
-    scene::Scene& target = load.sceneIndex < scenes.count() ? scenes.at(load.sceneIndex) : scenes.active();
+    // 적재 중에 그 장면이 닫혔으면 활성 장면에 붙인다.
+    scene::Scene* requested = scenes.find(load.sceneId);
+    scene::Scene& target = requested != nullptr ? *requested : scenes.active();
 
     if (load.failed.load(std::memory_order_relaxed)) {
         spdlog::error("모델 적재 실패: {}", load.path.string());
@@ -887,7 +888,10 @@ void Application::openScene(const std::filesystem::path& path) {
     }
 
     scene::Scene& created = scenes.create(loaded.scene.name);
+    // 파일에서 읽은 장면에는 번호가 없다. 관리자가 붙인 번호를 지킨다.
+    uint64_t sceneId = created.id;
     created = std::move(loaded.scene);
+    created.id = sceneId;
     created.colliderMeshes = &colliderMeshes;
     // 모델과 같은 규칙: 상대 경로는 에셋 뿌리 기준으로 푼다.
     if (!created.environment.hdrPath.empty() && !created.environment.hdrPath.is_absolute()) {
@@ -1057,8 +1061,8 @@ void Application::run() {
             scenes.active().refresh(&jobs);
         }
         // 오브젝트가 지워지거나 장면이 바뀐 프레임에만 미사용 모델을 살핀다. 매 프레임 훑을 일은 아니다.
-        if (scenes.current() != collectedScene || scenes.active().topologyRevision() != collectedTopology) {
-            collectedScene = scenes.current();
+        if (scenes.active().id != collectedScene || scenes.active().topologyRevision() != collectedTopology) {
+            collectedScene = scenes.active().id;
             collectedTopology = scenes.active().topologyRevision();
             collectUnusedModels(false);
         }

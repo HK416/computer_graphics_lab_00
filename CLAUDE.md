@@ -278,6 +278,8 @@ MoltenVK(macOS)에는 mesh shader 와 광선 추적이 없어 고전 경로만 �
   평범한 `main()` 이라, `NDEBUG` 가 살아 있으면 검사가 통째로 사라진다.
 - 테스트가 도는 것은 순수 계산 부분(`*_math.cpp`, 장면 그래프, 애니메이션, 직렬화, 잠금 없는 큐)뿐이다.
   Vulkan 을 타는 코드에는 테스트가 없으므로 스크린샷 비교로 확인한다.
+- **새 장면 부품 종류**는 `scene.h` 의 `forEachComponentKind` 표와 `ComponentSlot` 특수화에 한 쌍씩 더한다. 떼기·삭제·복제·
+  배치 비교가 그 표를 돌고, `Scene::component<T>(object)` 가 첨자 가드를 대신한다. `SceneSnapshot`·`scene_io.cpp` 는 따로.
 - **새 렌더 패스**는 `recordCommands` 의 `graph.add` 노드로(또는 플러그인이면 `Renderer::addPass` 훅의 `addAfter` 로)
   등록한다. 이미지 사용은 `reads`/`writes`/`leaves` 로 선언하고 **노드 안에 `imageBarrier` 를 새로 쓰지 않는다.** 층·밉
   단위 전이만 예외이고, 그때는 `leaves` 로 남긴 상태를 알린다. 조건은 `enabled` 로 두고 노드 자체는 늘 등록한다.

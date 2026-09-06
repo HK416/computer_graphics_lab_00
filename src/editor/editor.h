@@ -88,6 +88,8 @@ private:
     void createMeshObject(scene::Scene& active, const gfx::GeometryStore& geometry, uint32_t meshIndex, int parent);
     void createLightObject(scene::Scene& active, scene::LightType type, int parent);
     void newScene(scene::SceneManager& scenes);
+    // 장면을 닫고 그 되돌리기 기록을 지운다. 마지막 장면·재생 중인 장면은 닫지 않는다.
+    void closeScene(scene::SceneManager& scenes, size_t index);
     void duplicateSelection(scene::Scene& active);
     void deleteSelection(scene::Scene& active);
     void unparentSelection(scene::Scene& active);
@@ -111,7 +113,7 @@ private:
     // 적재 중일 때만 화면 아래에 진행 막대를 띄운다.
     void buildLoadOverlay();
     // 장면이 바뀌었으면 되돌리기 기록에 담고, Ctrl+Z / Ctrl+Y 를 처리한다.
-    void updateHistory(scene::Scene& active, size_t sceneIndex);
+    void updateHistory(scene::Scene& active);
     VkDescriptorSet textureFor(VkImageView view, VkImageLayout layout);
 
     gfx::Context& context;
@@ -134,7 +136,8 @@ private:
         scene::SceneSnapshot baseline;
         bool started = false;
     };
-    std::vector<History> histories;
+    // 장면 번호(Scene::id)로 찾는다. 장면을 닫으면 그 기록도 지운다.
+    std::unordered_map<uint64_t, History> histories;
 
     // 선택된 오브젝트들. 마지막 항목이 기준(primary)이라 인스펙터와 기즈모가 그것을 쓴다.
     std::vector<int> selection;
@@ -179,7 +182,7 @@ private:
     bool showRenderSettings = false;
     // 재생을 시작할 때 떠 둔 장면과 그 장면 번호. 정지하면 여기로 되돌린다.
     std::optional<scene::SceneSnapshot> playSnapshot;
-    size_t playSceneIndex = 0;
+    uint64_t playSceneId = 0;
     // 장면 뷰에 보여줄 렌더 타깃. 음수면 표시 이미지(기본)다. 층이나 밉이 있는 대상은 slice 로 고른다.
     int selectedTarget = -1;
     int selectedSlice = 0;

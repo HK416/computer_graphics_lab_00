@@ -202,8 +202,8 @@ private:
         std::atomic<bool> failed{false};
         // 업로드 단계를 한 프레임 보여준 뒤 올린다. 큰 모델은 업로드만 몇 초라 표시가 있어야 한다.
         bool uploadShown = false;
-        // 요청한 순간의 활성 장면. 적재 중에 장면을 옮겨도 요청한 곳에 붙는다.
-        size_t sceneIndex = 0;
+        // 요청한 순간의 활성 장면 번호. 적재 중에 장면을 옮기거나 닫아도 요청한 곳에 붙는다(닫혔으면 활성 장면).
+        uint64_t sceneId = 0;
         uint64_t startTicks = 0;
         PrepareTimings timings;
         std::thread worker;
@@ -227,7 +227,7 @@ private:
     // 기동 시 고른 하드웨어 프로파일. 편집기가 판정 근거를 보여 준다.
     gfx::HardwareProfile hardwareProfile;
     // 마지막으로 미사용 모델을 살핀 때의 장면 번호와 그 장면의 구조 리비전.
-    size_t collectedScene = SIZE_MAX;
+    uint64_t collectedScene = 0;
     uint64_t collectedTopology = 0;
     float orbitDegreesPerFrame = 0.0F;
     Options options;

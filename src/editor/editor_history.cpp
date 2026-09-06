@@ -5,14 +5,11 @@
 
 namespace editor {
 
-void Editor::updateHistory(scene::Scene& active, size_t sceneIndex) {
+void Editor::updateHistory(scene::Scene& active) {
     // 기록이 너무 길어지면 애니메이터 스켈레톤 사본이 쌓여 메모리를 먹는다.
     constexpr size_t MAX_HISTORY = 64;
 
-    if (histories.size() <= sceneIndex) {
-        histories.resize(sceneIndex + 1);
-    }
-    History& history = histories[sceneIndex];
+    History& history = histories[active.id];
     if (!history.started) {
         history.baseline = active.capture();
         history.started = true;
@@ -77,7 +74,7 @@ bool Editor::referencesModel(uint32_t meshBase, uint32_t meshCount, int32_t mode
         }
         return false;
     };
-    for (const History& history : histories) {
+    for (const auto& [sceneId, history] : histories) {
         if (!history.started) {
             continue;
         }
@@ -100,7 +97,7 @@ bool Editor::referencesModel(uint32_t meshBase, uint32_t meshCount, int32_t mode
 
 void Editor::clearHistories() {
     // 기준(baseline)은 지금 장면과 같으므로 남긴다. 다음 updateHistory 가 새로 잡는다.
-    for (History& history : histories) {
+    for (auto& [sceneId, history] : histories) {
         history.undoStack.clear();
         history.redoStack.clear();
         history.started = false;

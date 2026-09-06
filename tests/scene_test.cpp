@@ -285,7 +285,7 @@ int main() {
     assert(attached.transformRevision() == transformBase && "값만 바뀌면 변환 리비전도 그대로여야 한다");
 
     // ---- 다른 종류를 떼도 유체 첨자가 정합해야 한다 ----
-    // detachComponent 는 다섯 배열을 모두 압축한다. 강체를 떼면 유체 첨자가 밀릴 수 있다.
+    // detachComponent 는 모든 종류의 배열을 압축한다. 강체를 떼면 유체 첨자가 밀릴 수 있다.
     scene::Scene mixed;
     for (int i = 0; i < 3; ++i) {
         mixed.objects.push_back(scene::Object{});
@@ -338,6 +338,45 @@ int main() {
     }
     assert(&kept == &manager.at(0) && "장면을 더 만들어도 주소가 바뀌면 안 된다");
     assert(manager.at(0).ambientIntensity == 0.5F && "잡아 둔 참조로 쓴 값이 살아 있어야 한다");
+
+    // ---- 장면 번호와 닫기 ----
+    {
+        scene::SceneManager scenes;
+        scene::Scene& first = scenes.create("첫");
+        scene::Scene& second = scenes.create("둘");
+        scene::Scene& third = scenes.create("셋");
+        assert(first.id != 0 && first.id != second.id && second.id != third.id && "번호는 고유하다");
+        // 닫힌 장면의 참조는 매달리므로 번호만 남겨 둔다.
+        uint64_t secondId = second.id;
+        uint64_t thirdId = third.id;
+        scenes.setActive(2);
+        assert(scenes.close(1) && scenes.count() == 2 && "가운데를 닫는다");
+        assert(&scenes.active() == &third && scenes.current() == 1 && "활성 장면은 그대로고 첨자만 당겨진다");
+        assert(scenes.find(secondId) == nullptr && scenes.find(thirdId) == &third && "닫힌 번호는 못 찾는다");
+        assert(scenes.close(1) && scenes.count() == 1 && &scenes.active() == &first && "활성을 닫으면 앞 장면");
+        assert(!scenes.close(0) && "마지막 하나는 닫지 않는다");
+        uint64_t reusedSlot = scenes.create("새").id;
+        assert(reusedSlot != secondId && reusedSlot != thirdId && "닫힌 자리에 새로 만들어도 번호는 새것이다");
+        // 정렬된 번호와 무관한 첨자. 뒤를 닫아도 활성은 그대로다.
+        scenes.setActive(0);
+        assert(scenes.close(1) && scenes.current() == 0);
+    }
+
+    // ---- 부품 접근자 ----
+    {
+        scene::Scene parts;
+        parts.objects.push_back(scene::Object{});
+        parts.objects.push_back(scene::Object{});
+        assert(parts.component<scene::Light>(0) == nullptr && "부품이 없으면 nullptr");
+        scene::Light light;
+        light.intensity = 7.0F;
+        parts.attachLight(1, light);
+        assert(parts.component<scene::Light>(1) != nullptr && parts.component<scene::Light>(1)->intensity == 7.0F);
+        parts.objects[0].light = 42;
+        assert(parts.component<scene::Light>(0) == nullptr && "범위 밖 첨자도 nullptr");
+        const scene::Scene& constParts = parts;
+        assert(constParts.component<scene::RigidBody>(1) == nullptr);
+    }
 
     std::printf("장면 계층 자체 점검 통과\n");
     return 0;

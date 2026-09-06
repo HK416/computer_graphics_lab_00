@@ -14,10 +14,6 @@ namespace scene {
 
 namespace {
 
-// 부품 종류 수. refresh 가 만드는 배치표의 폭이며 Object 의 부품 첨자 개수와 같아야 한다.
-// 부품을 한 종류 더 넣으면 여기와 refresh 의 배치표 채우기도 함께 고쳐야 한다.
-constexpr size_t COMPONENT_KINDS = 7;
-
 // 살아남은 오브젝트가 하나도 가리키지 않는 부품을 버리고 첨자를 다시 맞춘다.
 // 애니메이터처럼 여러 오브젝트가 함께 가리키는 부품도 있어 소유가 아니라 참조를 기준으로 센다.
 template <typename T>
@@ -325,25 +321,16 @@ void Scene::refresh(core::JobSystem* jobs) {
     bool lightsChanged = previousLights != lights;
     previousLights = lights;
 
-    // 부품 배열의 «배치»만 담는다. 크기 일곱 개를 앞에 두고 오브젝트마다 부품 첨자 일곱 개를 잇는다.
-    // 값(강체 속도 등)은 담지 않으므로 재생 중에는 변하지 않는다.
+    // 부품 배열의 «배치»만 담는다. 종류마다 크기를 앞에 두고 오브젝트마다 부품 첨자를 잇는다(종류 순서는
+    // forEachComponentKind). 값(강체 속도 등)은 담지 않으므로 재생 중에는 변하지 않는다.
     componentLayout.clear();
-    componentLayout.reserve(COMPONENT_KINDS + count * COMPONENT_KINDS);
-    componentLayout.push_back(static_cast<int32_t>(meshRenderers.size()));
-    componentLayout.push_back(static_cast<int32_t>(animators.size()));
-    componentLayout.push_back(static_cast<int32_t>(lights.size()));
-    componentLayout.push_back(static_cast<int32_t>(rigidBodies.size()));
-    componentLayout.push_back(static_cast<int32_t>(fluids.size()));
-    componentLayout.push_back(static_cast<int32_t>(particleSystems.size()));
-    componentLayout.push_back(static_cast<int32_t>(cloths.size()));
+    forEachComponentKind(*this, [&](const auto& items, int32_t Object::*) {
+        componentLayout.push_back(static_cast<int32_t>(items.size()));
+    });
+    componentLayout.reserve(componentLayout.size() * (count + 1));
     for (const Object& object : objects) {
-        componentLayout.push_back(object.meshRenderer);
-        componentLayout.push_back(object.animator);
-        componentLayout.push_back(object.light);
-        componentLayout.push_back(object.rigidBody);
-        componentLayout.push_back(object.fluid);
-        componentLayout.push_back(object.particleSystem);
-        componentLayout.push_back(object.cloth);
+        forEachComponentKind(*this,
+                             [&](const auto&, int32_t Object::* handle) { componentLayout.push_back(object.*handle); });
     }
     // 배치표가 같아도 배열이 재배치되었을 수 있다. 부품을 떼고 같은 자리에 다시 붙이면 배치는
     // 그대로지만 부품은 다른 것이다.
@@ -523,13 +510,10 @@ void Scene::detachComponent(uint32_t index, int32_t Object::* handle) {
     markStructureDirty();
     objects[index].*handle = -1;
     // 어느 배열의 첨자인지는 handle 이 정한다. 종류마다 배열이 달라 전부 다시 압축한다. 부품 수가 적어 싸다.
-    compactComponents(meshRenderers, objects, &Object::meshRenderer);
-    compactComponents(animators, objects, &Object::animator);
-    compactComponents(lights, objects, &Object::light);
-    compactComponents(rigidBodies, objects, &Object::rigidBody);
-    compactComponents(fluids, objects, &Object::fluid);
-    compactComponents(particleSystems, objects, &Object::particleSystem);
-    compactComponents(cloths, objects, &Object::cloth);
+    //
+    // ponytail: 관계없는 종류의 첨자까지 밀린다. 시뮬레이터가 componentRevision 을 보고 전부 리셋해 막는다. 그
+    // 리셋이 눈에 띄면 세대 핸들로 올린다.
+    forEachComponentKind(*this, [&](auto& items, int32_t Object::* kind) { compactComponents(items, objects, kind); });
 }
 
 void Scene::removeObject(uint32_t index) {
@@ -577,13 +561,7 @@ void Scene::removeObjects(const std::vector<uint32_t>& indices) {
     objects = std::move(kept);
 
     // 아무도 가리키지 않게 된 부품은 함께 사라진다. 예전에는 남아 고아가 됐다.
-    compactComponents(meshRenderers, objects, &Object::meshRenderer);
-    compactComponents(animators, objects, &Object::animator);
-    compactComponents(lights, objects, &Object::light);
-    compactComponents(rigidBodies, objects, &Object::rigidBody);
-    compactComponents(fluids, objects, &Object::fluid);
-    compactComponents(particleSystems, objects, &Object::particleSystem);
-    compactComponents(cloths, objects, &Object::cloth);
+    forEachComponentKind(*this, [&](auto& items, int32_t Object::* kind) { compactComponents(items, objects, kind); });
 }
 
 uint32_t Scene::duplicateObject(uint32_t index) {
@@ -618,21 +596,40 @@ uint32_t Scene::duplicateObject(uint32_t index) {
     //
     // ponytail: 애니메이터 사본은 스켈레톤과 애니메이션 커브까지 통째로 복사한다. 리그가 큰
     // 모델을 여러 벌 복제하면 눈에 띌 수 있다. 필요하면 스켈레톤을 공유 포인터로 돌리면 된다.
-    duplicateComponents(meshRenderers, objects, remap, &Object::meshRenderer);
-    duplicateComponents(animators, objects, remap, &Object::animator);
-    duplicateComponents(lights, objects, remap, &Object::light);
-    duplicateComponents(rigidBodies, objects, remap, &Object::rigidBody);
-    duplicateComponents(fluids, objects, remap, &Object::fluid);
-    duplicateComponents(particleSystems, objects, remap, &Object::particleSystem);
-    duplicateComponents(cloths, objects, remap, &Object::cloth);
+    forEachComponentKind(
+        *this, [&](auto& items, int32_t Object::* kind) { duplicateComponents(items, objects, remap, kind); });
     return static_cast<uint32_t>(remap[index]);
 }
 
 Scene& SceneManager::create(std::string name) {
     auto scene = std::make_unique<Scene>();
     scene->name = std::move(name);
+    scene->id = nextId++;
     scenes.push_back(std::move(scene));
     return *scenes.back();
+}
+
+bool SceneManager::close(size_t index) {
+    if (index >= scenes.size() || scenes.size() == 1) {
+        return false;
+    }
+    scenes.erase(scenes.begin() + static_cast<std::ptrdiff_t>(index));
+    // 활성 장면보다 앞을 닫으면 첨자가 하나 당겨지고, 활성 장면을 닫으면 그 앞 장면이 활성이 된다.
+    if (activeIndex > index) {
+        --activeIndex;
+    } else if (activeIndex == index) {
+        activeIndex = index > 0 ? index - 1 : 0;
+    }
+    return true;
+}
+
+Scene* SceneManager::find(uint64_t id) {
+    for (const std::unique_ptr<Scene>& scene : scenes) {
+        if (scene->id == id) {
+            return scene.get();
+        }
+    }
+    return nullptr;
 }
 
 void SceneManager::setActive(size_t index) {

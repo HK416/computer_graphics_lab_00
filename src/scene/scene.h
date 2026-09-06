@@ -349,6 +349,9 @@ struct SceneSnapshot {
 
 struct Scene {
     std::string name;
+    // SceneManager 가 붙이는 고유 번호(1부터). 렌더러·시뮬레이터가 «지난 프레임과 같은 장면인가»를 이 번호로
+    // 판정한다. 주소로 판정하면 장면을 닫고 그 자리에 새 장면이 놓였을 때 같은 장면으로 보인다. 저장하지 않는다.
+    uint64_t id = 0;
     std::vector<Object> objects;
     std::vector<MeshRenderer> meshRenderers;
     std::vector<Animator> animators;
@@ -389,7 +392,7 @@ struct Scene {
     uint64_t lightRevision() const { return lightRev; }
     // 오브젝트 개수나 부모 관계가 바뀌면 증가한다. 인덱스가 통째로 재배치될 수 있다는 뜻이다.
     uint64_t topologyRevision() const { return topologyRev; }
-    // 부품을 붙이거나 떼어 부품 배열의 배치가 바뀌면 증가한다. 부품 하나를 떼면 다섯 배열이 모두
+    // 부품을 붙이거나 떼어 부품 배열의 배치가 바뀌면 증가한다. 부품 하나를 떼면 모든 종류의 배열이
     // 압축되므로(detachComponent) 첨자로 GPU 상태를 짝지어 둔 쪽은 이 값을 보고 다시 맞춰야 한다.
     // 강체 속도처럼 재생 중 매 프레임 변하는 «값»은 보지 않으므로 재생만으로는 오르지 않는다.
     uint64_t componentRevision() const { return componentRev; }
@@ -429,6 +432,9 @@ struct Scene {
     int32_t attachCloth(uint32_t index, const Cloth& cloth = {});
     // 부품을 뗀다. 아무도 가리키지 않게 된 부품은 배열에서 빠지고 첨자가 다시 맞춰진다.
     void detachComponent(uint32_t index, int32_t Object::* handle);
+    // 오브젝트에 붙은 T 부품. 없거나 첨자가 범위 밖이면 nullptr. 첨자를 손으로 가드하는 관용구를 대신한다.
+    template <typename T> T* component(uint32_t index);
+    template <typename T> const T* component(uint32_t index) const;
 
     // candidate 가 ancestor 자신이거나 그 자손인지. 순환하는 부모 관계를 막는 데 쓴다.
     bool isDescendant(uint32_t candidate, uint32_t ancestor) const;
@@ -473,18 +479,59 @@ private:
     uint64_t componentRev = 1;
 };
 
+// 부품 종류 표. 종류마다 (Scene 의 배열, Object 의 첨자 멤버) 한 쌍을 f 에 넘긴다. 부품을 떼고 옮기고 복제하고
+// 배치를 비교하는 코드가 전부 이 표를 돌므로, 부품 종류를 더할 때 고칠 곳은 여기와 ComponentSlot 특수화뿐이다.
+template <typename SceneType, typename F> void forEachComponentKind(SceneType& scene, F&& f) {
+    f(scene.meshRenderers, &Object::meshRenderer);
+    f(scene.animators, &Object::animator);
+    f(scene.lights, &Object::light);
+    f(scene.rigidBodies, &Object::rigidBody);
+    f(scene.fluids, &Object::fluid);
+    f(scene.particleSystems, &Object::particleSystem);
+    f(scene.cloths, &Object::cloth);
+}
+
+// 부품 타입 → Object 의 첨자 멤버와 Scene 의 배열.
+template <typename T> struct ComponentSlot;
+#define CG_LAB_COMPONENT_SLOT(Type, member, array)                                                                     \
+    template <> struct ComponentSlot<Type> {                                                                           \
+        static constexpr int32_t Object::* HANDLE = &Object::member;                                                   \
+        static std::vector<Type>& items(Scene& scene) { return scene.array; }                                          \
+        static const std::vector<Type>& items(const Scene& scene) { return scene.array; }                              \
+    }
+CG_LAB_COMPONENT_SLOT(MeshRenderer, meshRenderer, meshRenderers);
+CG_LAB_COMPONENT_SLOT(Animator, animator, animators);
+CG_LAB_COMPONENT_SLOT(Light, light, lights);
+CG_LAB_COMPONENT_SLOT(RigidBody, rigidBody, rigidBodies);
+CG_LAB_COMPONENT_SLOT(Fluid, fluid, fluids);
+CG_LAB_COMPONENT_SLOT(ParticleSystem, particleSystem, particleSystems);
+CG_LAB_COMPONENT_SLOT(Cloth, cloth, cloths);
+#undef CG_LAB_COMPONENT_SLOT
+
+template <typename T> T* Scene::component(uint32_t index) {
+    int32_t slot = objects[index].*ComponentSlot<T>::HANDLE;
+    std::vector<T>& items = ComponentSlot<T>::items(*this);
+    return slot >= 0 && static_cast<size_t>(slot) < items.size() ? &items[static_cast<size_t>(slot)] : nullptr;
+}
+template <typename T> const T* Scene::component(uint32_t index) const {
+    int32_t slot = objects[index].*ComponentSlot<T>::HANDLE;
+    const std::vector<T>& items = ComponentSlot<T>::items(*this);
+    return slot >= 0 && static_cast<size_t>(slot) < items.size() ? &items[static_cast<size_t>(slot)] : nullptr;
+}
+
 // 여러 장면을 담아 두고 전환한다.
 //
-// 장면을 포인터로 담는 이유: 렌더러와 유체 시뮬레이터가 «지난 프레임과 같은 장면인가»를 주소로
-// 판정한다. 값으로 담으면 장면을 하나 더 만들 때 벡터가 다시 잡히면서 모든 장면의 주소가 바뀌어,
-// 그 판정이 틀리고 편집기가 잡아 둔 Scene& 도 매달린 참조가 된다.
-//
-// ponytail: 그 주소 판정은 «장면을 지우는 API 가 없다»에도 기대고 있다. 장면 닫기를 넣으면 해제된
-// 자리에 새 장면이 놓여 주소가 같아질 수 있으므로, 그때는 장면마다 번호를 붙여야 한다.
+// 장면을 포인터로 담는 이유: 장면을 더 만들거나 닫을 때 벡터가 재배치되어도 편집기·적재 스레드가 잡아 둔 Scene&
+// 가 살아 있어야 해서다. «같은 장면인가»는 주소가 아니라 Scene::id 로 판정한다 — 닫힌 자리에 새 장면이 놓여도
+// 번호는 다르다.
 class SceneManager {
 public:
     Scene& create(std::string name);
     void setActive(size_t index);
+    // 장면을 닫는다. 마지막 하나는 닫지 않는다(거짓). 활성 장면이 닫히면 앞 장면이 활성이 된다.
+    bool close(size_t index);
+    // 번호로 찾는다. 닫혔으면 nullptr.
+    Scene* find(uint64_t id);
 
     Scene& active() { return *scenes[activeIndex]; }
     const Scene& active() const { return *scenes[activeIndex]; }
@@ -496,6 +543,7 @@ public:
 private:
     std::vector<std::unique_ptr<Scene>> scenes;
     size_t activeIndex = 0;
+    uint64_t nextId = 1;
 };
 
 } // namespace scene

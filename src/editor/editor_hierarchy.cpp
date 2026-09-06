@@ -100,6 +100,17 @@ void Editor::buildHierarchy(scene::SceneManager& scenes, const gfx::GeometryStor
         }
         ImGui::EndCombo();
     }
+    if (scenes.count() > 1) {
+        ImGui::SameLine();
+        ImGui::BeginDisabled(scenes.active().simulating);
+        if (ImGui::SmallButton("닫기")) {
+            deferred = [this, &scenes] { closeScene(scenes, scenes.current()); };
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("이 장면을 닫는다. 재생 중이면 먼저 정지한다");
+        }
+    }
     ImGui::Separator();
 
     scene::Scene& active = scenes.active();

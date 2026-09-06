@@ -323,23 +323,23 @@ void Renderer::buildLights(Frame& frame, const scene::Scene& scene) {
 FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene) {
     // 유체 입자는 오브젝트 인스턴스 뒤에 이어 붙으므로 그만큼 더 잡는다. 내장 구가 없으면 그리지 않는다.
     fluid->setParticleLimit(settings.fluidParticleLimit);
-    bool fluidActive = fluid->prepare(scene, &scene != lastScene);
+    bool fluidActive = fluid->prepare(scene, scene.id != lastSceneId);
     // 입자는 그림자를 던지지 않고 경로 추적에도 없어 장면 변경으로 치지 않는다.
-    particlesActive = particles->prepare(scene, &scene != lastScene, frameDeltaSeconds);
+    particlesActive = particles->prepare(scene, scene.id != lastSceneId, frameDeltaSeconds);
     // 천은 정점이 바뀌면 그림자 캐시·경로 추적 누적을 버려야 하므로 장면 변경으로 친다.
-    clothActiveThisFrame = cloth->prepare(scene, &scene != lastScene, frameDeltaSeconds, geometry);
+    clothActiveThisFrame = cloth->prepare(scene, scene.id != lastSceneId, frameDeltaSeconds, geometry);
     uint32_t particleTotal = geometry.meshLive(fluidSphereMesh) ? fluid->totalParticles() : 0;
     reserveInstances(frame, static_cast<uint32_t>(scene.objects.size()) + particleTotal);
 
     // 장면이 통째로 바뀌면(장면 전환) 프레임 캐시가 다른 장면 것이다. 유체가 움직이는 프레임도 장면이
     // 바뀐 것으로 친다. 가속 구조 재구축, 그림자 캐시 무효화, 경로 추적 누적 초기화가 한꺼번에 맞는다.
-    sceneChangedThisFrame = &scene != lastScene || scene.revision() != lastSceneRevision ||
+    sceneChangedThisFrame = scene.id != lastSceneId || scene.revision() != lastSceneRevision ||
                             (fluidActive && particleTotal > 0) || clothActiveThisFrame;
     // 오브젝트 번호는 추가/삭제로 밀리므로 구성이 바뀐 프레임에는 지난 값을 버린다. 그 한 프레임만
     // 변위가 0 이고 다음 프레임부터 다시 맞는다. 장면 자체가 바뀐 경우도 같다.
-    bool temporalReset = &scene != lastScene || scene.topologyRevision() != lastTopologyRevision ||
+    bool temporalReset = scene.id != lastSceneId || scene.topologyRevision() != lastTopologyRevision ||
                          previousWorld.size() != scene.objects.size();
-    lastScene = &scene;
+    lastSceneId = scene.id;
     lastSceneRevision = scene.revision();
     lastTopologyRevision = scene.topologyRevision();
     previousWorld.resize(scene.objects.size());

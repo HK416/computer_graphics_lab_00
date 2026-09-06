@@ -130,7 +130,7 @@ private:
     // 편집기가 손댄 것을 알아챈다.
     std::vector<GpuRigidBody> resident;
     // 되읽기가 어느 장면·부품 구성의 것인지. 달라졌으면 그 결과는 남의 것이다.
-    const scene::Scene* readbackScene = nullptr;
+    uint64_t readbackSceneId = 0;
     uint64_t readbackComponents = 0;
 
     bool uploadPending = false;

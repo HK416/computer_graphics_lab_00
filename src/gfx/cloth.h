@@ -155,7 +155,7 @@ private:
     VkPipeline writePipeline = VK_NULL_HANDLE;
     bool gpuReady = false;
     std::vector<State> states;
-    const scene::Scene* lastScene = nullptr;
+    uint64_t lastSceneId = 0;
     uint64_t lastComponentRevision = UINT64_MAX;
     bool wasSimulating = false;
 };
