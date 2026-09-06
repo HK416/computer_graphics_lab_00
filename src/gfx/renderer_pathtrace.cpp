@@ -36,14 +36,17 @@ void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, 
         // RR 은 누적된 결과가 아니라 이번 프레임 1표본을 디노이즈한다. 표본 수를 0 으로 두면
         // 광선 생성 셰이더가 더하지 않고 덮어쓰고, 톤 매핑도 나누지 않는다.
         bool guides = rayReconstructionActive();
+        // 표시용 디노이즈도 안내 노멀·깊이만 쓴다(누적은 그대로).
+        bool writeGuides = guides || pathDenoiseThisFrame;
         PathGuideTargets guideTargets{};
-        guideTargets.write = guides;
+        guideTargets.write = writeGuides;
+        guideTargets.fixedJitter = guides;
         guideTargets.diffuseAlbedo = targets.guideDiffuseAlbedoStorageSlot;
         guideTargets.specularAlbedo = targets.guideSpecularAlbedoStorageSlot;
         guideTargets.normal = targets.guideNormalStorageSlot;
         guideTargets.roughness = targets.guideRoughnessStorageSlot;
         guideTargets.depth = targets.guideDepthStorageSlot;
-        if (guides) {
+        if (writeGuides) {
             for (const Image* image : {&targets.guideDiffuseAlbedo,
                                        &targets.guideSpecularAlbedo,
                                        &targets.guideNormal,
@@ -92,6 +95,21 @@ void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, 
         } else {
             ++pathSampleCount;
         }
+        if (pathDenoiseThisFrame) {
+            // à-trous 가 안내 노멀·깊이를 샘플러로 읽는다. 다음 프레임은 UNDEFINED 에서 GENERAL 로 옮기며 통째로
+            // 다시 쓰므로 여기 남긴 레이아웃은 되돌리지 않는다.
+            for (const Image* image : {&targets.guideNormal, &targets.guideDepth}) {
+                imageBarrier(commandBuffer,
+                             image->handle,
+                             VK_IMAGE_ASPECT_COLOR_BIT,
+                             VK_IMAGE_LAYOUT_GENERAL,
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                             VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            }
+        }
         imageBarrier(commandBuffer,
                      targets.velocity.handle,
                      VK_IMAGE_ASPECT_COLOR_BIT,
@@ -110,8 +128,25 @@ void Renderer::recordPathTracePass(VkCommandBuffer commandBuffer, Frame& frame, 
                  VK_IMAGE_LAYOUT_GENERAL,
                  VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    if (pathDenoiseThisFrame) {
+        // 누적을 표본 수로 나눠 세 번 누른다. 결과는 반사 필터 이미지에 남고 톤 매핑·Bloom 이 그것을 읽는다.
+        ProfilerScope scope(frameProfiler, "경로 추적 디노이즈", commandBuffer);
+        float scale = 1.0F / static_cast<float>(std::max(pathSampleCount, 1U));
+        recordAtrous(commandBuffer,
+                     frame.cameraBuffer.address,
+                     targets.guideNormalSlot,
+                     targets.guideDepthSlot,
+                     {{targets.pathAccumulationSampledSlot, targets.reflectionFilteredStorageSlot, 1, false, scale},
+                      {targets.reflectionFilteredSlot, targets.reflectionRawStorageSlot, 2, false, 1.0F},
+                      {targets.reflectionRawSlot, targets.reflectionFilteredStorageSlot, 4, false, 1.0F}});
+        memoryBarrier(commandBuffer,
+                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    }
     // 깊이는 쓰지 않지만 UI 뷰어가 샘플링하므로 레이아웃만 맞춰 둔다.
     imageBarrier(commandBuffer,
                  targets.depth.handle,

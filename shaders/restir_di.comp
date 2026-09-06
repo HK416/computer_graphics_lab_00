@@ -36,6 +36,8 @@ struct RestirSlots {
     uint geometryReadStorage;
     uint geometryWriteStorage;
     uint colorStorage;
+    // 디노이저(params 비트 11)가 켜지면 색상 대신 여기에 직접광(rgba16f)을 적는다. atrous.comp 가 누른 뒤 색상에 더한다.
+    uint directStorage;
 };
 
 layout(buffer_reference, scalar) readonly buffer RestirSlotsBuffer {
@@ -47,7 +49,8 @@ layout(push_constant) uniform RestirPushConstants {
     LightBuffer lights;
     RestirSlotsBuffer slots;
     uint frameIndex;
-    // 하위 8비트 후보 수, 비트 8 시간 재사용, 비트 9 공간 재사용, 비트 10 히스토리 버림, 비트 20 부터 디버그 모드.
+    // 하위 8비트 후보 수, 비트 8 시간 재사용, 비트 9 공간 재사용, 비트 10 히스토리 버림, 비트 11 디노이저,
+    // 비트 20 부터 디버그 모드.
     uint params;
 } push;
 
@@ -56,6 +59,9 @@ uint restirCandidates() {
 }
 bool restirTemporal() {
     return (push.params & (1u << 8u)) != 0u;
+}
+bool restirDenoise() {
+    return (push.params & (1u << 11u)) != 0u;
 }
 bool restirSpatial() {
     return (push.params & (1u << 9u)) != 0u;
@@ -169,8 +175,12 @@ void spatialStage(RestirSlots slots, ivec2 pixel, ivec2 size) {
     Camera camera = push.camera.item;
     vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
     Surface surface;
+    bool denoise = restirDenoise();
     if (!loadSurface(slots, camera, uv, surface)) {
         storeReservoir(slots.historyStorage, pixel, emptyReservoir());
+        if (denoise) {
+            imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.directStorage)], pixel, vec4(0.0));
+        }
         return;
     }
     uint lightCount = camera.shading.x;
@@ -208,15 +218,25 @@ void spatialStage(RestirSlots slots, ivec2 pixel, ivec2 size) {
     if (restirDebugMode() == DEBUG_MODE_RESTIR_LIGHT) {
         color.rgb = r.light == RESTIR_NO_LIGHT ? vec3(0.0) : debugPalette(r.light);
         imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.colorStorage)], pixel, color);
+        if (denoise) {
+            imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.directStorage)], pixel, vec4(0.0));
+        }
         return;
     }
+    // 디노이저가 켜져 있으면 기여가 없는 픽셀도 0 을 적어야 지난 프레임 값이 남지 않는다.
     if (r.light == RESTIR_NO_LIGHT || r.light >= lightCount || r.w <= 0.0) {
+        if (denoise) {
+            imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.directStorage)], pixel, vec4(0.0));
+        }
         return;
     }
     Light light = push.lights.items[r.light];
     vec3 lightDirection;
     vec3 contribution = lightContribution(light, surface, lightDirection);
     if (contribution == vec3(0.0)) {
+        if (denoise) {
+            imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.directStorage)], pixel, vec4(0.0));
+        }
         return;
     }
     // 고른 광원 하나만 광선으로 가린다. 방향광은 무한히 멀다.
@@ -224,7 +244,12 @@ void spatialStage(RestirSlots slots, ivec2 pixel, ivec2 size) {
                       ? 1.0e4
                       : max(length(light.positionRange.xyz - surface.position) - 1.0e-3, 1.0e-4);
     float visibility = rayQueryVisibility(topLevel, surface.position, surface.normal, lightDirection, reach);
-    color.rgb += contribution * visibility * r.w;
+    vec3 direct = contribution * visibility * r.w;
+    if (denoise) {
+        imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.directStorage)], pixel, vec4(direct, 0.0));
+        return;
+    }
+    color.rgb += direct;
     imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.colorStorage)], pixel, color);
 }
 

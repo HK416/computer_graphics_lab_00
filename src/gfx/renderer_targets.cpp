@@ -166,6 +166,8 @@ void Renderer::createRenderTargets() {
     targets.reflectionHistory[1] = createImage(context, reflectionDesc, "반사 누적 1");
     destroyImage(context, targets.reflectionFiltered);
     targets.reflectionFiltered = createImage(context, reflectionDesc, "반사 필터");
+    destroyImage(context, targets.restirDirect);
+    targets.restirDirect = createImage(context, reflectionDesc, "ReSTIR 직접광");
     ImageDesc momentsDesc = reflectionDesc;
     momentsDesc.format = ACCUMULATION_FORMAT;
     for (size_t i = 0; i < 2; ++i) {
@@ -370,6 +372,9 @@ void Renderer::createRenderTargets() {
         targets.reflectionFilteredSlot =
             bindless.add(targets.reflectionFiltered.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
         targets.reflectionFilteredStorageSlot = bindless.addStorageImageRgba16(targets.reflectionFiltered.view);
+        targets.restirDirectSlot = bindless.add(targets.restirDirect.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        targets.restirDirectStorageSlot = bindless.addStorageImageRgba16(targets.restirDirect.view);
+        targets.guideDepthSlot = bindless.add(targets.guideDepth.view, postSampler);
         for (Buffer& buffer : targets.reflectSlotBuffers) {
             buffer = createBuffer(context,
                                   sizeof(ReflectSlots),
@@ -431,6 +436,7 @@ void Renderer::createRenderTargets() {
             restir.geometryReadStorage = targets.restirGeometryStorageSlots[read];
             restir.geometryWriteStorage = targets.restirGeometryStorageSlots[write];
             restir.colorStorage = targets.colorStorageSlot;
+            restir.directStorage = targets.restirDirectStorageSlot;
             std::memcpy(targets.restirSlotBuffers[parity].mapped, &restir, sizeof(restir));
             vmaFlushAllocation(context.allocator, targets.restirSlotBuffers[parity].allocation, 0, VK_WHOLE_SIZE);
         }
@@ -478,6 +484,9 @@ void Renderer::createRenderTargets() {
         bindless.update(
             targets.reflectionFilteredSlot, targets.reflectionFiltered.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
         bindless.updateStorageImageRgba16(targets.reflectionFilteredStorageSlot, targets.reflectionFiltered.view);
+        bindless.update(targets.restirDirectSlot, targets.restirDirect.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);
+        bindless.updateStorageImageRgba16(targets.restirDirectStorageSlot, targets.restirDirect.view);
+        bindless.update(targets.guideDepthSlot, targets.guideDepth.view, postSampler);
         bindless.updateStorageImageRgba(targets.pathAccumulationStorageSlot, targets.pathAccumulation.view);
         bindless.update(
             targets.pathAccumulationSampledSlot, targets.pathAccumulation.view, postSampler, VK_IMAGE_LAYOUT_GENERAL);

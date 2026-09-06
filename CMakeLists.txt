@@ -102,6 +102,7 @@ set(shader_sources
     shaders/ssao_blur.comp
     shaders/reflect.comp
     shaders/restir_di.comp
+    shaders/atrous.comp
     shaders/ddgi.comp
     shaders/cull_meshlets.comp
     shaders/skin.comp

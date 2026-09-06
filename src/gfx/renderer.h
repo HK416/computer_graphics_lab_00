@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <string>
 #include <vector>
@@ -194,6 +195,7 @@ struct RenderTargets {
     uint32_t guideDiffuseAlbedoSlot = 0;
     uint32_t guideRoughnessStorageSlot = 0;
     uint32_t guideDepthStorageSlot = 0;
+    uint32_t guideDepthSlot = 0;
 
     // Bloom 밉 사슬. 절반 해상도에서 시작해 단계마다 반으로 줄이고, 올라오며 더한다. 컴퓨트가
     // 쓰고 읽으므로 계속 GENERAL 이다.
@@ -219,6 +221,10 @@ struct RenderTargets {
     std::array<uint32_t, 2> reflectionMomentsStorageSlots{};
     uint32_t reflectionFilteredSlot = 0;
     uint32_t reflectionFilteredStorageSlot = 0;
+    // ReSTIR 직접광(디노이저 입력). à-trous 는 반사 필터 이미지를 스크래치로 쓴다(반사 패스가 뒤라 비어 있다).
+    Image restirDirect;
+    uint32_t restirDirectSlot = 0;
+    uint32_t restirDirectStorageSlot = 0;
     // 반사 셰이더가 읽는 슬롯 묶음(ReflectSlots). 프레임 홀짝마다 하나. 슬롯을 배정할 때 채운다.
     std::array<Buffer, 2> reflectSlotBuffers;
     // ReSTIR 저장소(rgba32f: 0 히스토리, 1 스크래치 — 교대하지 않음)와 시간 검증 기하(rgba16f, 홀짝 교대).
@@ -486,6 +492,20 @@ private:
     void recordReflectionPass(VkCommandBuffer commandBuffer, const Frame& frame);
     void createRestirPipelines();
     void recordRestirPass(VkCommandBuffer commandBuffer, const Frame& frame);
+    // 깊이·노멀 가중 à-trous(atrous.comp). 단계마다 입력 텍스처 → 출력 스토리지, 마지막은 색상에 더할 수 있다.
+    struct AtrousStep {
+        uint32_t inputTexture;
+        uint32_t outputStorage;
+        uint32_t step;
+        bool add;
+        float inputScale;
+    };
+    void createAtrousPipeline();
+    void recordAtrous(VkCommandBuffer commandBuffer,
+                      VkDeviceAddress camera,
+                      uint32_t normalTexture,
+                      uint32_t depthTexture,
+                      std::initializer_list<AtrousStep> steps);
     void createDdgiPipelines();
     void destroyDdgiResources();
     void ensureDdgiResources(uint32_t probesPerAxis, uint32_t raysPerProbe);
@@ -554,6 +574,8 @@ private:
     VkPipelineLayout restirPipelineLayout = VK_NULL_HANDLE;
     VkPipeline restirTemporalPipeline = VK_NULL_HANDLE;
     VkPipeline restirSpatialPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout atrousPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline atrousPipeline = VK_NULL_HANDLE;
     // ReSTIR 히스토리가 이어지는지와 지난 프레임 광원 수(광원 번호가 어긋나면 버린다).
     bool restirHistoryValid = false;
     uint32_t restirLastLightCount = 0;
@@ -797,6 +819,8 @@ private:
     uint64_t lastTopologyRevision = 0;
     uint64_t lastComponentRevision = 0;
     uint32_t pathSampleCount = 0;
+    // 이 프레임에 경로 추적 누적을 표시용으로 누르는지. recordCommands 가 정하고 톤 매핑이 그 이미지를 읽는다.
+    bool pathDenoiseThisFrame = false;
 
     bool hzbNeedsClear = true;
     bool resizeRequested = false;

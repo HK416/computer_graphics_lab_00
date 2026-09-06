@@ -66,6 +66,10 @@ int main(int argc, char* argv[]) {
             options.reflectionsGiven = true;
         } else if (argument == "--no-denoise") {
             options.reflectionDenoise = false;
+        } else if (argument == "--no-restir-denoise") {
+            options.restirDenoise = false;
+        } else if (argument == "--no-pathtrace-denoise") {
+            options.pathTraceDenoise = false;
         } else if (argument == "--restir") {
             options.restir = true;
             options.restirGiven = true;

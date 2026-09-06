@@ -54,8 +54,10 @@ struct PrimaryHit {
 
 #define PATH_FLAG_NEXT_EVENT 1u
 #define PATH_FLAG_RUSSIAN_ROULETTE 2u
-// DLSS Ray Reconstruction 용 안내 버퍼를 채운다. 이때는 누적하지 않고 1표본만 쓴다.
+// 안내 버퍼(알베도·노멀·거칠기·깊이)를 채운다. DLSS Ray Reconstruction 과 표시용 디노이저가 쓴다.
 #define PATH_FLAG_WRITE_GUIDES 4u
+// RR 프레임: 렌더러가 지터를 투영 행렬에 넣었으므로 픽셀 안에서 다시 흔들지 않는다.
+#define PATH_FLAG_FIXED_JITTER 8u
 
 layout(push_constant) uniform PathTracePushConstants {
     VertexBuffer vertices;

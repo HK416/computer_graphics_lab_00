@@ -230,6 +230,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `LightClusterPushConstants` `LIGHT_CLUSTER_*` (`src/gfx/renderer_internal.h`) | 동명 블록·`LIGHT_CLUSTER_*` (`shaders/light_cluster.comp`, `scene_types.glsl`) |
 | `DdgiPushConstants` (`src/gfx/renderer_internal.h`) | 동명 블록 (`shaders/ddgi.comp`) — 앞 열 개 주소는 `ReflectPushConstants` 와 같아 `hit_shading.glsl` 을 공유 |
 | `RestirPushConstants` `RestirSlots` (`src/gfx/renderer_internal.h`) | 동명 블록·구조체 (`shaders/restir_di.comp`); 저장소 인코딩은 `shaders/restir.glsl` 의 `Reservoir` |
+| `AtrousPushConstants` (`src/gfx/renderer_internal.h`) | 동명 블록 (`shaders/atrous.comp`) — ReSTIR 직접광·경로 추적 표시용 디노이즈 |
 | `ReflectPushConstants` `ReflectSlots` (`src/gfx/renderer_internal.h`) | 동명 블록·구조체 (`shaders/reflect.comp`) — 슬롯은 버퍼로 넘기고 `samplesResetDebug`·`filterStep` 에 비트를 묶는다 |
 | `FluidDrawPushConstants` (`src/gfx/renderer_internal.h`) | 동명 블록 (`shaders/fluid_draw_common.glsl`) |
 | `physics::SurfaceVertex` (`src/physics/marching_cubes.h`) | `FluidSurfaceVertex` (`shaders/fluid_types.glsl`) |

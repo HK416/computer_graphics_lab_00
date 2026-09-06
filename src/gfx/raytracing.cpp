@@ -53,6 +53,7 @@ static_assert(sizeof(PathTracePushConstants) <= 128, "경로 추적 푸시 상�
 constexpr uint32_t PATH_FLAG_NEXT_EVENT = 1;
 constexpr uint32_t PATH_FLAG_RUSSIAN_ROULETTE = 2;
 constexpr uint32_t PATH_FLAG_WRITE_GUIDES = 4;
+constexpr uint32_t PATH_FLAG_FIXED_JITTER = 8;
 
 uint64_t alignUp(uint64_t value, uint64_t alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
@@ -913,6 +914,7 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
     pushConstants.flags = (options.nextEventEstimation ? PATH_FLAG_NEXT_EVENT : 0U) |
                           (options.russianRoulette ? PATH_FLAG_RUSSIAN_ROULETTE : 0U) |
                           (guides.write ? PATH_FLAG_WRITE_GUIDES : 0U) |
+                          (guides.fixedJitter ? PATH_FLAG_FIXED_JITTER : 0U) |
                           (std::min(std::max(options.lightCandidates, 1U), 255U) << 8U);
     pushConstants.radianceClamp = options.radianceClamp;
     pushConstants.skyIntensity = options.skyIntensity;

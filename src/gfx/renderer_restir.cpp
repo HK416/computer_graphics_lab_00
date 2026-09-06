@@ -101,9 +101,10 @@ void Renderer::recordRestirPass(VkCommandBuffer commandBuffer, const Frame& fram
     pushConstants.lights = frame.lightBuffer.address;
     pushConstants.slots = targets.restirSlotBuffers[parity].address;
     pushConstants.frameIndex = static_cast<uint32_t>(frameIndex);
+    bool denoise = settings.restirDenoise;
     pushConstants.params = std::min(std::max(settings.restirCandidates, 1U), 255U) |
                            (settings.restirTemporal ? 1U << 8U : 0U) | (settings.restirSpatial ? 1U << 9U : 0U) |
-                           (reset ? 1U << 10U : 0U) | (settings.debugMode << 20U);
+                           (reset ? 1U << 10U : 0U) | (denoise ? 1U << 11U : 0U) | (settings.debugMode << 20U);
 
     std::array<VkDescriptorSet, 2> sets{bindless.set(), rayTracer->accelerationSet()};
     vkCmdBindDescriptorSets(commandBuffer,
@@ -126,6 +127,16 @@ void Renderer::recordRestirPass(VkCommandBuffer commandBuffer, const Frame& fram
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, restirSpatialPipeline);
     vkCmdDispatch(commandBuffer, groupsX, groupsY, 1);
     restirHistoryValid = true;
+    if (denoise) {
+        // 직접광을 따로 받아 보폭 1·2·4 로 세 번 누른 뒤 색상에 더한다. 반사 필터 이미지가 스크래치다.
+        recordAtrous(commandBuffer,
+                     frame.cameraBuffer.address,
+                     targets.guideNormalSlot,
+                     targets.depthSlot,
+                     {{targets.restirDirectSlot, targets.reflectionFilteredStorageSlot, 1, false, 1.0F},
+                      {targets.reflectionFilteredSlot, targets.restirDirectStorageSlot, 2, false, 1.0F},
+                      {targets.restirDirectSlot, targets.colorStorageSlot, 4, true, 1.0F}});
+    }
 
     // 색상과 깊이를 다시 첨부물로. 반사·반투명 패스가 이어 쓴다.
     imageBarrier(commandBuffer,
@@ -147,6 +158,62 @@ void Renderer::recordRestirPass(VkCommandBuffer commandBuffer, const Frame& fram
                  VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                  VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
     frameProfiler.end(zone, commandBuffer);
+}
+
+void Renderer::createAtrousPipeline() {
+    VkDescriptorSetLayout bindlessLayout = bindless.layout();
+    VkPushConstantRange range{};
+    range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    range.size = sizeof(AtrousPushConstants);
+    VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &bindlessLayout;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &range;
+    VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &atrousPipelineLayout));
+
+    VkShaderModule module = createShaderModule(context.device, "atrous.comp.spv");
+    VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    info.stage = shaderStage(VK_SHADER_STAGE_COMPUTE_BIT, module);
+    info.layout = atrousPipelineLayout;
+    VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &info, nullptr, &atrousPipeline));
+    vkDestroyShaderModule(context.device, module, nullptr);
+}
+
+// 단계마다 앞 디스패치(또는 입력을 쓴 컴퓨트)의 쓰기를 기다린다. 입력이 다른 단계(광선 추적)에서 오면 호출자가 먼저
+// 막는다. 이미지는 전부 GENERAL 레이아웃이어야 한다.
+void Renderer::recordAtrous(VkCommandBuffer commandBuffer,
+                            VkDeviceAddress camera,
+                            uint32_t normalTexture,
+                            uint32_t depthTexture,
+                            std::initializer_list<AtrousStep> steps) {
+    VkDescriptorSet bindlessSet = bindless.set();
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, atrousPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, atrousPipeline);
+    uint32_t groupsX = (currentRenderExtent.width + 7) / 8;
+    uint32_t groupsY = (currentRenderExtent.height + 7) / 8;
+    for (const AtrousStep& step : steps) {
+        memoryBarrier(commandBuffer,
+                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                          VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        AtrousPushConstants push{};
+        push.camera = camera;
+        push.inputTexture = step.inputTexture;
+        push.outputStorage = step.outputStorage;
+        push.normalTexture = normalTexture;
+        push.depthTexture = depthTexture;
+        push.step = step.step;
+        push.flags = step.add ? 1U : 0U;
+        push.inputScale = step.inputScale;
+        // ponytail: 휘도 폭 계수 상수. 반사 필터의 4·sqrt(분산)과 같은 값이다.
+        push.luminanceSigma = 4.0F;
+        vkCmdPushConstants(commandBuffer, atrousPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+        vkCmdDispatch(commandBuffer, groupsX, groupsY, 1);
+    }
 }
 
 } // namespace gfx

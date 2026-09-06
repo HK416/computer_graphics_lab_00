@@ -314,8 +314,10 @@ struct RestirSlots {
     uint32_t geometryReadStorage;
     uint32_t geometryWriteStorage;
     uint32_t colorStorage;
+    // 디노이저가 켜지면 공간 패스가 색상 대신 여기에 직접광을 적고 atrous.comp 가 누른 뒤 색상에 더한다.
+    uint32_t directStorage;
 };
-static_assert(sizeof(RestirSlots) == 36, "ReSTIR 슬롯 배치가 셰이더와 어긋난다");
+static_assert(sizeof(RestirSlots) == 40, "ReSTIR 슬롯 배치가 셰이더와 어긋난다");
 
 // shaders/restir_di.comp 의 동명 블록과 배치가 같아야 한다.
 struct RestirPushConstants {
@@ -323,9 +325,25 @@ struct RestirPushConstants {
     VkDeviceAddress lights;
     VkDeviceAddress slots;
     uint32_t frameIndex;
-    // 하위 8비트 후보 수, 비트 8 시간 재사용, 비트 9 공간 재사용, 비트 10 히스토리 버림, 비트 20 부터 디버그 모드.
+    // 하위 8비트 후보 수, 비트 8 시간 재사용, 비트 9 공간 재사용, 비트 10 히스토리 버림, 비트 11 디노이저,
+    // 비트 20 부터 디버그 모드.
     uint32_t params;
 };
+
+// shaders/atrous.comp 의 동명 블록과 배치가 같아야 한다(scalar). 깊이·노멀 가중 à-trous 한 반복.
+struct AtrousPushConstants {
+    VkDeviceAddress camera;
+    uint32_t inputTexture;
+    uint32_t outputStorage;
+    uint32_t normalTexture;
+    uint32_t depthTexture;
+    uint32_t step;
+    // 비트 0: 결과를 출력에 더한다(마지막 반복이 색상 버퍼에).
+    uint32_t flags;
+    float inputScale;
+    float luminanceSigma;
+};
+static_assert(sizeof(AtrousPushConstants) == 40, "à-trous 푸시 상수 배치가 셰이더와 어긋난다");
 
 // shaders/ddgi.comp 의 동명 블록과 배치가 같아야 한다. 앞 열 개는 ReflectPushConstants 와 같다(hit_shading.glsl 공유).
 struct DdgiPushConstants {

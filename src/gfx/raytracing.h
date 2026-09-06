@@ -47,6 +47,8 @@ struct PathTraceOptions {
 // write 가 거짓이면 광선 생성 셰이더가 아무것도 쓰지 않고 나머지 값도 보지 않는다.
 struct PathGuideTargets {
     bool write = false;
+    // RR 프레임은 지터가 투영 행렬에 들어 있어 광선 생성이 픽셀 안에서 다시 흔들지 않는다.
+    bool fixedJitter = false;
     uint32_t diffuseAlbedo = 0;
     uint32_t specularAlbedo = 0;
     uint32_t normal = 0;

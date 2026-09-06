@@ -68,6 +68,8 @@ struct RenderSettings {
     uint32_t restirCandidates = 8;
     bool restirTemporal = true;
     bool restirSpatial = true;
+    // ReSTIR 직접광을 깊이·노멀 가중 à-trous(atrous.comp)로 누른다. 끄면 옛 결과와 바이트로 같다.
+    bool restirDenoise = true;
     // DDGI 프로브 GI: 장면 경계 상자에 축마다 ddgiProbes 개의 프로브를 깔고 프레임마다 프로브당 ddgiRays 광선을 쏘아
     // 조도·가시성 아틀라스를 히스테리시스로 갱신한다. 확산 조도가 IBL 큐브 대신 이것을 읽는다. 경로 추적 중에는 쉰다.
     bool useDdgi = false;
@@ -101,6 +103,9 @@ struct RenderSettings {
     // 경로 추적. 하드웨어가 지원하고 가속 구조가 예산에 들어갈 때만 켤 수 있다.
     bool usePathTracing = false;
     PathTraceOptions pathTrace;
+    // 누적 표본이 이 수에 못 미치는 동안 표시용으로 à-trous 를 돌린다. 누적 버퍼는 건드리지 않는다.
+    bool pathTraceDenoise = true;
+    uint32_t pathTraceDenoiseSamples = 64;
 
     // 유체 부품이 요청해도 이보다 많은 입자는 뿌리지 않는다. 하드웨어 프로파일이 정한다.
     uint32_t fluidParticleLimit = FLUID_MAX_PARTICLES;

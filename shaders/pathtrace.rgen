@@ -374,7 +374,7 @@ void main() {
         // 지터 수열이 있으므로 그때는 렌더러가 넘긴 값을 쓴다. camera.jitter 는 NDC 평행이동이라
         // 화면 크기의 절반을 곱해 픽셀 오프셋으로 되돌린다.
         // RR 프레임은 렌더러가 지터를 투영 행렬에 이미 넣어 두었다. 여기서 또 흔들면 두 번 흔들린다.
-        vec2 jitter = (pathTrace.flags & PATH_FLAG_WRITE_GUIDES) != 0u
+        vec2 jitter = (pathTrace.flags & PATH_FLAG_FIXED_JITTER) != 0u
                           ? vec2(0.5)
                           : vec2(randomFloat(seed), randomFloat(seed));
         vec2 ndc = ((vec2(pixel) + jitter) / size) * 2.0 - 1.0;

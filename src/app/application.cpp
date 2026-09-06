@@ -144,6 +144,8 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
         settings.occlusionCulling = options.occlusionCulling;
         settings.useReflections = options.reflections;
         settings.reflectionDenoise = options.reflectionDenoise;
+        settings.restirDenoise = options.restirDenoise;
+        settings.pathTraceDenoise = options.pathTraceDenoise;
         settings.useLightClusters = options.lightClusters;
         if (options.fogShadowSamples >= 0) {
             settings.fogShadowSamples = static_cast<uint32_t>(options.fogShadowSamples);

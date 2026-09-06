@@ -67,6 +67,9 @@ struct Options {
     bool reflectionsGiven = false;
     // --no-denoise: 반사 디노이저를 끈다. 옛 누적 결과와 바이트로 견줄 때 쓴다.
     bool reflectionDenoise = true;
+    // --no-restir-denoise / --no-pathtrace-denoise: 직접광·경로 추적 표시용 à-trous 를 끈다.
+    bool restirDenoise = true;
+    bool pathTraceDenoise = true;
     // 안개 태양 그림자 표본 수. 음수면 기본값(RenderSettings)을 쓴다.
     int32_t fogShadowSamples = -1;
     bool lightClusters = true;

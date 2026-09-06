@@ -192,6 +192,10 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::Checkbox("Temporal 재사용", &renderer.settings.restirTemporal);
         ImGui::SameLine();
         ImGui::Checkbox("Spatial 재사용", &renderer.settings.restirSpatial);
+        ImGui::Checkbox("Denoiser", &renderer.settings.restirDenoise);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("직접광을 따로 받아 깊이·노멀·휘도 가중 à-trous 를 세 번 돌린다. 끄면 옛 결과와 같다");
+        }
         ImGui::EndDisabled();
         ImGui::EndDisabled();
         if (rasterOnly) {
@@ -464,6 +468,17 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
             ImGui::Checkbox("Russian Roulette", &options.russianRoulette);
             ImGui::SliderFloat("복사휘도 상한", &options.radianceClamp, 1.0F, 64.0F, "%.1f");
             ImGui::SliderFloat("하늘 밝기", &options.skyIntensity, 0.0F, 4.0F, "%.2f");
+            ImGui::Checkbox("Denoiser", &renderer.settings.pathTraceDenoise);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "표본이 적은 동안 누적을 à-trous 로 눌러 보여준다. 누적 버퍼는 그대로라 수렴 결과는 같다");
+            }
+            ImGui::SameLine();
+            int denoiseSamples = static_cast<int>(renderer.settings.pathTraceDenoiseSamples);
+            ImGui::SetNextItemWidth(120.0F);
+            if (ImGui::SliderInt("표본까지", &denoiseSamples, 1, 1024)) {
+                renderer.settings.pathTraceDenoiseSamples = static_cast<uint32_t>(denoiseSamples);
+            }
             ImGui::Text("누적 표본 %u", renderer.pathTraceSamples());
             ImGui::SameLine();
             if (ImGui::Button("누적 초기화")) {

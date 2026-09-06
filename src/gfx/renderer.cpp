@@ -99,6 +99,7 @@ Renderer::Renderer(Context& context,
     createFluidSurfacePipelines();
     createReflectionPipelines();
     createRestirPipelines();
+    createAtrousPipeline();
     createDdgiPipelines();
     createCullPipeline();
     createSkinPipeline();
@@ -170,6 +171,8 @@ Renderer::~Renderer() {
     vkDestroyPipeline(context.device, restirSpatialPipeline, nullptr);
     vkDestroyPipeline(context.device, restirTemporalPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, restirPipelineLayout, nullptr);
+    vkDestroyPipeline(context.device, atrousPipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, atrousPipelineLayout, nullptr);
     vkDestroyPipeline(context.device, reflectionFilterPipeline, nullptr);
     vkDestroyPipeline(context.device, reflectionResolvePipeline, nullptr);
     vkDestroyPipeline(context.device, reflectionTracePipeline, nullptr);
@@ -240,6 +243,7 @@ Renderer::~Renderer() {
         destroyBuffer(context, targets.restirSlotBuffers[i]);
     }
     destroyImage(context, targets.reflectionFiltered);
+    destroyImage(context, targets.restirDirect);
     destroyImage(context, targets.reflectionMoments[1]);
     destroyImage(context, targets.reflectionMoments[0]);
     for (Buffer& buffer : targets.reflectSlotBuffers) {
@@ -597,11 +601,24 @@ void Renderer::recordCommands(Frame& frame,
                [&](VkCommandBuffer cmd) { recordParticlePass(cmd, frame, scene); }});
 
     // ---- 경로 추적 경로. 모션 벡터와 깊이는 광선 생성 셰이더가 직접 쓰고 읽기 전용으로 남긴다.
+    //      표본이 적은 동안은 누적을 à-trous 로 눌러 보여준다(반사 필터·원본 이미지가 스크래치). RR 은 스스로
+    //      디노이즈한다.
+    pathDenoiseThisFrame = pathTracing && settings.pathTraceDenoise && !rayReconstructionActive() &&
+                           pathSampleCount < settings.pathTraceDenoiseSamples && settings.debugMode == 0;
+    std::vector<ImageUse> pathWrites;
+    if (pathDenoiseThisFrame) {
+        pathWrites = {storage(targets.reflectionFiltered,
+                              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                              VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT),
+                      storage(targets.reflectionRaw,
+                              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                              VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)};
+    }
     graph.add({"경로 추적",
                "경로 추적",
                [&] { return pathTracing; },
                {},
-               {},
+               pathWrites,
                {sampled(targets.velocity, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT),
                 depthSampled(VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT)},
                [&](VkCommandBuffer cmd) { recordPathTracePass(cmd, frame, scene); }});
@@ -848,7 +865,12 @@ void Renderer::recordCommands(Frame& frame,
          {sampled(targets.guideNormal, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT),
           sampled(targets.guideSpecularAlbedo, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT),
           sampled(targets.guideDiffuseAlbedo, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)},
-         {},
+         {storage(targets.restirDirect,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT),
+          storage(targets.reflectionFiltered,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)},
          {sampled(targets.velocity, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT),
           colorWrite(targets.color, false),
           depthWrite(false)},
@@ -1001,7 +1023,10 @@ void Renderer::recordCommands(Frame& frame,
     bool temporalUpscale = temporalReady() && (!pathTracing || rayReconstruction);
 
     TonemapPushConstants tonemapPushConstants{};
-    tonemapPushConstants.colorTexture = pathTracing ? targets.pathAccumulationSampledSlot : targets.colorSlot;
+    // 경로 추적은 누적 버퍼를 표본 수로 나눠 읽고, 디노이즈한 프레임은 이미 나눈 반사 필터 이미지를 읽는다.
+    tonemapPushConstants.colorTexture =
+        pathTracing ? (pathDenoiseThisFrame ? targets.reflectionFilteredSlot : targets.pathAccumulationSampledSlot)
+                    : targets.colorSlot;
     tonemapPushConstants.exposure = settings.exposure;
     tonemapPushConstants.camera = frame.cameraBuffer.address;
 
@@ -1046,7 +1071,7 @@ void Renderer::recordCommands(Frame& frame,
     // 업스케일 결과, 경로 추적 누적) 어느 쪽이든 같은 자리에서 같은 결과를 낸다.
     graph.add({"후처리", nullptr, {}, {}, {}, {}, [&](VkCommandBuffer cmd) {
                    // 경로 추적 노드가 이번 프레임 표본을 더한 뒤의 값을 써야 한다. 그래프를 짤 때 잡으면 하나 모자란다.
-                   tonemapPushConstants.sampleCount = pathTracing ? pathSampleCount : 0U;
+                   tonemapPushConstants.sampleCount = pathTracing && !pathDenoiseThisFrame ? pathSampleCount : 0U;
                    recordPostEffects(cmd,
                                      scene.post,
                                      tonemapPushConstants.colorTexture,
