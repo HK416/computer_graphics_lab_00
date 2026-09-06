@@ -1,6 +1,8 @@
 #ifndef SCENE_TYPES_GLSL
 #define SCENE_TYPES_GLSL
 
+#extension GL_EXT_buffer_reference_uvec2 : require
+
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 
@@ -207,7 +209,38 @@ struct Camera {
     uvec4 fogShadow;
     // 태양 캐스케이드 경계 거리.
     vec4 fogCascadeSplits;
+    // 광원 클러스터. xy 목록 버퍼 주소, z 축별 개수(x | y << 8 | z << 16), w 켜짐(0 이면 광원 전부를 돈다).
+    uvec4 lightCluster;
+    // x 근평면, y 클러스터 원거리(마지막 조각은 그 너머까지). 깊이 조각은 로그 간격.
+    vec4 lightClusterParams;
 };
+
+// 광원 클러스터. src/gfx/renderer_internal.h 의 LIGHT_CLUSTER_* 와 같아야 한다. 클러스터마다 [개수, 번호 × 64].
+// 개수가 LIGHT_CLUSTER_NONE 이면 상한을 넘친 클러스터라 프래그먼트가 광원 전부를 돈다.
+#define LIGHT_CLUSTER_MAX_LIGHTS 64u
+#define LIGHT_CLUSTER_STRIDE 65u
+#define LIGHT_CLUSTER_NONE 0xFFFFFFFFu
+layout(buffer_reference, scalar) buffer LightClusterBuffer {
+    uint items[];
+};
+
+uvec3 lightClusterDims(Camera camera) {
+    uint packed = camera.lightCluster.z;
+    return uvec3(packed & 0xFFu, (packed >> 8u) & 0xFFu, (packed >> 16u) & 0xFFu);
+}
+
+// 화면 좌표와 시야 깊이의 클러스터 번호. 깊이 조각은 근평면부터 원거리까지 로그 간격이고 그 너머는 마지막 조각이다.
+uint lightClusterIndex(Camera camera, vec2 fragCoord, float viewDepth) {
+    uvec3 dims = lightClusterDims(camera);
+    vec2 tile = fragCoord / camera.viewport.xy * vec2(dims.xy);
+    uint x = min(uint(max(tile.x, 0.0)), dims.x - 1u);
+    uint y = min(uint(max(tile.y, 0.0)), dims.y - 1u);
+    float near = camera.lightClusterParams.x;
+    float far = camera.lightClusterParams.y;
+    float slice = log(max(viewDepth, near) / near) / log(far / near) * float(dims.z);
+    uint z = min(uint(max(slice, 0.0)), dims.z - 1u);
+    return (z * dims.y + y) * dims.x + x;
+}
 
 // DDGI 프로브 격자 헬퍼. src/gfx/renderer_ddgi.cpp 의 상수·아틀라스 배치와 같아야 한다. 프로브 (x, y, z) 는
 // 아틀라스 칸 (x + nx·z, y) 에 놓이고 칸 한 변은 텍셀 수 + 테두리 2 다.

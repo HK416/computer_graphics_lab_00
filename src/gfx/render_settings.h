@@ -81,6 +81,9 @@ struct RenderSettings {
     uint32_t ssaoSamples = 16;
 
     // GPU 컴퓨트가 meshlet 단위로 컬링하고 간접 그리기 명령을 만든다.
+    // 래스터 프래그먼트가 화면 타일 × 깊이 조각의 광원 목록만 돌게 한다. 끄면 광원 전부를 돈다(결과는 같다).
+    bool useLightClusters = true;
+
     // 높이 안개의 태양 인스캐터에 그림자를 넣을 때 광선을 따라 읽는 표본 수. 0 이면 해석식만(그림자 없음).
     // 경로 추적은 표본마다 그림자 광선이라 8 로 묶는다.
     uint32_t fogShadowSamples = 12;

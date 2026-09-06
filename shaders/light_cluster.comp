@@ -1,0 +1,76 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+#include "scene_types.glsl"
+
+// 클러스터마다 닿는 광원 번호를 모은다. 클러스터의 여덟 모서리를 세계 공간으로 되돌려 축 정렬 상자로 감싸고(보수적),
+// 방향광은 늘 넣고 나머지는 도달 거리 구와 상자의 겹침으로 거른다. 번호는 오름차순이라 프래그먼트의 누적 순서가
+// 전체 루프와 같고, 도달 거리 밖 광원의 기여는 창 함수 감쇠로 정확히 0 이라 결과가 전체 루프와 비트 단위로 같다.
+// 마지막 깊이 조각은 원거리 너머까지 맡는다. 상한(LIGHT_CLUSTER_MAX_LIGHTS)을 넘치는 클러스터는 개수 자리에
+// LIGHT_CLUSTER_NONE 을 적어 프래그먼트가 전체 루프로 돌아가게 한다(버리면 결과가 달라진다).
+layout(local_size_x = 64) in;
+
+// src/gfx/renderer_internal.h 의 LightClusterPushConstants 와 배치가 같아야 한다.
+layout(push_constant, scalar) uniform LightClusterPushConstants {
+    CameraBuffer camera;
+    LightBuffer lights;
+    LightClusterBuffer clusters;
+} push;
+
+vec3 unproject(Camera camera, vec2 ndc, float viewDepth) {
+    // 무한 원거리 reverse-Z: clip.z = near, clip.w = 시야 깊이. ndc z = near / 깊이.
+    vec4 world = camera.inverseViewProjection * vec4(ndc, camera.parameters.x / viewDepth, 1.0);
+    return world.xyz / world.w;
+}
+
+void main() {
+    Camera camera = push.camera.item;
+    uvec3 dims = lightClusterDims(camera);
+    uint total = dims.x * dims.y * dims.z;
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= total) {
+        return;
+    }
+    uint cx = index % dims.x;
+    uint cy = (index / dims.x) % dims.y;
+    uint cz = index / (dims.x * dims.y);
+
+    float near = camera.lightClusterParams.x;
+    float far = camera.lightClusterParams.y;
+    float depth0 = near * pow(far / near, float(cz) / float(dims.z));
+    float depth1 = cz + 1u == dims.z ? 1.0e5 : near * pow(far / near, float(cz + 1u) / float(dims.z));
+    vec2 ndc0 = vec2(cx, cy) / vec2(dims.xy) * 2.0 - 1.0;
+    vec2 ndc1 = vec2(cx + 1u, cy + 1u) / vec2(dims.xy) * 2.0 - 1.0;
+
+    vec3 minimum = vec3(1.0e30);
+    vec3 maximum = vec3(-1.0e30);
+    for (uint corner = 0u; corner < 8u; ++corner) {
+        vec2 ndc = vec2((corner & 1u) != 0u ? ndc1.x : ndc0.x, (corner & 2u) != 0u ? ndc1.y : ndc0.y);
+        vec3 world = unproject(camera, ndc, (corner & 4u) != 0u ? depth1 : depth0);
+        minimum = min(minimum, world);
+        maximum = max(maximum, world);
+    }
+
+    uint base = index * LIGHT_CLUSTER_STRIDE;
+    uint count = 0u;
+    bool overflow = false;
+    uint lightCount = camera.shading.x;
+    for (uint i = 0u; i < lightCount && !overflow; ++i) {
+        Light light = push.lights.items[i];
+        bool inside = uint(light.colorType.w) == LIGHT_TYPE_DIRECTIONAL;
+        if (!inside) {
+            vec3 closest = clamp(light.positionRange.xyz, minimum, maximum);
+            vec3 delta = closest - light.positionRange.xyz;
+            float range = max(light.positionRange.w, 0.0);
+            inside = dot(delta, delta) <= range * range;
+        }
+        if (inside && count == LIGHT_CLUSTER_MAX_LIGHTS) {
+            overflow = true;
+        } else if (inside) {
+            push.clusters.items[base + 1u + count] = i;
+            ++count;
+        }
+    }
+    push.clusters.items[base] = overflow ? LIGHT_CLUSTER_NONE : count;
+}

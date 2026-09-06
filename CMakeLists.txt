@@ -98,6 +98,7 @@ set(shader_sources
     shaders/prefilter.comp
     shaders/brdf_lut.comp
     shaders/ssao.comp
+    shaders/light_cluster.comp
     shaders/ssao_blur.comp
     shaders/reflect.comp
     shaders/restir_di.comp

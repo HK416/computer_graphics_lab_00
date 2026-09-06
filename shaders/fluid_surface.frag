@@ -40,8 +40,21 @@ void main() {
     // 여기서 다시 곱하면 안 된다(0.04² 이 되어 물이 새까매진다).
     vec3 reflection = environmentLight(camera, surface, 1.0, true);
     uint lightCount = camera.shading.x;
+    // 불투명 패스와 같은 광원 클러스터 목록(mesh_shading.glsl).
+    uint clusterBase = LIGHT_CLUSTER_NONE;
+    LightClusterBuffer clusters = LightClusterBuffer(camera.lightCluster.xy);
+    if (lightCount > 0u && camera.lightCluster.w != 0u) {
+        clusterBase = lightClusterIndex(camera, gl_FragCoord.xy, 1.0 / gl_FragCoord.w) * LIGHT_CLUSTER_STRIDE;
+        uint clustered = clusters.items[clusterBase];
+        if (clustered == LIGHT_CLUSTER_NONE) {
+            clusterBase = LIGHT_CLUSTER_NONE;
+        } else {
+            lightCount = clustered;
+        }
+    }
     for (uint i = 0u; i < lightCount; ++i) {
-        Light light = push.lights.items[i];
+        uint lightIndex = clusterBase != LIGHT_CLUSTER_NONE ? clusters.items[clusterBase + 1u + i] : i;
+        Light light = push.lights.items[lightIndex];
         vec3 lightDirection;
         vec3 contribution = lightContribution(light, surface, lightDirection);
         if (contribution == vec3(0.0)) {

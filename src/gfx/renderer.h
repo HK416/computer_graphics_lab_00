@@ -478,6 +478,8 @@ private:
     void createSkinPipeline();
     void createShadowPipeline();
     void createSsaoPipelines();
+    void createLightClusterPipeline();
+    void recordLightClusterPass(VkCommandBuffer commandBuffer, const Frame& frame);
     void createBloomPipelines();
     // 광선 질의 컴퓨트로 반사를 추적하고 시간축으로 누적해 색상에 더한다. 광선 질의가 있을 때만 만든다.
     void createReflectionPipelines();
@@ -660,6 +662,10 @@ private:
     VkPipeline shadowCutoffPipeline = VK_NULL_HANDLE;
     VkPipelineLayout ssaoPipelineLayout = VK_NULL_HANDLE;
     VkPipeline ssaoPipeline = VK_NULL_HANDLE;
+    // 광원 클러스터. 격자 크기가 고정이라 버퍼도 한 번만 만든다.
+    VkPipelineLayout lightClusterPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline lightClusterPipeline = VK_NULL_HANDLE;
+    Buffer lightClusterBuffer;
     VkPipelineLayout ssaoBlurPipelineLayout = VK_NULL_HANDLE;
     VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
     // buildLights 가 재는 장면 반지름. SSAO 반지름을 장면 크기에 맞추는 데 쓴다.

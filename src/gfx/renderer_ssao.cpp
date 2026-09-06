@@ -87,4 +87,56 @@ void Renderer::recordSsaoPass(VkCommandBuffer commandBuffer, const Frame& frame)
     vkCmdDispatch(commandBuffer, (targets.ssaoExtent.width + 7) / 8, (targets.ssaoExtent.height + 7) / 8, 1);
 }
 
+void Renderer::createLightClusterPipeline() {
+    VkDescriptorSetLayout bindlessLayout = bindless.layout();
+    VkPushConstantRange range{};
+    range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    range.size = sizeof(LightClusterPushConstants);
+    VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &bindlessLayout;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &range;
+    VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &lightClusterPipelineLayout));
+
+    VkShaderModule module = createShaderModule(context.device, "light_cluster.comp.spv");
+    VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    info.stage = shaderStage(VK_SHADER_STAGE_COMPUTE_BIT, module);
+    info.layout = lightClusterPipelineLayout;
+    VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &info, nullptr, &lightClusterPipeline));
+    vkDestroyShaderModule(context.device, module, nullptr);
+
+    lightClusterBuffer =
+        createBuffer(context,
+                     static_cast<VkDeviceSize>(LIGHT_CLUSTER_COUNT) * LIGHT_CLUSTER_STRIDE * sizeof(uint32_t),
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                     MemoryLocation::DEVICE,
+                     "광원 클러스터");
+}
+
+// 클러스터마다 광원 목록을 다시 짠다. 카메라와 조명 버퍼는 이 프레임 것이 이미 채워져 있다.
+void Renderer::recordLightClusterPass(VkCommandBuffer commandBuffer, const Frame& frame) {
+    LightClusterPushConstants push{};
+    push.camera = frame.cameraBuffer.address;
+    push.lights = frame.lightBuffer.address;
+    push.clusters = lightClusterBuffer.address;
+    VkDescriptorSet bindlessSet = bindless.set();
+    // 지난 프레임의 프래그먼트가 아직 읽고 있을 수 있다.
+    memoryBarrier(commandBuffer,
+                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_READ_BIT,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    vkCmdBindDescriptorSets(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, lightClusterPipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, lightClusterPipeline);
+    vkCmdPushConstants(commandBuffer, lightClusterPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+    vkCmdDispatch(commandBuffer, (LIGHT_CLUSTER_COUNT + 63) / 64, 1, 1);
+    memoryBarrier(commandBuffer,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_READ_BIT);
+}
+
 } // namespace gfx

@@ -61,15 +61,29 @@ vec4 shadeSurface(out vec4 normalRoughness, out vec3 reflectionWeight, out vec4 
     surface.sheenColor = sampled.sheenColor;
     surface.sheenRoughness = sampled.sheenRoughness;
 
-    // 조명이 많아도 그냥 훑는다. ReSTIR 직접광(camera.flags.y)이 켜져 있으면 불투명·컷오프 픽셀은 restir_di.comp
-    // 가 직접광을 맡으므로 건너뛴다. 반투명은 화면 공간 표면이 없어 루프를 그대로 돈다.
-    //
-    // ponytail: 선형 순회라 조명이 수십 개를 넘어가면 반투명·물 표면은 느려진다. 그쪽은 타일/클러스터 컬링이 답이다.
+    // ReSTIR 직접광(camera.flags.y)이 켜져 있으면 불투명·컷오프 픽셀은 restir_di.comp 가 직접광을 맡으므로 건너뛴다.
+    // 반투명은 화면 공간 표면이 없어 루프를 돈다. 광원 클러스터(light_cluster.comp)가 켜져 있으면 이 픽셀에 닿는 광원만.
     vec3 color = vec3(0.0);
     bool restirLighting = ALPHA_MODE_VARIANT != ALPHA_MODE_TRANSLUCENT && pushConstants.camera.item.flags.y != 0u;
     uint lightCount = restirLighting ? 0u : pushConstants.camera.item.shading.x;
+    // 광원 클러스터가 켜져 있으면 이 픽셀의 클러스터 목록만 돈다(번호 오름차순이라 누적 순서가 전체 루프와 같다).
+    // 시야 깊이는 원근 나눗셈의 w 라 gl_FragCoord.w 의 역수다.
+    uint clusterBase = LIGHT_CLUSTER_NONE;
+    LightClusterBuffer clusters = LightClusterBuffer(pushConstants.camera.item.lightCluster.xy);
+    if (lightCount > 0u && pushConstants.camera.item.lightCluster.w != 0u) {
+        clusterBase = lightClusterIndex(pushConstants.camera.item, gl_FragCoord.xy, 1.0 / gl_FragCoord.w) *
+                      LIGHT_CLUSTER_STRIDE;
+        uint clustered = clusters.items[clusterBase];
+        // 상한을 넘친 클러스터는 개수 대신 LIGHT_CLUSTER_NONE 을 적어 두므로 전체 루프로 돌아간다.
+        if (clustered == LIGHT_CLUSTER_NONE) {
+            clusterBase = LIGHT_CLUSTER_NONE;
+        } else {
+            lightCount = clustered;
+        }
+    }
     for (uint i = 0; i < lightCount; ++i) {
-        Light light = pushConstants.lights.items[i];
+        uint lightIndex = clusterBase != LIGHT_CLUSTER_NONE ? clusters.items[clusterBase + 1u + i] : i;
+        Light light = pushConstants.lights.items[lightIndex];
         vec3 lightDirection;
         vec3 contribution = lightContribution(light, surface, lightDirection);
         if (contribution == vec3(0.0)) {

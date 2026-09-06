@@ -115,7 +115,20 @@ struct GpuCamera {
     glm::uvec4 fogShadow;
     // 태양 캐스케이드 경계 거리. fogSunVisibility 가 표본점의 캐스케이드를 고른다.
     glm::vec4 fogCascadeSplits;
+    // 광원 클러스터. xy 목록 버퍼 주소, z 축별 개수(x | y << 8 | z << 16), w 켜짐(0 이면 셰이더가 광원 전부를 돈다).
+    glm::uvec4 lightCluster;
+    // x 근평면, y 클러스터 원거리(마지막 깊이 조각은 그 너머까지). 깊이 조각은 로그 간격이다.
+    glm::vec4 lightClusterParams;
 };
+
+// 광원 클러스터 격자. shaders/scene_types.glsl 의 LIGHT_CLUSTER_* 와 같아야 한다. 화면을 16×9 타일, 깊이 24 조각으로
+// 나누고 클러스터마다 개수 하나 + 광원 번호 64 개를 둔다. 개수가 0xFFFFFFFF 면 넘친 클러스터다.
+inline constexpr uint32_t LIGHT_CLUSTER_X = 16;
+inline constexpr uint32_t LIGHT_CLUSTER_Y = 9;
+inline constexpr uint32_t LIGHT_CLUSTER_Z = 24;
+inline constexpr uint32_t LIGHT_CLUSTER_MAX_LIGHTS = 64;
+inline constexpr uint32_t LIGHT_CLUSTER_COUNT = LIGHT_CLUSTER_X * LIGHT_CLUSTER_Y * LIGHT_CLUSTER_Z;
+inline constexpr uint32_t LIGHT_CLUSTER_STRIDE = LIGHT_CLUSTER_MAX_LIGHTS + 1;
 
 // shaders/scene_data.glsl 의 MeshletGroup 과 배치가 같아야 한다.
 struct GpuMeshletGroup {
@@ -223,6 +236,13 @@ struct DepthPushConstants {
     VkDeviceAddress skinnedVertices;
     VkDeviceAddress meshes;
     VkDeviceAddress materials;
+};
+
+// shaders/light_cluster.comp 의 LightClusterPushConstants 와 배치가 같아야 한다.
+struct LightClusterPushConstants {
+    VkDeviceAddress camera;
+    VkDeviceAddress lights;
+    VkDeviceAddress clusters;
 };
 
 struct SsaoPushConstants {

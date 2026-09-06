@@ -88,6 +88,8 @@ int main(int argc, char* argv[]) {
             options.meshShader = false;
         } else if (argument == "--orbit" && i + 1 < argc) {
             options.orbitDegreesPerFrame = static_cast<float>(std::atof(argv[++i]));
+        } else if (argument == "--no-light-clusters") {
+            options.lightClusters = false;
         } else if (argument == "--fog-shadow-samples" && i + 1 < argc) {
             options.fogShadowSamples = std::atoi(argv[++i]);
         } else if (argument == "--profile") {

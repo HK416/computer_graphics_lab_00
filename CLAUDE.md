@@ -227,6 +227,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `GpuFluidSurfaceInfo` `FLUID_FLAG_*` `FLUID_SURFACE_CUSTOM_INDEX` `FLUID_SURFACE_RAY_MASK` (`src/gfx/fluid.h`) | `FluidSurfaceInfo` `FLUID_FLAG_*` `FLUID_SURFACE_*` (`shaders/fluid_types.glsl`) |
 | `PathTracePushConstants` (`src/gfx/raytracing.cpp`) | 동명 블록 (`shaders/pathtrace_common.glsl`) — 128 바이트 한도라 작은 값은 16비트 둘씩 묶는다 |
 | `GpuCamera` (`src/gfx/renderer_internal.h`) | `Camera` (`scene_types.glsl`) — DDGI 프로브 필드 포함; 프로브 헬퍼·`PROBE_*_TEXELS` 는 `renderer_ddgi.cpp` 상수와 같아야 함 |
+| `LightClusterPushConstants` `LIGHT_CLUSTER_*` (`src/gfx/renderer_internal.h`) | 동명 블록·`LIGHT_CLUSTER_*` (`shaders/light_cluster.comp`, `scene_types.glsl`) |
 | `DdgiPushConstants` (`src/gfx/renderer_internal.h`) | 동명 블록 (`shaders/ddgi.comp`) — 앞 열 개 주소는 `ReflectPushConstants` 와 같아 `hit_shading.glsl` 을 공유 |
 | `RestirPushConstants` `RestirSlots` (`src/gfx/renderer_internal.h`) | 동명 블록·구조체 (`shaders/restir_di.comp`); 저장소 인코딩은 `shaders/restir.glsl` 의 `Reservoir` |
 | `ReflectPushConstants` `ReflectSlots` (`src/gfx/renderer_internal.h`) | 동명 블록·구조체 (`shaders/reflect.comp`) — 슬롯은 버퍼로 넘기고 `samplesResetDebug`·`filterStep` 에 비트를 묶는다 |

@@ -108,6 +108,10 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::ColorEdit3("환경광", glm::value_ptr(active.ambientColor));
         ImGui::SliderFloat("환경광 세기", &active.ambientIntensity, 0.0F, 4.0F, "%.2f");
         ImGui::BeginDisabled(rasterOnly);
+        ImGui::Checkbox("Light Clustering", &renderer.settings.useLightClusters);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("프래그먼트가 화면 16×9 타일 × 깊이 24 조각의 광원 목록만 돈다. 결과는 전체 루프와 같다");
+        }
         ImGui::Checkbox("그림자", &renderer.settings.shadowsEnabled);
         ImGui::BeginDisabled(!renderer.settings.shadowsEnabled);
         ImGui::Checkbox("시점 Frustum Culling", &renderer.settings.shadowViewCulling);

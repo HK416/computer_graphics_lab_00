@@ -852,6 +852,18 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
                                        samples};
         camera->fogCascadeSplits = splits;
     }
+    // 광원 클러스터. 원거리는 그림자 거리와 같은 규칙(장면 반지름 넷, 상한 500)이고 그 너머는 마지막 조각이 맡는다.
+    {
+        bool pathTracing = settings.usePathTracing && rayTracer != nullptr;
+        bool clusters = settings.useLightClusters && !pathTracing && !frameLights.empty();
+        VkDeviceAddress address = lightClusterBuffer.address;
+        camera->lightCluster = glm::uvec4{static_cast<uint32_t>(address & 0xFFFFFFFFU),
+                                          static_cast<uint32_t>(address >> 32U),
+                                          LIGHT_CLUSTER_X | (LIGHT_CLUSTER_Y << 8U) | (LIGHT_CLUSTER_Z << 16U),
+                                          clusters ? 1U : 0U};
+        float far = std::clamp(4.0F * sceneRadius, 20.0F, 500.0F);
+        camera->lightClusterParams = glm::vec4{scene.camera.nearPlane, far, 0.0F, 0.0F};
+    }
     // DDGI 프로브 격자. 장면 경계 상자를 조금 넓혀 축마다 n 개를 깐다. 원점·간격이 바뀐 프레임은 아틀라스를
     // 히스테리시스 없이 덮어쓴다.
     camera->probeOrigin = glm::vec4{0.0F};

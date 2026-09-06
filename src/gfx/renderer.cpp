@@ -104,6 +104,7 @@ Renderer::Renderer(Context& context,
     createSkinPipeline();
     createShadowPipeline();
     createSsaoPipelines();
+    createLightClusterPipeline();
     environment = std::make_unique<EnvironmentMap>(context, bindless);
     fluid = std::make_unique<FluidSimulator>(context, bindless, jobs);
     cloth = std::make_unique<ClothSimulator>(
@@ -186,6 +187,9 @@ Renderer::~Renderer() {
     vkDestroyPipelineLayout(context.device, ssaoBlurPipelineLayout, nullptr);
     vkDestroyPipeline(context.device, ssaoPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, ssaoPipelineLayout, nullptr);
+    vkDestroyPipeline(context.device, lightClusterPipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, lightClusterPipelineLayout, nullptr);
+    destroyBuffer(context, lightClusterBuffer);
     vkDestroyPipeline(context.device, shadowCutoffPipeline, nullptr);
     vkDestroyPipeline(context.device, shadowPipeline, nullptr);
     vkDestroyPipelineLayout(context.device, depthPipelineLayout, nullptr);
@@ -633,6 +637,15 @@ void Renderer::recordCommands(Frame& frame,
                        visibilityNeedsClear = false;
                    }
                }});
+
+    // 광원 클러스터. 래스터 프래그먼트(불투명·반투명·물)가 자기 클러스터의 광원만 돈다. 경로 추적·ReSTIR 는 안 쓴다.
+    graph.add({"광원 클러스터",
+               "광원 클러스터",
+               [&] { return !pathTracing && settings.useLightClusters && !frameLights.empty(); },
+               {},
+               {},
+               {},
+               [&](VkCommandBuffer cmd) { recordLightClusterPass(cmd, frame); }});
 
     // mesh shader 경로는 태스크 셰이더가 직접 컬링한다. 컬 컴퓨트 결과를 아무도 읽지 않으므로
     // 그때는 디스패치 자체를 하지 않는다.

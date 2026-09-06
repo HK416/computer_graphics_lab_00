@@ -69,6 +69,7 @@ struct Options {
     bool reflectionDenoise = true;
     // 안개 태양 그림자 표본 수. 음수면 기본값(RenderSettings)을 쓴다.
     int32_t fogShadowSamples = -1;
+    bool lightClusters = true;
     // --restir / --no-restir: ReSTIR 직접광. 주지 않으면 자동 튜닝이 정한다.
     bool restir = false;
     bool restirGiven = false;
