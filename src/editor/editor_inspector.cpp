@@ -106,11 +106,17 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
             } else {
                 animator.clip = std::min(animator.clip, static_cast<uint32_t>(animator.skeleton.animations.size()) - 1);
                 const asset::Animation& clip = animator.skeleton.animations[animator.clip];
+                // 재생 중이고 섞는 시간이 있으면 크로스페이드, 아니면 바로 바꾼다.
                 if (ImGui::BeginCombo("클립", clip.name.c_str())) {
                     for (uint32_t i = 0; i < animator.skeleton.animations.size(); ++i) {
                         if (ImGui::Selectable(animator.skeleton.animations[i].name.c_str(), i == animator.clip)) {
-                            animator.clip = i;
-                            animator.clipTime = 0.0F;
+                            if (animator.playing && animator.blendSeconds > 0.0F) {
+                                animator.crossfadeTo(i);
+                            } else {
+                                animator.clip = i;
+                                animator.clipTime = 0.0F;
+                                animator.nextClip = -1;
+                            }
                         }
                     }
                     ImGui::EndCombo();
@@ -120,6 +126,18 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
                 ImGui::SetNextItemWidth(90.0F);
                 ImGui::DragFloat("속도", &animator.speed, 0.01F, -4.0F, 4.0F);
                 ImGui::SliderFloat("시간", &animator.clipTime, 0.0F, std::max(clip.duration, 0.001F), "%.2f s");
+                ImGui::SetNextItemWidth(90.0F);
+                ImGui::DragFloat("Crossfade", &animator.blendSeconds, 0.01F, 0.0F, 5.0F, "%.2f s");
+                if (animator.nextClip >= 0 &&
+                    static_cast<size_t>(animator.nextClip) < animator.skeleton.animations.size()) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled(
+                        "→ %s %.0f%%",
+                        animator.skeleton.animations[static_cast<size_t>(animator.nextClip)].name.c_str(),
+                        static_cast<double>(animator.blendSeconds > 0.0F
+                                                ? animator.blendElapsed / animator.blendSeconds * 100.0F
+                                                : 100.0F));
+                }
             }
             ImGui::Text("조인트 %zu, 스킨 %zu", animator.skeleton.nodes.size(), animator.skeleton.skins.size());
         }

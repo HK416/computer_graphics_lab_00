@@ -88,6 +88,27 @@ int main() {
     asset::skinMatrices(skeleton, worlds, 0, matrices);
     expectNear(glm::vec3{matrices[1] * glm::vec4{bound, 1.0F}}, bound, "없는 클립");
 
+    // 크로스페이드. 가중치 0 은 앞 클립, 1 은 뒤 클립 그대로고, 0.5 는 회전이 절반(45 도)이다.
+    {
+        std::vector<asset::Node> rest;
+        std::vector<asset::Node> turned;
+        std::vector<asset::Node> mixed;
+        asset::sampleNodes(skeleton, 0, 0.0F, rest);
+        asset::sampleNodes(skeleton, 0, 1.0F, turned);
+        asset::blendNodes(rest, turned, 0.0F, mixed);
+        assert(mixed[1].rotation == rest[1].rotation && "가중치 0 은 앞 포즈여야 한다");
+        asset::blendNodes(rest, turned, 1.0F, mixed);
+        assert(std::abs(glm::dot(mixed[1].rotation, turned[1].rotation)) > 1.0F - TOLERANCE &&
+               "가중치 1 은 뒤 포즈여야 한다");
+        asset::blendNodes(rest, turned, 0.5F, mixed);
+        std::vector<glm::mat4> worlds;
+        std::vector<glm::mat4> matrices;
+        asset::composeNodeWorlds(mixed, worlds);
+        asset::skinMatrices(skeleton, worlds, 0, matrices);
+        float c = std::sqrt(0.5F);
+        expectNear(glm::vec3{matrices[1] * glm::vec4{bound, 1.0F}}, glm::vec3{-c, c, 0.0F}, "절반 섞기");
+    }
+
     std::printf("애니메이션 자체 점검 통과\n");
     return 0;
 }

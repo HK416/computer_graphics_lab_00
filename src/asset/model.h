@@ -240,7 +240,14 @@ std::optional<Model> loadGltf(const std::filesystem::path& path,
                               core::JobSystem* jobs = nullptr,
                               LoadSettings settings = {});
 
-// clip 을 time 위치에서 표본화해 노드마다 세계 변환을 만든다. clip 이 범위를 벗어나면 바인드 포즈다.
+// clip 을 time 위치에서 표본화해 노드마다 지역 변환(바인드 포즈에 클립 값을 덮어쓴 것)을 만든다. clip 이 범위를
+// 벗어나면 바인드 포즈다.
+void sampleNodes(const Skeleton& skeleton, uint32_t clip, float time, std::vector<Node>& posed);
+// 두 포즈를 weight(0 = a, 1 = b) 로 섞는다. 이동·크기는 선형, 회전은 구면 보간이다. 크기가 다르면 a 를 그대로 둔다.
+void blendNodes(const std::vector<Node>& a, const std::vector<Node>& b, float weight, std::vector<Node>& out);
+// 지역 변환을 계층을 따라 세계 변환으로 만든다.
+void composeNodeWorlds(const std::vector<Node>& posed, std::vector<glm::mat4>& worlds);
+// clip 을 time 위치에서 표본화해 노드마다 세계 변환을 만든다. 위 둘을 이은 것이다.
 void poseNodes(const Skeleton& skeleton, uint32_t clip, float time, std::vector<glm::mat4>& worlds);
 
 // 세계 변환에서 스킨 하나의 조인트 행렬을 뽑는다. 셰이더가 이 행렬로 정점을 옮긴다.

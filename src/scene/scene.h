@@ -43,12 +43,31 @@ struct Animator {
     float clipTime = 0.0F;
     bool playing = true;
     float speed = 1.0F;
+    // 크로스페이드. nextClip 이 0 이상이면 clip 에서 nextClip 으로 blendSeconds 동안 섞어 가며, 끝나면 nextClip 이
+    // clip 이 된다. 두 클립의 시각은 각자 흐른다. blendSeconds 가 0 이면 바로 바꾼다.
+    int32_t nextClip = -1;
+    float nextClipTime = 0.0F;
+    float blendSeconds = 0.3F;
+    float blendElapsed = 0.0F;
     // 스킨마다의 조인트 행렬. Scene::update 가 채우고 렌더러가 그대로 올린다.
     std::vector<std::vector<glm::mat4>> jointMatrices;
+
+    // clip 을 target 으로 크로스페이드한다. 같은 클립이면 아무 일도 없다.
+    void crossfadeTo(uint32_t target) {
+        if (target == clip && nextClip < 0) {
+            return;
+        }
+        nextClip = static_cast<int32_t>(target);
+        nextClipTime = 0.0F;
+        blendElapsed = 0.0F;
+    }
 
 private:
     friend struct Scene;
     std::vector<glm::mat4> nodeWorlds;
+    std::vector<asset::Node> posedNodes;
+    std::vector<asset::Node> nextNodes;
+    std::vector<asset::Node> blendedNodes;
     // 마지막으로 실제 포즈를 만든 클립과 시각. 같으면 다시 만들지 않는다.
     uint32_t posedClip = 0xFFFFFFFFU;
     float posedTime = -1.0F;

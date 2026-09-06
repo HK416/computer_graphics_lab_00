@@ -45,32 +45,47 @@ glm::mat4 localMatrix(const Node& node) {
 
 } // namespace
 
-void poseNodes(const Skeleton& skeleton, uint32_t clip, float time, std::vector<glm::mat4>& worlds) {
+void sampleNodes(const Skeleton& skeleton, uint32_t clip, float time, std::vector<Node>& posed) {
     // 노드 수가 수십 개 수준이라 매 프레임 복사해도 부담이 없다.
-    std::vector<Node> posed = skeleton.nodes;
-    if (clip < skeleton.animations.size()) {
-        const Animation& animation = skeleton.animations[clip];
-        for (const AnimationChannel& channel : animation.channels) {
-            if (channel.sampler >= animation.samplers.size() || channel.node >= posed.size()) {
-                continue;
-            }
-            glm::vec4 value =
-                sampleChannel(animation.samplers[channel.sampler], time, channel.path == AnimationPath::ROTATION);
-            Node& node = posed[channel.node];
-            switch (channel.path) {
-            case AnimationPath::TRANSLATION:
-                node.translation = glm::vec3{value};
-                break;
-            case AnimationPath::ROTATION:
-                node.rotation = glm::normalize(glm::quat{value.w, value.x, value.y, value.z});
-                break;
-            case AnimationPath::SCALE:
-                node.scale = glm::vec3{value};
-                break;
-            }
+    posed = skeleton.nodes;
+    if (clip >= skeleton.animations.size()) {
+        return;
+    }
+    const Animation& animation = skeleton.animations[clip];
+    for (const AnimationChannel& channel : animation.channels) {
+        if (channel.sampler >= animation.samplers.size() || channel.node >= posed.size()) {
+            continue;
+        }
+        glm::vec4 value =
+            sampleChannel(animation.samplers[channel.sampler], time, channel.path == AnimationPath::ROTATION);
+        Node& node = posed[channel.node];
+        switch (channel.path) {
+        case AnimationPath::TRANSLATION:
+            node.translation = glm::vec3{value};
+            break;
+        case AnimationPath::ROTATION:
+            node.rotation = glm::normalize(glm::quat{value.w, value.x, value.y, value.z});
+            break;
+        case AnimationPath::SCALE:
+            node.scale = glm::vec3{value};
+            break;
         }
     }
+}
 
+void blendNodes(const std::vector<Node>& a, const std::vector<Node>& b, float weight, std::vector<Node>& out) {
+    out = a;
+    if (a.size() != b.size()) {
+        return;
+    }
+    for (size_t i = 0; i < out.size(); ++i) {
+        out[i].translation = glm::mix(a[i].translation, b[i].translation, weight);
+        out[i].rotation = glm::slerp(a[i].rotation, b[i].rotation, weight);
+        out[i].scale = glm::mix(a[i].scale, b[i].scale, weight);
+    }
+}
+
+void composeNodeWorlds(const std::vector<Node>& posed, std::vector<glm::mat4>& worlds) {
     worlds.assign(posed.size(), glm::mat4{1.0F});
     std::vector<bool> resolved(posed.size(), false);
     std::vector<uint32_t> chain;
@@ -89,6 +104,12 @@ void poseNodes(const Skeleton& skeleton, uint32_t clip, float time, std::vector<
             resolved[*it] = true;
         }
     }
+}
+
+void poseNodes(const Skeleton& skeleton, uint32_t clip, float time, std::vector<glm::mat4>& worlds) {
+    std::vector<Node> posed;
+    sampleNodes(skeleton, clip, time, posed);
+    composeNodeWorlds(posed, worlds);
 }
 
 void skinMatrices(const Skeleton& skeleton,

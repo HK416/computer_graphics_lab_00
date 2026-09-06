@@ -93,26 +93,54 @@ void Scene::update(float deltaSeconds, core::JobSystem* jobs) {
         if (animator.skeleton.skins.empty()) {
             return;
         }
-        if (animator.playing && animator.clip < animator.skeleton.animations.size()) {
-            float duration = animator.skeleton.animations[animator.clip].duration;
+        auto advance = [&](uint32_t clip, float& time) {
+            if (!animator.playing || clip >= animator.skeleton.animations.size()) {
+                return;
+            }
+            float duration = animator.skeleton.animations[clip].duration;
             if (duration > 0.0F) {
-                animator.clipTime = std::fmod(animator.clipTime + deltaSeconds * animator.speed, duration);
-                if (animator.clipTime < 0.0F) {
-                    animator.clipTime += duration;
+                time = std::fmod(time + deltaSeconds * animator.speed, duration);
+                if (time < 0.0F) {
+                    time += duration;
                 }
+            }
+        };
+        advance(animator.clip, animator.clipTime);
+        bool blending = animator.nextClip >= 0;
+        float weight = 1.0F;
+        if (blending) {
+            advance(static_cast<uint32_t>(animator.nextClip), animator.nextClipTime);
+            // 섞는 시간은 재생 속도와 무관한 실시간이되 재생이 멈추면 같이 멈춘다. 다 섞였으면 다음 클립이 현재가 된다.
+            if (animator.playing) {
+                animator.blendElapsed += deltaSeconds;
+            }
+            weight = animator.blendSeconds > 0.0F ? animator.blendElapsed / animator.blendSeconds : 1.0F;
+            if (weight >= 1.0F) {
+                animator.clip = static_cast<uint32_t>(animator.nextClip);
+                animator.clipTime = animator.nextClipTime;
+                animator.nextClip = -1;
+                blending = false;
             }
         }
 
         // 재생 중이 아니고 클립도 시각도 그대로면 같은 포즈가 다시 나온다. 노드 배열 복사까지
-        // 통째로 건너뛴다.
-        if (animator.clip == animator.posedClip && animator.clipTime == animator.posedTime) {
+        // 통째로 건너뛴다. 섞는 중에는 가중치가 매 프레임 달라 늘 다시 만든다.
+        if (!blending && animator.clip == animator.posedClip && animator.clipTime == animator.posedTime) {
             return;
         }
         animator.posedClip = animator.clip;
         animator.posedTime = animator.clipTime;
         animatorPosedFlags[index] = 1;
 
-        asset::poseNodes(animator.skeleton, animator.clip, animator.clipTime, animator.nodeWorlds);
+        asset::sampleNodes(animator.skeleton, animator.clip, animator.clipTime, animator.posedNodes);
+        if (blending) {
+            asset::sampleNodes(
+                animator.skeleton, static_cast<uint32_t>(animator.nextClip), animator.nextClipTime, animator.nextNodes);
+            asset::blendNodes(animator.posedNodes, animator.nextNodes, weight, animator.blendedNodes);
+            asset::composeNodeWorlds(animator.blendedNodes, animator.nodeWorlds);
+        } else {
+            asset::composeNodeWorlds(animator.posedNodes, animator.nodeWorlds);
+        }
         animator.jointMatrices.resize(animator.skeleton.skins.size());
         for (uint32_t skin = 0; skin < animator.skeleton.skins.size(); ++skin) {
             asset::skinMatrices(animator.skeleton, animator.nodeWorlds, skin, animator.jointMatrices[skin]);
@@ -438,7 +466,8 @@ bool Scene::differsFrom(const SceneSnapshot& snapshot) const {
         // clipTime 은 재생 중 매 프레임 흐르므로 뺀다. 그것 때문에 기록이 쌓이면 되돌리기가
         // 쓸모없어진다.
         if (current.name != saved.name || current.model != saved.model || current.clip != saved.clip ||
-            current.playing != saved.playing || current.speed != saved.speed) {
+            current.playing != saved.playing || current.speed != saved.speed || current.nextClip != saved.nextClip ||
+            current.blendSeconds != saved.blendSeconds) {
             return true;
         }
     }

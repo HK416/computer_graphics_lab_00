@@ -187,7 +187,8 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
                              {"clip", animator.clip},
                              {"time", animator.clipTime},
                              {"playing", animator.playing},
-                             {"speed", animator.speed}});
+                             {"speed", animator.speed},
+                             {"blendSeconds", animator.blendSeconds}});
     }
     document["animators"] = animators;
 
@@ -399,6 +400,7 @@ SceneFile readScene(const std::string& text) {
         animator.clipTime = entry.value("time", 0.0F);
         animator.playing = entry.value("playing", true);
         animator.speed = entry.value("speed", 1.0F);
+        animator.blendSeconds = entry.value("blendSeconds", 0.3F);
         animator.model = entry.value("model", -1);
         file.animatorModels.push_back(animator.model);
         file.scene.animators.push_back(std::move(animator));
