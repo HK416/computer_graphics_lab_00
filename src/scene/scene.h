@@ -345,6 +345,29 @@ struct CameraPath {
 // 경로 위 시각 t(초)의 위치·회전. 키가 없으면 항등, 하나면 그 키다. loop 면 duration 으로 감고 아니면 끝에서 멈춘다.
 CameraKey evaluateCameraPath(const CameraPath& path, float seconds);
 
+// 관절의 종류. DISTANCE 는 두 앵커 사이 거리를 length 로 묶고, BALL 은 두 앵커를 한 점으로 묶으며(회전 자유),
+// HINGE 는 거기에 axis(A 지역) 둘레만 돌게 한다.
+enum class JointType : uint32_t {
+    DISTANCE = 0,
+    BALL = 1,
+    HINGE = 2,
+};
+
+// 관절 부품. 이 오브젝트(A, 강체 필요)와 other 오브젝트(B)를 잇는다. other 가 -1 이거나 같은 백엔드의 강체가
+// 아니면 B 는 고정점이고 anchorB 는 세계 좌표다. anchorA·anchorB 는 각 오브젝트의 지역 좌표(B 가 강체일 때).
+// CPU(순차 임펄스)와 GPU(Jacobi) 솔버가 같은 행을 푼다(physics/rigid_body.cpp ↔ shaders/rigid_common.glsl).
+struct Joint {
+    JointType type = JointType::BALL;
+    int32_t other = -1;
+    glm::vec3 anchorA{0.0F};
+    glm::vec3 anchorB{0.0F};
+    glm::vec3 axis{0.0F, 1.0F, 0.0F};
+    // DISTANCE 의 목표 거리(m).
+    float length = 1.0F;
+
+    bool operator==(const Joint&) const = default;
+};
+
 struct Object {
     std::string name;
     // 부모 기준 지역 변환. 세계 변환은 Scene::worldMatrix 가 부모를 거슬러 올라가 만든다.
@@ -364,6 +387,7 @@ struct Object {
     int32_t ddgiVolume = -1;
     int32_t cameraComponent = -1;
     int32_t cameraPath = -1;
+    int32_t joint = -1;
 
     bool operator==(const Object&) const = default;
 };
@@ -431,6 +455,7 @@ struct SceneSnapshot {
     std::vector<DdgiVolume> ddgiVolumes;
     std::vector<CameraComponent> cameraComponents;
     std::vector<CameraPath> cameraPaths;
+    std::vector<Joint> joints;
     glm::vec3 ambientColor{0.25F};
     float ambientIntensity = 1.0F;
     Environment environment;
@@ -454,6 +479,7 @@ struct Scene {
     std::vector<DdgiVolume> ddgiVolumes;
     std::vector<CameraComponent> cameraComponents;
     std::vector<CameraPath> cameraPaths;
+    std::vector<Joint> joints;
     Camera camera;
     // 재생 중인지. 참일 때만 물리가 돌고, 편집기는 되돌리기 기록을 멈춘다. 저장하지 않는다.
     bool simulating = false;
@@ -533,6 +559,7 @@ struct Scene {
     int32_t attachDdgiVolume(uint32_t index, const DdgiVolume& volume = {});
     int32_t attachCameraComponent(uint32_t index, const CameraComponent& camera = {});
     int32_t attachCameraPath(uint32_t index, const CameraPath& path = {});
+    int32_t attachJoint(uint32_t index, const Joint& joint = {});
     // 부품을 뗀다. 아무도 가리키지 않게 된 부품은 배열에서 빠지고 첨자가 다시 맞춰진다.
     void detachComponent(uint32_t index, int32_t Object::* handle);
     // 오브젝트에 붙은 T 부품. 없거나 첨자가 범위 밖이면 nullptr. 첨자를 손으로 가드하는 관용구를 대신한다.
@@ -596,6 +623,7 @@ template <typename SceneType, typename F> void forEachComponentKind(SceneType& s
     f(scene.ddgiVolumes, &Object::ddgiVolume);
     f(scene.cameraComponents, &Object::cameraComponent);
     f(scene.cameraPaths, &Object::cameraPath);
+    f(scene.joints, &Object::joint);
 }
 
 // 부품 타입 → Object 의 첨자 멤버와 Scene 의 배열.
@@ -617,6 +645,7 @@ CG_LAB_COMPONENT_SLOT(ForceField, forceField, forceFields);
 CG_LAB_COMPONENT_SLOT(DdgiVolume, ddgiVolume, ddgiVolumes);
 CG_LAB_COMPONENT_SLOT(CameraComponent, cameraComponent, cameraComponents);
 CG_LAB_COMPONENT_SLOT(CameraPath, cameraPath, cameraPaths);
+CG_LAB_COMPONENT_SLOT(Joint, joint, joints);
 #undef CG_LAB_COMPONENT_SLOT
 
 template <typename T> T* Scene::component(uint32_t index) {

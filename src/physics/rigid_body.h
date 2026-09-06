@@ -56,6 +56,23 @@ struct RigidBodyState {
     bool useGravity = true;
 };
 
+// 관절 하나를 세계 상태(bodies 첨자)로 편 것. bodyB 가 음수면 B 는 고정점이고 worldAnchorB 를 쓴다.
+// CPU 순차 임펄스와 GPU Jacobi(shaders/rigid_common.glsl 의 RigidJoint)가 같은 행을 푼다.
+struct JointState {
+    uint32_t bodyA = 0;
+    int32_t bodyB = -1;
+    glm::vec3 localA{0.0F};
+    glm::vec3 localB{0.0F};
+    glm::vec3 worldAnchorB{0.0F};
+    // A 지역의 경첩 축.
+    glm::vec3 localAxis{0.0F, 1.0F, 0.0F};
+    float length = 1.0F;
+    scene::JointType type = scene::JointType::BALL;
+};
+
+// 관절 부품을 bodies 첨자로 편다. A 가 bodies 에 없으면(다른 백엔드·강체 없음) 건너뛰고, B 가 없으면 고정점이다.
+void collectJoints(const scene::Scene& scene, const std::vector<RigidBodyState>& bodies, std::vector<JointState>& out);
+
 // 메쉬 콜라이더의 세계 공간 삼각형 하나. 앞면은 CCW.
 struct Triangle {
     glm::vec3 a{0.0F};
@@ -93,7 +110,7 @@ void writeBackRigidBodies(scene::Scene& scene, const std::vector<RigidBodyState>
 // 구·상자·평면·원기둥·캡슐·메쉬 콜라이더, 순차 임펄스 접촉 해결(반발·마찰) 뒤 Baumgarte 위치 보정.
 // 상자끼리는 여섯 면 축의 분리축 검사로 접촉을 만들고, 원기둥·캡슐이 끼면 표면 표본점을 상대에 찔러
 // 보는 방식(collider_shapes.h 의 probe)이며, 메쉬는 운동학 전용으로 상대의 표본점을 삼각형마다 본다.
-// 관절이나 슬립은 없다.
+// 관절(거리·볼·경첩)은 접촉 앞에 속도 행을, 접촉 뒤에 위치 보정을 돈다. 슬립은 없다.
 // GPU 백엔드로 표시된 강체는 건너뛴다. 그쪽은 gfx::RigidBodySimulator 가 푼다.
 void stepRigidBodies(scene::Scene& scene, float dt, core::JobSystem* jobs);
 

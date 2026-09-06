@@ -89,6 +89,9 @@ RigidBodySimulator::~RigidBodySimulator() {
     for (Buffer& buffer : readbacks) {
         destroyBuffer(context, buffer);
     }
+    for (Buffer& buffer : jointBuffers) {
+        destroyBuffer(context, buffer);
+    }
     for (Buffer& buffer : triangleStagings) {
         destroyBuffer(context, buffer);
     }
@@ -182,6 +185,22 @@ void RigidBodySimulator::reserveTriangles(uint32_t count) {
             context, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, MemoryLocation::HOST_WRITE, "강체 메쉬 삼각형 업로드");
     }
     triangleCapacity = wanted;
+}
+
+void RigidBodySimulator::reserveJoints(uint32_t count) {
+    if (count <= jointCapacity) {
+        return;
+    }
+    uint32_t wanted = std::max(count, std::max(jointCapacity * 2, 16U));
+    for (Buffer& buffer : jointBuffers) {
+        context.retireBuffer(buffer);
+        buffer = createBuffer(context,
+                              static_cast<VkDeviceSize>(wanted) * sizeof(GpuJoint),
+                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                              MemoryLocation::HOST_WRITE,
+                              "강체 관절");
+    }
+    jointCapacity = wanted;
 }
 
 void RigidBodySimulator::reserveGrid(uint32_t cellCount) {
@@ -352,6 +371,20 @@ void RigidBodySimulator::prepare(const scene::Scene& scene, uint32_t steps, floa
     reserveBuffers(static_cast<uint32_t>(bodies.size()));
     // 메쉬가 없어도 주소가 유효해야 한다. 삼각형 0 개면 셰이더가 읽지 않는다.
     reserveTriangles(std::max<uint32_t>(1, static_cast<uint32_t>(triangles.size())));
+    // 관절은 CPU 와 같은 함수로 편다. 세계 상태 첨자를 그대로 GPU 첨자로 쓴다.
+    physics::collectJoints(scene, bodies, joints);
+    jointUpload.resize(joints.size());
+    for (size_t i = 0; i < joints.size(); ++i) {
+        const physics::JointState& joint = joints[i];
+        GpuJoint& target = jointUpload[i];
+        target.anchorA = glm::vec4{joint.localA, joint.length};
+        target.anchorB = glm::vec4{joint.bodyB >= 0 ? joint.localB : joint.worldAnchorB, 0.0F};
+        target.axis = glm::vec4{joint.localAxis, 0.0F};
+        target.bodyA = joint.bodyA;
+        target.bodyB = joint.bodyB >= 0 ? static_cast<uint32_t>(joint.bodyB) : RIGID_NO_BODY;
+        target.type = static_cast<uint32_t>(joint.type);
+    }
+    reserveJoints(std::max<uint32_t>(1, static_cast<uint32_t>(joints.size())));
 
     buildUpload();
     // 구성이 바뀌었거나 편집기가 손댔으면 GPU 상태를 버리고 장면 값으로 다시 시작한다.
@@ -416,8 +449,12 @@ void RigidBodySimulator::record(VkCommandBuffer commandBuffer, uint64_t frameInd
     vkCmdBindDescriptorSets(
         commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &bindlessSet, 0, nullptr);
 
-    // 광역 격자. 평면 목록은 작아서 프레임 슬롯의 호스트 버퍼에 바로 쓴다.
+    // 광역 격자. 평면 목록과 관절은 작아서 프레임 슬롯의 호스트 버퍼에 바로 쓴다.
     reserveGrid(gridCellCount);
+    if (!jointUpload.empty()) {
+        std::memcpy(jointBuffers[slot].mapped, jointUpload.data(), jointUpload.size() * sizeof(GpuJoint));
+        vmaFlushAllocation(context.allocator, jointBuffers[slot].allocation, 0, VK_WHOLE_SIZE);
+    }
     if (!planeIndices.empty()) {
         std::memcpy(planeBuffers[slot].mapped, planeIndices.data(), planeIndices.size() * sizeof(uint32_t));
         vmaFlushAllocation(context.allocator, planeBuffers[slot].allocation, 0, VK_WHOLE_SIZE);
@@ -438,6 +475,8 @@ void RigidBodySimulator::record(VkCommandBuffer commandBuffer, uint64_t frameInd
     push.penetrationSlop = physics::PENETRATION_SLOP;
     push.restitutionThreshold = physics::RESTITUTION_THRESHOLD;
     push.triangles = triangleBuffer.address;
+    push.joints = jointBuffers[slot].address;
+    push.jointCount = static_cast<uint32_t>(jointUpload.size());
     auto dispatch = [&](VkPipeline pipeline) {
         push.bodiesIn = bodyBuffers[source].address;
         push.bodiesOut = bodyBuffers[source ^ 1U].address;

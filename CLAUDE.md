@@ -74,7 +74,7 @@ cmake --preset debug -DCG_LAB_DLSS_SDK=<NVIDIA/DLSS 경로>   # 주지 않으면
 ```
 
 강체 솔버를 바꾸면 `headless_physics` 기준 파일이 갈린다. 의도한 변화면 위 명령으로 다시 만들어
-`tests/scenes/expected/rigid_cpu_120.json` 을 갱신하고 커밋한다.
+`tests/scenes/expected/rigid_cpu_120.json` 과 `joints_cpu_120.json` 을 갱신하고 커밋한다.
 
 기본 캡처에는 편집기 UI 가 함께 들어가고 콘솔에 시각이 찍히므로 두 실행의 PNG 는 바이트로 같지 않다. **바이트로
 견줄 때는 `--fixed-dt 0.016666 --capture present` 를 준다**(렌더 결과만, 고정 프레임 간격). 동작이 바뀌지 않아야 하는
@@ -215,7 +215,8 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `GpuParticle` `GpuParticleParams` `ParticlePushConstants` (`src/gfx/particles.h`) | `Particle` `ParticleParams` `ParticlePushConstants` (`shaders/particle_common.glsl`) — 컴퓨트와 스프라이트 정점·프래그먼트가 같은 블록 |
 | `physics::ClothConstraint` `ClothVertexInfo` `CLOTH_COLORS` (`src/physics/cloth.h`), `GpuClothParams` `ClothPushConstants` `CLOTH_SELF_RAY_MASK` (`src/gfx/cloth.h`) | 동명 구조체·상수 (`shaders/cloth_common.glsl`); 제약 색 규칙은 `buildClothTopology` 와 `cloth_constraint.comp` 디스패치 순서 |
 | `physics::ForceFieldSample` `forceFieldAcceleration` (`src/physics/force_field.h`), `GpuForceField` (`src/gfx/fluid.h`) | `ForceField` `forceFieldAcceleration` (`shaders/force_field.glsl`) — 천·유체·입자 설정 뒤에 같은 배열 |
-| `GpuRigidBody` `RigidPushConstants` (`src/gfx/rigid_body_gpu.h`) | `RigidBody` `RigidPushConstants` (`shaders/rigid_common.glsl`) |
+| `GpuRigidBody` `GpuJoint` `RigidPushConstants` (`src/gfx/rigid_body_gpu.h`) | `RigidBody` `RigidJoint` `RigidPushConstants` (`shaders/rigid_common.glsl`) |
+| `solveJoint` `correctJoint` (`src/physics/rigid_body.cpp`) | `rigidJointImpulse` `rigidJointCorrection` (`shaders/rigid_common.glsl`) |
 | `physics::Triangle` (`src/physics/rigid_body.h`) | `RigidTriangle` (`rigid_common.glsl`) |
 | `collideBoxBox` 등 접촉 생성 (`src/physics/rigid_body.cpp`) | `rigidCollide` (`shaders/rigid_common.glsl`) |
 | 모양 기하 `closestOn*Local` `probePointLocal` `closestOnTriangleSurface` (`src/physics/collider_shapes.h`) | 동명 함수 (`shaders/collider_shapes.glsl`) |

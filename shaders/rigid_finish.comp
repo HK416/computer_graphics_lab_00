@@ -49,6 +49,13 @@ void main() {
             manifold.normals[deepest] * (push.positionCorrection * depth / totalInverseMass) * self.position.w;
     }
 
+    for (uint j = 0u; j < push.jointCount; ++j) {
+        RigidJoint joint = push.joints.items[j];
+        if (joint.bodyA == i || joint.bodyB == i) {
+            correction += rigidJointCorrection(i, joint);
+        }
+    }
+
     self.position.xyz += correction;
     push.bodiesOut.items[i] = self;
 }

@@ -1,0 +1,575 @@
+{
+  "ambient": {
+    "color": [
+      0.25,
+      0.25,
+      0.25
+    ],
+    "intensity": 1.0
+  },
+  "animators": [],
+  "camera": {
+    "distance": 7.0,
+    "fovY": 50.0,
+    "mode": "orbit",
+    "moveSpeed": 2.0,
+    "near": 0.05000000074505806,
+    "pitch": -12.0,
+    "position": [
+      0.0,
+      3.0,
+      7.0
+    ],
+    "target": [
+      0.0,
+      1.7999999523162842,
+      0.0
+    ],
+    "yaw": -90.0
+  },
+  "cameraComponents": [],
+  "cameraPaths": [],
+  "cloths": [],
+  "ddgiVolumes": [],
+  "environment": {
+    "ground": [
+      0.1599999964237213,
+      0.14000000059604645,
+      0.11999999731779099
+    ],
+    "hdr": "",
+    "horizon": [
+      0.6200000047683716,
+      0.7200000286102295,
+      0.8600000143051147
+    ],
+    "intensity": 1.0,
+    "sunColor": [
+      1.0,
+      0.949999988079071,
+      0.8500000238418579
+    ],
+    "sunIntensity": 1.0,
+    "useHdr": false,
+    "yaw": 0.0,
+    "zenith": [
+      0.18000000715255737,
+      0.3199999928474426,
+      0.6200000047683716
+    ]
+  },
+  "fluids": [],
+  "forceFields": [],
+  "joints": [
+    {
+      "anchorA": [
+        -0.25,
+        0.0,
+        0.0
+      ],
+      "anchorB": [
+        -2.0,
+        3.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "length": 0.5,
+      "other": -1,
+      "type": "ball"
+    },
+    {
+      "anchorA": [
+        -0.25,
+        0.0,
+        0.0
+      ],
+      "anchorB": [
+        0.25,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "length": 0.5,
+      "other": 2,
+      "type": "ball"
+    },
+    {
+      "anchorA": [
+        -0.25,
+        0.0,
+        0.0
+      ],
+      "anchorB": [
+        0.25,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "length": 0.5,
+      "other": 3,
+      "type": "ball"
+    },
+    {
+      "anchorA": [
+        -0.25,
+        0.0,
+        0.0
+      ],
+      "anchorB": [
+        0.25,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "length": 0.5,
+      "other": 4,
+      "type": "ball"
+    },
+    {
+      "anchorA": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "anchorB": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "length": 0.6000000238418579,
+      "other": 7,
+      "type": "distance"
+    },
+    {
+      "anchorA": [
+        -0.5,
+        0.0,
+        0.0
+      ],
+      "anchorB": [
+        1.5,
+        2.0,
+        -1.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "length": 1.0,
+      "other": -1,
+      "type": "hinge"
+    }
+  ],
+  "lights": [
+    {
+      "castsShadow": true,
+      "color": [
+        1.0,
+        0.9700000286102295,
+        0.8999999761581421
+      ],
+      "innerCone": 20.0,
+      "intensity": 3.0,
+      "outerCone": 30.0,
+      "range": 20.0,
+      "size": [
+        2.0,
+        2.0
+      ],
+      "type": "directional"
+    }
+  ],
+  "models": [
+    "<builtin:plane>",
+    "<builtin:icosphere>",
+    "<builtin:box>"
+  ],
+  "name": "관절 cpu",
+  "objects": [
+    {
+      "light": 0,
+      "name": "태양",
+      "parent": -1,
+      "position": [
+        0.0,
+        5.0,
+        0.0
+      ],
+      "rotation": [
+        -0.382999986410141,
+        0.0,
+        0.0,
+        0.9240000247955322
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "visible": true
+    },
+    {
+      "mesh": 0,
+      "model": 0,
+      "name": "바닥",
+      "parent": -1,
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rigidBody": 0,
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "scale": [
+        4.0,
+        1.0,
+        4.0
+      ],
+      "visible": true
+    },
+    {
+      "joint": 0,
+      "mesh": 0,
+      "model": 1,
+      "name": "사슬0",
+      "parent": -1,
+      "position": [
+        -1.9788883924484253,
+        2.74587082862854,
+        0.0
+      ],
+      "rigidBody": 1,
+      "rotation": [
+        0.0,
+        0.0,
+        -0.676438570022583,
+        0.7364990711212158
+      ],
+      "scale": [
+        0.15000000596046448,
+        0.15000000596046448,
+        0.15000000596046448
+      ],
+      "visible": true
+    },
+    {
+      "joint": 1,
+      "mesh": 0,
+      "model": 1,
+      "name": "사슬1",
+      "parent": -1,
+      "position": [
+        -2.0153839588165283,
+        2.2452380657196045,
+        0.0
+      ],
+      "rigidBody": 2,
+      "rotation": [
+        0.0,
+        0.0,
+        -0.784331202507019,
+        0.6203423738479614
+      ],
+      "scale": [
+        0.15000000596046448,
+        0.15000000596046448,
+        0.15000000596046448
+      ],
+      "visible": true
+    },
+    {
+      "joint": 2,
+      "mesh": 0,
+      "model": 1,
+      "name": "사슬2",
+      "parent": -1,
+      "position": [
+        -1.9493252038955688,
+        1.7783814668655396,
+        0.0
+      ],
+      "rigidBody": 3,
+      "rotation": [
+        0.0,
+        0.0,
+        -0.5027461647987366,
+        0.8644340634346008
+      ],
+      "scale": [
+        0.15000000596046448,
+        0.15000000596046448,
+        0.15000000596046448
+      ],
+      "visible": true
+    },
+    {
+      "joint": 3,
+      "mesh": 0,
+      "model": 1,
+      "name": "사슬3",
+      "parent": -1,
+      "position": [
+        -1.7037180662155151,
+        1.3395700454711914,
+        0.0
+      ],
+      "rigidBody": 4,
+      "rotation": [
+        0.0,
+        0.0,
+        -0.5061429738998413,
+        0.862449586391449
+      ],
+      "scale": [
+        0.15000000596046448,
+        0.15000000596046448,
+        0.15000000596046448
+      ],
+      "visible": true
+    },
+    {
+      "joint": 4,
+      "mesh": 0,
+      "model": 1,
+      "name": "거리A",
+      "parent": -1,
+      "position": [
+        1.0,
+        0.14486266672611237,
+        0.5
+      ],
+      "rigidBody": 5,
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "scale": [
+        0.15000000596046448,
+        0.15000000596046448,
+        0.15000000596046448
+      ],
+      "visible": true
+    },
+    {
+      "mesh": 0,
+      "model": 1,
+      "name": "거리B",
+      "parent": -1,
+      "position": [
+        1.600000023841858,
+        0.14486266672611237,
+        0.5
+      ],
+      "rigidBody": 6,
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "scale": [
+        0.15000000596046448,
+        0.15000000596046448,
+        0.15000000596046448
+      ],
+      "visible": true
+    },
+    {
+      "joint": 5,
+      "mesh": 0,
+      "model": 2,
+      "name": "경첩 막대",
+      "parent": -1,
+      "position": [
+        1.9943560361862183,
+        1.9249217510223389,
+        -1.0
+      ],
+      "rigidBody": 7,
+      "rotation": [
+        0.0,
+        0.0,
+        -0.07515280693769455,
+        0.9971719980239868
+      ],
+      "scale": [
+        0.5,
+        0.07999999821186066,
+        0.07999999821186066
+      ],
+      "visible": true
+    }
+  ],
+  "particleSystems": [],
+  "post": {
+    "adaptationSpeed": 2.0,
+    "autoExposure": false,
+    "bloomIntensity": 0.6000000238418579,
+    "bloomKnee": 0.5,
+    "bloomScatter": 0.699999988079071,
+    "bloomThreshold": 1.0,
+    "exposureMaxEv": 12.0,
+    "exposureMinEv": -4.0,
+    "fogColor": [
+      0.6200000047683716,
+      0.699999988079071,
+      0.800000011920929
+    ],
+    "fogDensity": 0.0,
+    "fogFalloff": 0.5,
+    "fogHeight": 0.0,
+    "fogSunScatter": 0.0
+  },
+  "rigidBodies": [
+    {
+      "backend": "cpu",
+      "friction": 0.6000000238418579,
+      "halfExtents": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kinematic": true,
+      "mass": 0.0,
+      "radius": 0.5,
+      "restitution": 0.20000000298023224,
+      "shape": "plane",
+      "useGravity": false
+    },
+    {
+      "backend": "cpu",
+      "friction": 0.5,
+      "halfExtents": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kinematic": false,
+      "mass": 1.0,
+      "radius": 1.0,
+      "restitution": 0.10000000149011612,
+      "shape": "sphere",
+      "useGravity": true
+    },
+    {
+      "backend": "cpu",
+      "friction": 0.5,
+      "halfExtents": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kinematic": false,
+      "mass": 1.0,
+      "radius": 1.0,
+      "restitution": 0.10000000149011612,
+      "shape": "sphere",
+      "useGravity": true
+    },
+    {
+      "backend": "cpu",
+      "friction": 0.5,
+      "halfExtents": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kinematic": false,
+      "mass": 1.0,
+      "radius": 1.0,
+      "restitution": 0.10000000149011612,
+      "shape": "sphere",
+      "useGravity": true
+    },
+    {
+      "backend": "cpu",
+      "friction": 0.5,
+      "halfExtents": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kinematic": false,
+      "mass": 1.0,
+      "radius": 1.0,
+      "restitution": 0.10000000149011612,
+      "shape": "sphere",
+      "useGravity": true
+    },
+    {
+      "backend": "cpu",
+      "friction": 0.5,
+      "halfExtents": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kinematic": false,
+      "mass": 1.0,
+      "radius": 1.0,
+      "restitution": 0.10000000149011612,
+      "shape": "sphere",
+      "useGravity": true
+    },
+    {
+      "backend": "cpu",
+      "friction": 0.5,
+      "halfExtents": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kinematic": false,
+      "mass": 1.0,
+      "radius": 1.0,
+      "restitution": 0.10000000149011612,
+      "shape": "sphere",
+      "useGravity": true
+    },
+    {
+      "backend": "cpu",
+      "friction": 0.5,
+      "halfExtents": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kinematic": false,
+      "mass": 1.0,
+      "radius": 0.5,
+      "restitution": 0.10000000149011612,
+      "shape": "box",
+      "useGravity": true
+    }
+  ],
+  "version": 7
+}

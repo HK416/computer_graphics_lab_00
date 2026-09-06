@@ -594,7 +594,170 @@ void solveContacts(std::vector<Body>& bodies, std::vector<Contact>& contacts) {
     }
 }
 
+glm::mat3 skewMatrix(const glm::vec3& v) {
+    // skew(v) * x == cross(v, x). glm 은 열 우선이다.
+    return glm::mat3{0.0F, v.z, -v.y, -v.z, 0.0F, v.x, v.y, -v.x, 0.0F};
+}
+
+// 관절 한쪽의 앵커·팔·속도. B 가 고정점이면 질량 역수와 관성이 0 이고 위치만 있다.
+struct JointSide {
+    glm::vec3 anchor{0.0F};
+    glm::vec3 arm{0.0F};
+    glm::vec3 velocity{0.0F};
+    glm::vec3 angularVelocity{0.0F};
+    float inverseMass = 0.0F;
+    glm::mat3 inverseInertia{0.0F};
+};
+
+JointSide jointSideOf(const Body& body, const glm::vec3& local) {
+    JointSide side;
+    side.arm = glm::mat3_cast(body.rotation) * local;
+    side.anchor = body.position + side.arm;
+    side.velocity = body.velocity + glm::cross(body.angularVelocity, side.arm);
+    side.angularVelocity = body.angularVelocity;
+    side.inverseMass = body.inverseMass;
+    side.inverseInertia = worldInverseInertia(body);
+    return side;
+}
+
+JointSide jointStaticSide(const glm::vec3& worldAnchor) {
+    JointSide side;
+    side.anchor = worldAnchor;
+    return side;
+}
+
+// 관절의 속도 행. 거리는 앵커 사이 방향 하나, 볼·경첩은 앵커를 한 점으로 묶는 3×3 유효 질량이고 경첩은 축에
+// 수직한 각속도 차를 두 행으로 없앤다. GPU(rigid_common.glsl 의 rigidJointImpulse)와 같은 식이다.
+void solveJoint(std::vector<Body>& bodies, const JointState& joint) {
+    Body& a = bodies[joint.bodyA];
+    Body* b = joint.bodyB >= 0 ? &bodies[static_cast<size_t>(joint.bodyB)] : nullptr;
+    JointSide sideA = jointSideOf(a, joint.localA);
+    JointSide sideB = b != nullptr ? jointSideOf(*b, joint.localB) : jointStaticSide(joint.worldAnchorB);
+    float totalInverseMass = sideA.inverseMass + sideB.inverseMass;
+    if (totalInverseMass <= 0.0F) {
+        return;
+    }
+    glm::vec3 relative = sideB.velocity - sideA.velocity;
+    glm::vec3 impulse{0.0F};
+    if (joint.type == scene::JointType::DISTANCE) {
+        glm::vec3 delta = sideB.anchor - sideA.anchor;
+        float span = glm::length(delta);
+        if (span < 1.0e-6F) {
+            return;
+        }
+        glm::vec3 normal = delta / span;
+        glm::vec3 torqueA = glm::cross(sideA.arm, normal);
+        glm::vec3 torqueB = glm::cross(sideB.arm, normal);
+        float k = totalInverseMass + glm::dot(torqueA, sideA.inverseInertia * torqueA) +
+                  glm::dot(torqueB, sideB.inverseInertia * torqueB);
+        impulse = normal * (-glm::dot(relative, normal) / k);
+    } else {
+        glm::mat3 skewA = skewMatrix(sideA.arm);
+        glm::mat3 skewB = skewMatrix(sideB.arm);
+        glm::mat3 k =
+            glm::mat3{totalInverseMass} - skewA * sideA.inverseInertia * skewA - skewB * sideB.inverseInertia * skewB;
+        impulse = glm::inverse(k) * (-relative);
+    }
+    a.velocity -= impulse * sideA.inverseMass;
+    a.angularVelocity -= sideA.inverseInertia * glm::cross(sideA.arm, impulse);
+    if (b != nullptr) {
+        b->velocity += impulse * sideB.inverseMass;
+        b->angularVelocity += sideB.inverseInertia * glm::cross(sideB.arm, impulse);
+    }
+
+    if (joint.type == scene::JointType::HINGE) {
+        glm::vec3 axis = glm::mat3_cast(a.rotation) * joint.localAxis;
+        float axisLength = glm::length(axis);
+        if (axisLength < 1.0e-6F) {
+            return;
+        }
+        axis /= axisLength;
+        glm::vec3 helper = std::abs(axis.y) < 0.9F ? glm::vec3{0.0F, 1.0F, 0.0F} : glm::vec3{1.0F, 0.0F, 0.0F};
+        glm::vec3 u = glm::normalize(glm::cross(axis, helper));
+        glm::vec3 v = glm::cross(axis, u);
+        for (const glm::vec3& t : {u, v}) {
+            glm::vec3 omega = (b != nullptr ? b->angularVelocity : glm::vec3{0.0F}) - a.angularVelocity;
+            float k = glm::dot(t, (sideA.inverseInertia + sideB.inverseInertia) * t);
+            if (k <= 1.0e-9F) {
+                continue;
+            }
+            float lambda = -glm::dot(omega, t) / k;
+            a.angularVelocity -= sideA.inverseInertia * (t * lambda);
+            if (b != nullptr) {
+                b->angularVelocity += sideB.inverseInertia * (t * lambda);
+            }
+        }
+    }
+}
+
+// 관절의 위치 보정. 앵커 오차(거리는 목표와의 차)를 질량 역수 비율로 나눠 민다. 회전은 고치지 않는다.
+//
+// ponytail: 경첩의 축 어긋남(각도 오차)은 보정하지 않아 오래 돌면 조금 기운다. 각도 위치 행을 더하면 된다.
+void correctJoint(std::vector<Body>& bodies, const JointState& joint) {
+    Body& a = bodies[joint.bodyA];
+    Body* b = joint.bodyB >= 0 ? &bodies[static_cast<size_t>(joint.bodyB)] : nullptr;
+    glm::vec3 anchorA = a.position + glm::mat3_cast(a.rotation) * joint.localA;
+    glm::vec3 anchorB = b != nullptr ? b->position + glm::mat3_cast(b->rotation) * joint.localB : joint.worldAnchorB;
+    float wa = a.inverseMass;
+    float wb = b != nullptr ? b->inverseMass : 0.0F;
+    if (wa + wb <= 0.0F) {
+        return;
+    }
+    glm::vec3 error = anchorB - anchorA;
+    if (joint.type == scene::JointType::DISTANCE) {
+        float span = glm::length(error);
+        if (span < 1.0e-6F) {
+            return;
+        }
+        error = error / span * (span - joint.length);
+    }
+    glm::vec3 push = error * (POSITION_CORRECTION / (wa + wb));
+    a.position += push * wa;
+    if (b != nullptr) {
+        b->position -= push * wb;
+    }
+}
+
 } // namespace
+
+void collectJoints(const scene::Scene& scene, const std::vector<RigidBodyState>& bodies, std::vector<JointState>& out) {
+    out.clear();
+    std::vector<int32_t> bodyOf(scene.objects.size(), -1);
+    for (uint32_t i = 0; i < bodies.size(); ++i) {
+        if (bodies[i].object < bodyOf.size()) {
+            bodyOf[bodies[i].object] = static_cast<int32_t>(i);
+        }
+    }
+    for (uint32_t index = 0; index < scene.objects.size(); ++index) {
+        int32_t slot = scene.objects[index].joint;
+        if (slot < 0 || static_cast<size_t>(slot) >= scene.joints.size() || bodyOf[index] < 0) {
+            continue;
+        }
+        const scene::Joint& joint = scene.joints[static_cast<size_t>(slot)];
+        // 자기 자신과 잇는 관절은 뜻이 없다(장면 파일이 그렇게 적혀 있을 수 있다).
+        if (joint.other == static_cast<int32_t>(index)) {
+            continue;
+        }
+        JointState state;
+        state.bodyA = static_cast<uint32_t>(bodyOf[index]);
+        state.localA = joint.anchorA;
+        state.localAxis = joint.axis;
+        state.length = joint.length;
+        state.type = joint.type;
+        bool otherValid = joint.other >= 0 && static_cast<size_t>(joint.other) < scene.objects.size();
+        state.bodyB = otherValid ? bodyOf[static_cast<size_t>(joint.other)] : -1;
+        if (state.bodyB >= 0) {
+            state.localB = joint.anchorB;
+        } else if (otherValid) {
+            // B 오브젝트는 있지만 이 백엔드의 강체가 아니다. 그 오브젝트의 세계 변환에 붙은 고정점으로 본다.
+            state.worldAnchorB =
+                glm::vec3(scene.worldMatrix(static_cast<uint32_t>(joint.other)) * glm::vec4{joint.anchorB, 1.0F});
+        } else {
+            state.worldAnchorB = joint.anchorB;
+        }
+        out.push_back(state);
+    }
+}
 
 void collectRigidBodies(const scene::Scene& scene,
                         scene::SimulationBackend backend,
@@ -885,8 +1048,20 @@ void stepRigidBodies(scene::Scene& scene, float dt, core::JobSystem* jobs) {
         collide(bodies, i, j, triangles, contacts);
     }
 
-    // 5) 순차 임펄스로 속도를 고친다.
+    // 5) 관절 속도 행을 먼저, 접촉을 순차 임펄스로, 그 뒤 관절 위치 보정.
+    std::vector<JointState> joints;
+    collectJoints(scene, bodies, joints);
+    for (uint32_t iteration = 0; iteration < SOLVER_ITERATIONS; ++iteration) {
+        for (const JointState& joint : joints) {
+            solveJoint(bodies, joint);
+        }
+    }
     solveContacts(bodies, contacts);
+    for (uint32_t iteration = 0; iteration < POSITION_ITERATIONS; ++iteration) {
+        for (const JointState& joint : joints) {
+            correctJoint(bodies, joint);
+        }
+    }
 
     // 6) 세계 상태를 오브젝트의 지역 변환과 부품 속도로 되돌려 쓴다.
     writeBackRigidBodies(scene, bodies);

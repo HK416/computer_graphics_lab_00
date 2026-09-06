@@ -391,6 +391,58 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         ImGui::TextDisabled("천·유체·입자가 읽는다. 강체는 읽지 않는다");
     }
 
+    if (object.joint >= 0 && object.joint < static_cast<int>(active.joints.size()) &&
+        componentHeader("Joint", &scene::Object::joint)) {
+        scene::Joint& joint = active.joints[static_cast<size_t>(object.joint)];
+        constexpr std::array<const char*, 3> JOINT_NAMES{"Distance", "Ball", "Hinge"};
+        int type = static_cast<int>(joint.type);
+        if (ImGui::Combo("종류", &type, JOINT_NAMES.data(), static_cast<int>(JOINT_NAMES.size()))) {
+            joint.type = static_cast<scene::JointType>(type);
+        }
+        if (object.rigidBody < 0) {
+            ImGui::TextDisabled("이 오브젝트에 강체가 없어 관절이 돌지 않는다");
+        }
+        std::string otherName = joint.other >= 0 && static_cast<size_t>(joint.other) < active.objects.size()
+                                    ? active.objects[static_cast<size_t>(joint.other)].name
+                                    : std::string{"(세계 고정)"};
+        if (ImGui::BeginCombo("상대", otherName.c_str())) {
+            if (ImGui::Selectable("(세계 고정)", joint.other < 0)) {
+                joint.other = -1;
+            }
+            for (int i = 0; i < static_cast<int>(active.objects.size()); ++i) {
+                if (i == static_cast<int>(objectIndex)) {
+                    continue;
+                }
+                ImGui::PushID(i);
+                if (ImGui::Selectable(active.objects[static_cast<size_t>(i)].name.c_str(), joint.other == i)) {
+                    joint.other = i;
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("상대에 같은 백엔드의 강체가 없으면 그 오브젝트(또는 세계)에 붙은 고정점이다");
+        }
+        ImGui::DragFloat3("앵커 A (지역)", glm::value_ptr(joint.anchorA), 0.01F);
+        ImGui::DragFloat3(joint.other >= 0 ? "앵커 B (지역)" : "앵커 B (세계)", glm::value_ptr(joint.anchorB), 0.01F);
+        if (joint.type == scene::JointType::HINGE) {
+            ImGui::DragFloat3("축 (A 지역)", glm::value_ptr(joint.axis), 0.01F);
+        }
+        if (joint.type == scene::JointType::DISTANCE) {
+            ImGui::DragFloat("거리", &joint.length, 0.01F, 0.0F, 100.0F, "%.2f");
+            ImGui::SameLine();
+            if (ImGui::Button("지금 거리로")) {
+                glm::vec3 a = glm::vec3(active.worldMatrix(objectIndex) * glm::vec4{joint.anchorA, 1.0F});
+                glm::vec3 b = joint.other >= 0 && static_cast<size_t>(joint.other) < active.objects.size()
+                                  ? glm::vec3(active.worldMatrix(static_cast<uint32_t>(joint.other)) *
+                                              glm::vec4{joint.anchorB, 1.0F})
+                                  : joint.anchorB;
+                joint.length = glm::length(b - a);
+            }
+        }
+    }
+
     if (object.cameraComponent >= 0 && object.cameraComponent < static_cast<int>(active.cameraComponents.size()) &&
         componentHeader("Camera", &scene::Object::cameraComponent)) {
         scene::CameraComponent& camera = active.cameraComponents[static_cast<size_t>(object.cameraComponent)];
@@ -625,6 +677,14 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         ImGui::BeginDisabled(object.cameraPath >= 0);
         if (ImGui::MenuItem("Camera Path")) {
             active.attachCameraPath(objectIndex);
+        }
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(object.joint >= 0);
+        if (ImGui::MenuItem("Joint")) {
+            scene::Joint joint;
+            // 기본은 지금 자리의 세계 고정점. 강체가 있으면 그 자리에 매달린 채 시작한다.
+            joint.anchorB = glm::vec3(active.worldMatrix(objectIndex)[3]);
+            active.attachJoint(objectIndex, joint);
         }
         ImGui::EndDisabled();
         ImGui::BeginDisabled(object.cloth >= 0);

@@ -1,0 +1,537 @@
+{
+ "version": 7,
+ "name": "관절 gpu",
+ "models": [
+  "<builtin:plane>",
+  "<builtin:box>",
+  "<builtin:icosphere>"
+ ],
+ "camera": {
+  "mode": "orbit",
+  "target": [
+   0.0,
+   1.8,
+   0.0
+  ],
+  "distance": 7.0,
+  "pitch": -12.0,
+  "yaw": -90.0,
+  "fovY": 50.0,
+  "near": 0.05,
+  "moveSpeed": 2.0,
+  "position": [
+   0.0,
+   3.0,
+   7.0
+  ]
+ },
+ "ambient": {
+  "color": [
+   0.25,
+   0.25,
+   0.25
+  ],
+  "intensity": 1.0
+ },
+ "lights": [
+  {
+   "type": "directional",
+   "color": [
+    1.0,
+    0.97,
+    0.9
+   ],
+   "intensity": 3.0,
+   "range": 20.0,
+   "innerCone": 20.0,
+   "outerCone": 30.0,
+   "size": [
+    2.0,
+    2.0
+   ],
+   "castsShadow": true
+  }
+ ],
+ "animators": [],
+ "rigidBodies": [
+  {
+   "shape": "plane",
+   "mass": 0.0,
+   "useGravity": false,
+   "kinematic": true,
+   "restitution": 0.2,
+   "friction": 0.6,
+   "radius": 0.5,
+   "halfExtents": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "backend": "gpu"
+  },
+  {
+   "shape": "sphere",
+   "mass": 1.0,
+   "useGravity": true,
+   "kinematic": false,
+   "restitution": 0.1,
+   "friction": 0.5,
+   "radius": 1.0,
+   "halfExtents": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "backend": "gpu"
+  },
+  {
+   "shape": "sphere",
+   "mass": 1.0,
+   "useGravity": true,
+   "kinematic": false,
+   "restitution": 0.1,
+   "friction": 0.5,
+   "radius": 1.0,
+   "halfExtents": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "backend": "gpu"
+  },
+  {
+   "shape": "sphere",
+   "mass": 1.0,
+   "useGravity": true,
+   "kinematic": false,
+   "restitution": 0.1,
+   "friction": 0.5,
+   "radius": 1.0,
+   "halfExtents": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "backend": "gpu"
+  },
+  {
+   "shape": "sphere",
+   "mass": 1.0,
+   "useGravity": true,
+   "kinematic": false,
+   "restitution": 0.1,
+   "friction": 0.5,
+   "radius": 1.0,
+   "halfExtents": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "backend": "gpu"
+  },
+  {
+   "shape": "sphere",
+   "mass": 1.0,
+   "useGravity": true,
+   "kinematic": false,
+   "restitution": 0.1,
+   "friction": 0.5,
+   "radius": 1.0,
+   "halfExtents": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "backend": "gpu"
+  },
+  {
+   "shape": "sphere",
+   "mass": 1.0,
+   "useGravity": true,
+   "kinematic": false,
+   "restitution": 0.1,
+   "friction": 0.5,
+   "radius": 1.0,
+   "halfExtents": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "backend": "gpu"
+  },
+  {
+   "shape": "box",
+   "mass": 1.0,
+   "useGravity": true,
+   "kinematic": false,
+   "restitution": 0.1,
+   "friction": 0.5,
+   "radius": 0.5,
+   "halfExtents": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "backend": "gpu"
+  }
+ ],
+ "fluids": [],
+ "objects": [
+  {
+   "name": "태양",
+   "parent": -1,
+   "position": [
+    0,
+    5,
+    0
+   ],
+   "rotation": [
+    -0.383,
+    0.0,
+    0.0,
+    0.924
+   ],
+   "scale": [
+    1,
+    1,
+    1
+   ],
+   "visible": true,
+   "light": 0
+  },
+  {
+   "name": "바닥",
+   "parent": -1,
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation": [
+    0,
+    0,
+    0,
+    1
+   ],
+   "scale": [
+    4.0,
+    1.0,
+    4.0
+   ],
+   "visible": true,
+   "model": 0,
+   "mesh": 0,
+   "skin": -1,
+   "rigidBody": 0
+  },
+  {
+   "name": "사슬0",
+   "parent": -1,
+   "position": [
+    -1.5,
+    3.0,
+    0.0
+   ],
+   "rotation": [
+    0,
+    0,
+    0,
+    1
+   ],
+   "scale": [
+    0.15,
+    0.15,
+    0.15
+   ],
+   "visible": true,
+   "model": 2,
+   "mesh": 0,
+   "skin": -1,
+   "rigidBody": 1,
+   "joint": 0
+  },
+  {
+   "name": "사슬1",
+   "parent": -1,
+   "position": [
+    -1.0,
+    3.0,
+    0.0
+   ],
+   "rotation": [
+    0,
+    0,
+    0,
+    1
+   ],
+   "scale": [
+    0.15,
+    0.15,
+    0.15
+   ],
+   "visible": true,
+   "model": 2,
+   "mesh": 0,
+   "skin": -1,
+   "rigidBody": 2,
+   "joint": 1
+  },
+  {
+   "name": "사슬2",
+   "parent": -1,
+   "position": [
+    -0.5,
+    3.0,
+    0.0
+   ],
+   "rotation": [
+    0,
+    0,
+    0,
+    1
+   ],
+   "scale": [
+    0.15,
+    0.15,
+    0.15
+   ],
+   "visible": true,
+   "model": 2,
+   "mesh": 0,
+   "skin": -1,
+   "rigidBody": 3,
+   "joint": 2
+  },
+  {
+   "name": "사슬3",
+   "parent": -1,
+   "position": [
+    0.0,
+    3.0,
+    0.0
+   ],
+   "rotation": [
+    0,
+    0,
+    0,
+    1
+   ],
+   "scale": [
+    0.15,
+    0.15,
+    0.15
+   ],
+   "visible": true,
+   "model": 2,
+   "mesh": 0,
+   "skin": -1,
+   "rigidBody": 4,
+   "joint": 3
+  },
+  {
+   "name": "거리A",
+   "parent": -1,
+   "position": [
+    1.0,
+    2.5,
+    0.5
+   ],
+   "rotation": [
+    0,
+    0,
+    0,
+    1
+   ],
+   "scale": [
+    0.15,
+    0.15,
+    0.15
+   ],
+   "visible": true,
+   "model": 2,
+   "mesh": 0,
+   "skin": -1,
+   "rigidBody": 5,
+   "joint": 4
+  },
+  {
+   "name": "거리B",
+   "parent": -1,
+   "position": [
+    1.6,
+    2.5,
+    0.5
+   ],
+   "rotation": [
+    0,
+    0,
+    0,
+    1
+   ],
+   "scale": [
+    0.15,
+    0.15,
+    0.15
+   ],
+   "visible": true,
+   "model": 2,
+   "mesh": 0,
+   "skin": -1,
+   "rigidBody": 6
+  },
+  {
+   "name": "경첩 막대",
+   "parent": -1,
+   "position": [
+    2.0,
+    2.0,
+    -1.0
+   ],
+   "rotation": [
+    0,
+    0,
+    0,
+    1
+   ],
+   "scale": [
+    0.5,
+    0.08,
+    0.08
+   ],
+   "visible": true,
+   "model": 1,
+   "mesh": 0,
+   "skin": -1,
+   "rigidBody": 7,
+   "joint": 5
+  }
+ ],
+ "joints": [
+  {
+   "type": "ball",
+   "other": -1,
+   "anchorA": [
+    -0.25,
+    0.0,
+    0.0
+   ],
+   "anchorB": [
+    -2.0,
+    3.0,
+    0.0
+   ],
+   "axis": [
+    0,
+    1,
+    0
+   ],
+   "length": 0.5
+  },
+  {
+   "type": "ball",
+   "other": 2,
+   "anchorA": [
+    -0.25,
+    0.0,
+    0.0
+   ],
+   "anchorB": [
+    0.25,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0,
+    1,
+    0
+   ],
+   "length": 0.5
+  },
+  {
+   "type": "ball",
+   "other": 3,
+   "anchorA": [
+    -0.25,
+    0.0,
+    0.0
+   ],
+   "anchorB": [
+    0.25,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0,
+    1,
+    0
+   ],
+   "length": 0.5
+  },
+  {
+   "type": "ball",
+   "other": 4,
+   "anchorA": [
+    -0.25,
+    0.0,
+    0.0
+   ],
+   "anchorB": [
+    0.25,
+    0.0,
+    0.0
+   ],
+   "axis": [
+    0,
+    1,
+    0
+   ],
+   "length": 0.5
+  },
+  {
+   "type": "distance",
+   "other": 7,
+   "anchorA": [
+    0,
+    0,
+    0
+   ],
+   "anchorB": [
+    0,
+    0,
+    0
+   ],
+   "axis": [
+    0,
+    1,
+    0
+   ],
+   "length": 0.6
+  },
+  {
+   "type": "hinge",
+   "other": -1,
+   "anchorA": [
+    -0.5,
+    0.0,
+    0.0
+   ],
+   "anchorB": [
+    1.5,
+    2.0,
+    -1.0
+   ],
+   "axis": [
+    0,
+    0,
+    1
+   ],
+   "length": 1.0
+  }
+ ],
+ "particleSystems": [],
+ "cloths": [],
+ "forceFields": [],
+ "ddgiVolumes": [],
+ "cameraComponents": [],
+ "cameraPaths": []
+}

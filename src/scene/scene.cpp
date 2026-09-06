@@ -453,6 +453,7 @@ SceneSnapshot Scene::capture() const {
     snapshot.ddgiVolumes = ddgiVolumes;
     snapshot.cameraComponents = cameraComponents;
     snapshot.cameraPaths = cameraPaths;
+    snapshot.joints = joints;
     snapshot.ambientColor = ambientColor;
     snapshot.ambientIntensity = ambientIntensity;
     snapshot.environment = environment;
@@ -478,6 +479,7 @@ void Scene::restore(const SceneSnapshot& snapshot) {
     ddgiVolumes = snapshot.ddgiVolumes;
     cameraComponents = snapshot.cameraComponents;
     cameraPaths = snapshot.cameraPaths;
+    joints = snapshot.joints;
     ambientColor = snapshot.ambientColor;
     ambientIntensity = snapshot.ambientIntensity;
     environment = snapshot.environment;
@@ -490,8 +492,9 @@ bool Scene::differsFrom(const SceneSnapshot& snapshot) const {
         particleSystems != snapshot.particleSystems || cloths != snapshot.cloths ||
         forceFields != snapshot.forceFields || ddgiVolumes != snapshot.ddgiVolumes ||
         cameraComponents != snapshot.cameraComponents || cameraPaths != snapshot.cameraPaths ||
-        ambientColor != snapshot.ambientColor || ambientIntensity != snapshot.ambientIntensity ||
-        !(environment == snapshot.environment) || !(post == snapshot.post)) {
+        joints != snapshot.joints || ambientColor != snapshot.ambientColor ||
+        ambientIntensity != snapshot.ambientIntensity || !(environment == snapshot.environment) ||
+        !(post == snapshot.post)) {
         return true;
     }
     if (animators.size() != snapshot.animators.size()) {
@@ -586,6 +589,10 @@ int32_t Scene::attachCameraComponent(uint32_t index, const CameraComponent& came
 
 int32_t Scene::attachCameraPath(uint32_t index, const CameraPath& path) {
     return attachComponent(objects, cameraPaths, index, &Object::cameraPath, path);
+}
+
+int32_t Scene::attachJoint(uint32_t index, const Joint& joint) {
+    return attachComponent(objects, joints, index, &Object::joint, joint);
 }
 
 int32_t Scene::activeCameraObject() const {
@@ -693,6 +700,13 @@ void Scene::removeObjects(const std::vector<uint32_t>& indices) {
         }
     }
     objects = std::move(kept);
+    // 관절의 상대 오브젝트 번호도 밀린다. 사라졌으면 고정점(-1)이 된다.
+    for (Joint& joint : joints) {
+        if (joint.other >= 0) {
+            joint.other =
+                static_cast<size_t>(joint.other) < remap.size() ? remap[static_cast<size_t>(joint.other)] : -1;
+        }
+    }
 
     // 아무도 가리키지 않게 된 부품은 함께 사라진다. 예전에는 남아 고아가 됐다.
     forEachComponentKind(*this, [&](auto& items, int32_t Object::* kind) { compactComponents(items, objects, kind); });

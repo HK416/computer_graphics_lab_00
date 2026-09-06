@@ -301,6 +301,18 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
     }
     document["cameraPaths"] = cameraPaths;
 
+    json joints = json::array();
+    for (const Joint& joint : scene.joints) {
+        constexpr std::array<const char*, 3> JOINT_NAMES{"distance", "ball", "hinge"};
+        joints.push_back({{"type", JOINT_NAMES[std::min(static_cast<size_t>(joint.type), JOINT_NAMES.size() - 1)]},
+                          {"other", joint.other},
+                          {"anchorA", toJson(joint.anchorA)},
+                          {"anchorB", toJson(joint.anchorB)},
+                          {"axis", toJson(joint.axis)},
+                          {"length", joint.length}});
+    }
+    document["joints"] = joints;
+
     json objects = json::array();
     for (uint32_t objectIndex = 0; objectIndex < scene.objects.size(); ++objectIndex) {
         const Object& object = scene.objects[objectIndex];
@@ -347,6 +359,9 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
         }
         if (object.cameraPath >= 0) {
             entry["cameraPath"] = object.cameraPath;
+        }
+        if (object.joint >= 0) {
+            entry["joint"] = object.joint;
         }
         objects.push_back(std::move(entry));
     }
@@ -550,6 +565,18 @@ SceneFile readScene(const std::string& text) {
         file.scene.cameraPaths.push_back(path);
     }
 
+    for (const json& entry : document.value("joints", json::array())) {
+        Joint joint;
+        std::string type = entry.value("type", std::string{"ball"});
+        joint.type = type == "distance" ? JointType::DISTANCE : type == "hinge" ? JointType::HINGE : JointType::BALL;
+        joint.other = entry.value("other", -1);
+        joint.anchorA = toVec3(entry.value("anchorA", json{}), glm::vec3{0.0F});
+        joint.anchorB = toVec3(entry.value("anchorB", json{}), glm::vec3{0.0F});
+        joint.axis = toVec3(entry.value("axis", json{}), glm::vec3{0.0F, 1.0F, 0.0F});
+        joint.length = std::max(entry.value("length", joint.length), 0.0F);
+        file.scene.joints.push_back(joint);
+    }
+
     for (const json& entry : document.value("cloths", json::array())) {
         Cloth cloth;
         cloth.backend = toBackend(entry.value("backend", std::string{"auto"}));
@@ -594,6 +621,7 @@ SceneFile readScene(const std::string& text) {
         object.ddgiVolume = handle(entry.value("ddgiVolume", -1), file.scene.ddgiVolumes.size());
         object.cameraComponent = handle(entry.value("cameraComponent", -1), file.scene.cameraComponents.size());
         object.cameraPath = handle(entry.value("cameraPath", -1), file.scene.cameraPaths.size());
+        object.joint = handle(entry.value("joint", -1), file.scene.joints.size());
         auto skin = entry.value("skin", -1);
         file.scene.objects.push_back(std::move(object));
         file.objectModels.push_back(entry.value("model", -1));

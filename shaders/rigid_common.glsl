@@ -72,6 +72,24 @@ layout(buffer_reference, scalar) buffer RigidIndexBuffer {
     uint items[];
 };
 
+// src/gfx/rigid_body_gpu.h 의 GpuJoint. bodyB 가 RIGID_NO_BODY 면 anchorB 는 세계 좌표의 고정점이다.
+#define RIGID_NO_BODY 0xFFFFFFFFu
+#define RIGID_JOINT_DISTANCE 0u
+#define RIGID_JOINT_BALL 1u
+#define RIGID_JOINT_HINGE 2u
+struct RigidJoint {
+    vec4 anchorA; // xyz A 지역 앵커, w 목표 거리
+    vec4 anchorB; // xyz B 지역 앵커(고정점이면 세계)
+    vec4 axis;    // xyz A 지역 경첩 축
+    uint bodyA;
+    uint bodyB;
+    uint type;
+    uint pad0;
+};
+layout(buffer_reference, scalar) readonly buffer RigidJointBuffer {
+    RigidJoint items[];
+};
+
 layout(push_constant, scalar) uniform RigidPushConstants {
     RigidBodyBuffer bodiesIn;
     RigidBodyBuffer bodiesOut;
@@ -91,6 +109,8 @@ layout(push_constant, scalar) uniform RigidPushConstants {
     uint cellCount;
     uint planeCount;
     float cellSize;
+    uint jointCount;
+    RigidJointBuffer joints;
 } push;
 
 // 광역: self 와 경계 구가 겹치는 물체를 모은다. 이웃 27 셀의 버킷을 훑되, 해시 충돌로 두 셀이 같은 버킷에
@@ -568,6 +588,136 @@ RigidManifold rigidCollide(RigidBody a, RigidBody b) {
         manifold = rigidCollideBasic(a, b);
     }
     return flipped ? flipManifold(manifold) : manifold;
+}
+
+
+
+// ---- 관절. CPU(rigid_body.cpp 의 solveJoint / correctJoint)와 같은 행을 Jacobi 로 푼다. 두 물체가 각자 같은 임펄스를
+// 계산해 자기 몫만 더한다(접촉과 같은 방식).
+
+struct RigidJointSide {
+    vec3 anchor;
+    vec3 arm;
+    vec3 velocity;
+    vec3 angularVelocity;
+    float inverseMass;
+    mat3 inverseInertia;
+};
+
+RigidJointSide rigidJointSide(RigidBody body, vec3 local) {
+    RigidJointSide side;
+    side.arm = quatMatrix(body.rotation) * local;
+    side.anchor = body.position.xyz + side.arm;
+    side.velocity = body.velocity.xyz + cross(body.angularVelocity.xyz, side.arm);
+    side.angularVelocity = body.angularVelocity.xyz;
+    side.inverseMass = body.position.w;
+    side.inverseInertia = worldInverseInertia(body);
+    return side;
+}
+
+RigidJointSide rigidJointStaticSide(vec3 worldAnchor) {
+    RigidJointSide side;
+    side.anchor = worldAnchor;
+    side.arm = vec3(0.0);
+    side.velocity = vec3(0.0);
+    side.angularVelocity = vec3(0.0);
+    side.inverseMass = 0.0;
+    side.inverseInertia = mat3(0.0);
+    return side;
+}
+
+mat3 skewMatrix(vec3 v) {
+    // skew(v) * x == cross(v, x). GLSL 도 열 우선이다.
+    return mat3(0.0, v.z, -v.y, -v.z, 0.0, v.x, v.y, -v.x, 0.0);
+}
+
+// self 가 관절의 A 인지 B 인지 보고 자기 몫의 속도 변화를 더한다.
+void rigidJointImpulse(uint self, RigidJoint joint, RigidBody body, inout vec3 deltaLinear, inout vec3 deltaAngular) {
+    bool isA = joint.bodyA == self;
+    RigidBody a = push.bodiesIn.items[joint.bodyA];
+    RigidJointSide sideA = rigidJointSide(a, joint.anchorA.xyz);
+    RigidJointSide sideB = joint.bodyB == RIGID_NO_BODY ? rigidJointStaticSide(joint.anchorB.xyz)
+                                                        : rigidJointSide(push.bodiesIn.items[joint.bodyB], joint.anchorB.xyz);
+    float totalInverseMass = sideA.inverseMass + sideB.inverseMass;
+    if (totalInverseMass <= 0.0) {
+        return;
+    }
+    vec3 relative = sideB.velocity - sideA.velocity;
+    vec3 impulse = vec3(0.0);
+    if (joint.type == RIGID_JOINT_DISTANCE) {
+        vec3 delta = sideB.anchor - sideA.anchor;
+        float span = length(delta);
+        if (span < 1.0e-6) {
+            return;
+        }
+        vec3 normal = delta / span;
+        vec3 torqueA = cross(sideA.arm, normal);
+        vec3 torqueB = cross(sideB.arm, normal);
+        float k = totalInverseMass + dot(torqueA, sideA.inverseInertia * torqueA) + dot(torqueB, sideB.inverseInertia * torqueB);
+        impulse = normal * (-dot(relative, normal) / k);
+    } else {
+        mat3 skewA = skewMatrix(sideA.arm);
+        mat3 skewB = skewMatrix(sideB.arm);
+        mat3 k = mat3(totalInverseMass) - skewA * sideA.inverseInertia * skewA - skewB * sideB.inverseInertia * skewB;
+        impulse = inverse(k) * (-relative);
+    }
+    RigidJointSide mine = isA ? sideA : sideB;
+    float sign = isA ? -1.0 : 1.0;
+    deltaLinear += impulse * mine.inverseMass * sign;
+    deltaAngular += mine.inverseInertia * cross(mine.arm, impulse) * sign;
+
+    if (joint.type == RIGID_JOINT_HINGE) {
+        vec3 axis = quatMatrix(a.rotation) * joint.axis.xyz;
+        float axisLength = length(axis);
+        if (axisLength < 1.0e-6) {
+            return;
+        }
+        axis /= axisLength;
+        vec3 helper = abs(axis.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        vec3 u = normalize(cross(axis, helper));
+        vec3 v = cross(axis, u);
+        vec3 omega = sideB.angularVelocity - sideA.angularVelocity;
+        mat3 inertiaSum = sideA.inverseInertia + sideB.inverseInertia;
+        for (int row = 0; row < 2; ++row) {
+            vec3 t = row == 0 ? u : v;
+            float k = dot(t, inertiaSum * t);
+            if (k <= 1.0e-9) {
+                continue;
+            }
+            float lambda = -dot(omega, t) / k;
+            deltaAngular += mine.inverseInertia * (t * lambda) * sign;
+        }
+    }
+}
+
+// 관절의 위치 보정 몫. CPU correctJoint 와 같다.
+vec3 rigidJointCorrection(uint self, RigidJoint joint) {
+    bool isA = joint.bodyA == self;
+    RigidBody a = push.bodiesIn.items[joint.bodyA];
+    vec3 anchorA = a.position.xyz + quatMatrix(a.rotation) * joint.anchorA.xyz;
+    float wa = a.position.w;
+    vec3 anchorB;
+    float wb = 0.0;
+    if (joint.bodyB == RIGID_NO_BODY) {
+        anchorB = joint.anchorB.xyz;
+    } else {
+        RigidBody b = push.bodiesIn.items[joint.bodyB];
+        anchorB = b.position.xyz + quatMatrix(b.rotation) * joint.anchorB.xyz;
+        wb = b.position.w;
+    }
+    if (wa + wb <= 0.0) {
+        return vec3(0.0);
+    }
+    vec3 error = anchorB - anchorA;
+    if (joint.type == RIGID_JOINT_DISTANCE) {
+        float span = length(error);
+        if (span < 1.0e-6) {
+            return vec3(0.0);
+        }
+        error = error / span * (span - joint.anchorA.w);
+    }
+    vec3 push_ = error * (push.positionCorrection / (wa + wb));
+    return isA ? push_ * wa : -push_ * wb;
 }
 
 #endif

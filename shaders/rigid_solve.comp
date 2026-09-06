@@ -102,6 +102,14 @@ void main() {
         }
     }
 
+    // 관절. 자기가 A 든 B 든 같은 임펄스를 계산해 자기 몫만 더한다.
+    for (uint j = 0u; j < push.jointCount; ++j) {
+        RigidJoint joint = push.joints.items[j];
+        if (joint.bodyA == i || joint.bodyB == i) {
+            rigidJointImpulse(i, joint, self, deltaLinear, deltaAngular);
+        }
+    }
+
     self.velocity.xyz += deltaLinear;
     self.angularVelocity.xyz += deltaAngular;
     push.bodiesOut.items[i] = self;

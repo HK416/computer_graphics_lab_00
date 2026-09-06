@@ -181,6 +181,32 @@ void buildDebugLines(const scene::Scene& scene, const DebugLineOptions& options,
             }
         }
 
+        // 관절: 앵커 A 와 B 를 잇는 선과 앵커의 십자. B 가 강체가 아니면 그 오브젝트(또는 세계)의 고정점이다.
+        if (options.colliders && object.joint >= 0 && static_cast<size_t>(object.joint) < scene.joints.size()) {
+            const scene::Joint& joint = scene.joints[static_cast<size_t>(object.joint)];
+            glm::vec3 anchorA = glm::vec3(world * glm::vec4{joint.anchorA, 1.0F});
+            glm::vec3 anchorB =
+                joint.other >= 0 && static_cast<size_t>(joint.other) < scene.objects.size()
+                    ? glm::vec3(scene.worldMatrix(static_cast<uint32_t>(joint.other)) * glm::vec4{joint.anchorB, 1.0F})
+                    : joint.anchorB;
+            line(out, anchorA, anchorB, DEBUG_COLOR_JOINT);
+            for (glm::vec3 anchor : {anchorA, anchorB}) {
+                constexpr float CROSS = 0.06F;
+                line(out,
+                     anchor - glm::vec3{CROSS, 0.0F, 0.0F},
+                     anchor + glm::vec3{CROSS, 0.0F, 0.0F},
+                     DEBUG_COLOR_JOINT);
+                line(out,
+                     anchor - glm::vec3{0.0F, CROSS, 0.0F},
+                     anchor + glm::vec3{0.0F, CROSS, 0.0F},
+                     DEBUG_COLOR_JOINT);
+                line(out,
+                     anchor - glm::vec3{0.0F, 0.0F, CROSS},
+                     anchor + glm::vec3{0.0F, 0.0F, CROSS},
+                     DEBUG_COLOR_JOINT);
+            }
+        }
+
         // 카메라 부품: 앞(-Z)으로 벌어지는 작은 절두체. 활성이면 밝다.
         if (options.fluidBounds && object.cameraComponent >= 0 &&
             static_cast<size_t>(object.cameraComponent) < scene.cameraComponents.size()) {

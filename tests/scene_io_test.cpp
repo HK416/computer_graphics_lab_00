@@ -117,6 +117,13 @@ scene::Scene makeScene() {
     key.position = glm::vec3{4.0F, 5.0F, 6.0F};
     path.keys.push_back(key);
     scene.attachCameraPath(1, path);
+    scene::Joint joint;
+    joint.type = scene::JointType::HINGE;
+    joint.other = 1;
+    joint.anchorA = glm::vec3{0.1F, 0.2F, 0.3F};
+    joint.axis = glm::vec3{0.0F, 0.0F, 1.0F};
+    joint.length = 2.5F;
+    scene.attachJoint(0, joint);
     return scene;
 }
 
@@ -193,6 +200,12 @@ int main() {
     assert(loaded.scene.cameraPaths[0].keys.size() == 2 && !loaded.scene.cameraPaths[0].loop);
     assert(std::abs(loaded.scene.cameraPaths[0].duration - 7.5F) < 1e-5F);
     assert(std::abs(loaded.scene.cameraPaths[0].keys[1].position.y - 5.0F) < 1e-5F);
+    assert(loaded.scene.joints.size() == 1 && loaded.scene.objects[0].joint == 0 &&
+           loaded.scene.objects[1].joint == -1);
+    assert(loaded.scene.joints[0].type == scene::JointType::HINGE && loaded.scene.joints[0].other == 1);
+    assert(std::abs(loaded.scene.joints[0].anchorA.z - 0.3F) < 1e-5F &&
+           std::abs(loaded.scene.joints[0].axis.z - 1.0F) < 1e-5F);
+    assert(std::abs(loaded.scene.joints[0].length - 2.5F) < 1e-5F);
 
     // 부품이 없던 옛 판(1) 파일도 그대로 읽힌다.
     scene::SceneFile old = scene::readScene(R"({"version":1,"name":"옛 장면","objects":[{"name":"a"}]})");

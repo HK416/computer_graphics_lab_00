@@ -47,6 +47,20 @@ struct GpuRigidBody {
 };
 static_assert(sizeof(GpuRigidBody) == 144, "강체 배치가 셰이더와 어긋난다");
 
+// shaders/rigid_common.glsl 의 RigidJoint 와 배치가 같아야 한다(scalar). bodyB 가 RIGID_NO_BODY 면 anchorB 는 세계
+// 좌표.
+inline constexpr uint32_t RIGID_NO_BODY = 0xFFFFFFFFU;
+struct GpuJoint {
+    glm::vec4 anchorA{0.0F}; // xyz A 지역 앵커, w 목표 거리
+    glm::vec4 anchorB{0.0F}; // xyz B 지역 앵커(고정점이면 세계)
+    glm::vec4 axis{0.0F};    // xyz A 지역 경첩 축
+    uint32_t bodyA = 0;
+    uint32_t bodyB = RIGID_NO_BODY;
+    uint32_t type = 0;
+    uint32_t pad0 = 0;
+};
+static_assert(sizeof(GpuJoint) == 64, "관절 배치가 셰이더와 어긋난다");
+
 // shaders/rigid_common.glsl 의 RigidPushConstants 와 배치가 같아야 한다(scalar).
 struct RigidPushConstants {
     VkDeviceAddress bodiesIn = 0;
@@ -65,8 +79,10 @@ struct RigidPushConstants {
     uint32_t cellCount = 0;
     uint32_t planeCount = 0;
     float cellSize = 1.0F;
+    uint32_t jointCount = 0;
+    VkDeviceAddress joints = 0;
 };
-static_assert(sizeof(RigidPushConstants) == 88, "강체 푸시 상수 배치가 셰이더와 어긋난다");
+static_assert(sizeof(RigidPushConstants) == 96, "강체 푸시 상수 배치가 셰이더와 어긋난다");
 
 // 강체 GPU 솔버. CPU 솔버와 같은 함수(physics::collectRigidBodies)로 세계 상태를 펴 컴퓨트로 풀고,
 // 결과를 되읽어 오브젝트 변환에 되쓴다.
@@ -111,6 +127,7 @@ private:
     void reserveTriangles(uint32_t count);
     // 광역 격자 버퍼. 물체 수로 정한 셀 수가 커질 때만 다시 잡는다.
     void reserveGrid(uint32_t cellCount);
+    void reserveJoints(uint32_t count);
     // 이번에 모은 상태를 GPU 로 보낼 모습으로 편다.
     void buildUpload();
     // 편집기가 손댄 것이 있는지. 적분이 바꾸는 값(위치·회전·속도)은 오차를 봐주고 나머지는 그대로
@@ -152,6 +169,11 @@ private:
     Buffer cellCountBuffer;
     Buffer cellBodyBuffer;
     std::array<Buffer, RIGID_READBACK_SLOTS> planeBuffers;
+    // 관절. 작아서 프레임마다 호스트가 쓰는 버퍼로 넘긴다.
+    std::vector<physics::JointState> joints;
+    std::vector<GpuJoint> jointUpload;
+    std::array<Buffer, RIGID_READBACK_SLOTS> jointBuffers;
+    uint32_t jointCapacity = 0;
     uint32_t gridCellCount = 0;
     uint32_t gridCapacity = 0;
     float gridCellSize = 1.0F;

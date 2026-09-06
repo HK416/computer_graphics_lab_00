@@ -74,6 +74,68 @@ void simulate(scene::Scene& scene, float seconds, core::JobSystem* jobs) {
 } // namespace
 
 int main() {
+    // ---- 관절: 볼 관절로 세계 고정점에 매단 구는 진자처럼 흔들려도 앵커 거리가 그대로고, 거리 관절로 묶인 두 구는
+    //      떨어져도 거리가 그대로다. 경첩은 축 둘레 각속도만 남긴다.
+    {
+        scene::Scene scene;
+        uint32_t ball = addSphere(scene, glm::vec3{1.0F, 2.0F, 0.0F}, 0.1F, 0.0F);
+        scene::Joint joint;
+        joint.type = scene::JointType::BALL;
+        // 구 중심에서 (-1, 0, 0) 떨어진 지역점이 세계 고정점 (0, 2, 0) 에 붙는다. 진자 길이 1.
+        joint.anchorA = glm::vec3{-1.0F, 0.0F, 0.0F};
+        joint.anchorB = glm::vec3{0.0F, 2.0F, 0.0F};
+        scene.attachJoint(ball, joint);
+        scene.refresh();
+        for (int step = 0; step < 240; ++step) {
+            physics::stepRigidBodies(scene, STEP, nullptr);
+            float distance = glm::length(scene.objects[ball].transform.position - joint.anchorB);
+            assert(std::abs(distance - 1.0F) < 0.03F && "볼 관절은 앵커 거리를 지킨다");
+        }
+        assert(scene.objects[ball].transform.position.y < 1.5F && "진자는 아래로 흔들려 내려간다");
+    }
+    {
+        scene::Scene scene;
+        uint32_t a = addSphere(scene, glm::vec3{0.0F, 3.0F, 0.0F}, 0.1F, 0.0F);
+        uint32_t b = addSphere(scene, glm::vec3{0.5F, 3.0F, 0.0F}, 0.1F, 0.0F);
+        scene::Joint joint;
+        joint.type = scene::JointType::DISTANCE;
+        joint.other = static_cast<int32_t>(b);
+        joint.length = 0.5F;
+        scene.attachJoint(a, joint);
+        scene.rigidBodies[scene.objects[b].rigidBody].velocity = glm::vec3{0.0F, 0.0F, 2.0F};
+        scene.refresh();
+        for (int step = 0; step < 120; ++step) {
+            physics::stepRigidBodies(scene, STEP, nullptr);
+            float distance = glm::length(scene.objects[a].transform.position - scene.objects[b].transform.position);
+            assert(std::abs(distance - 0.5F) < 0.02F && "거리 관절은 거리를 지킨다");
+        }
+    }
+    {
+        scene::Scene scene;
+        uint32_t box = addBody(scene,
+                               scene::ColliderShape::BOX,
+                               glm::vec3{0.0F, 2.0F, 0.0F},
+                               glm::quat{1.0F, 0.0F, 0.0F, 0.0F},
+                               0.5F,
+                               glm::vec3{0.5F, 0.1F, 0.1F});
+        scene::Joint joint;
+        joint.type = scene::JointType::HINGE;
+        joint.anchorA = glm::vec3{-0.5F, 0.0F, 0.0F};
+        joint.anchorB = glm::vec3{-0.5F, 2.0F, 0.0F};
+        joint.axis = glm::vec3{0.0F, 0.0F, 1.0F};
+        scene.attachJoint(box, joint);
+        scene.refresh();
+        float lowest = 10.0F;
+        for (int step = 0; step < 120; ++step) {
+            physics::stepRigidBodies(scene, STEP, nullptr);
+            lowest = std::min(lowest, scene.objects[box].transform.position.y);
+        }
+        glm::vec3 omega = scene.rigidBodies[scene.objects[box].rigidBody].angularVelocity;
+        assert(std::abs(omega.x) < 0.05F && std::abs(omega.y) < 0.05F && "경첩은 축 밖 각속도를 없앤다");
+        assert(lowest < 1.6F && "경첩에 매달린 막대는 진자처럼 아래로 흔들린다");
+        std::printf("  관절 통과\n");
+    }
+
     core::JobSystem jobs(2);
 
     // 구가 바닥에 떨어져 반지름 높이에서 쉰다.
