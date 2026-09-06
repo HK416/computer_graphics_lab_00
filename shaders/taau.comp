@@ -22,6 +22,32 @@ layout(push_constant) uniform TaauPushConstants {
     vec4 jitterSamples;
 } pushConstants;
 
+// 히스토리를 Catmull-Rom 으로 읽는다. 4×4 탭을 이중 선형 다섯 번으로 줄인 표준 근사: 안쪽 2×2 는 가중치 비율
+// 위치의 탭 하나로, 네 변은 그 위치의 탭 하나씩으로 묶고 네 모서리(가중치 합 2% 미만)는 버린다. 텍셀 단위는 표시
+// 해상도다. 음수 가중치 때문에 살짝 음수가 될 수 있어 0 아래만 자른다(위쪽은 뒤의 YCoCg 가둠이 맡는다).
+vec3 sampleHistoryCatmullRom(vec2 uv) {
+    vec2 texel = pushConstants.displaySize.zw;
+    vec2 samplePos = uv * pushConstants.displaySize.xy;
+    vec2 texPos1 = floor(samplePos - 0.5) + 0.5;
+    vec2 f = samplePos - texPos1;
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+    vec2 w12 = w1 + w2;
+    vec2 offset12 = w2 / w12;
+    vec2 texPos0 = (texPos1 - 1.0) * texel;
+    vec2 texPos3 = (texPos1 + 2.0) * texel;
+    vec2 texPos12 = (texPos1 + offset12) * texel;
+    vec3 result = vec3(0.0);
+    result += sampleBindless(pushConstants.historyTexture, vec2(texPos12.x, texPos0.y)).rgb * w12.x * w0.y;
+    result += sampleBindless(pushConstants.historyTexture, vec2(texPos0.x, texPos12.y)).rgb * w0.x * w12.y;
+    result += sampleBindless(pushConstants.historyTexture, vec2(texPos12.x, texPos12.y)).rgb * w12.x * w12.y;
+    result += sampleBindless(pushConstants.historyTexture, vec2(texPos3.x, texPos12.y)).rgb * w3.x * w12.y;
+    result += sampleBindless(pushConstants.historyTexture, vec2(texPos12.x, texPos3.y)).rgb * w12.x * w3.y;
+    return max(result, vec3(0.0));
+}
+
 // 이웃 클리핑은 YCoCg 에서 한다. 밝기와 색차를 나눠야 색이 통째로 번지는 대신 밝기만 눌린다.
 vec3 rgbToYCoCg(vec3 c) {
     return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * (c.r - c.b), -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
@@ -104,9 +130,10 @@ void main() {
     vec3 result = current;
     float samples = 1.0;
     if (hasHistory) {
-        // ponytail: 히스토리를 이중 선형으로 읽는다. 프레임마다 다시 표본하므로 화면이 조금씩
-        // 뭉개진다. Catmull-Rom 으로 바꾸면 선명해지지만 탭이 아홉 개로 늘어난다.
+        // 히스토리는 Catmull-Rom 으로 읽는다. 프레임마다 다시 표본하는데 이중 선형이면 화면이 조금씩 뭉개진다.
+        // 표본 수(알파)는 필터할 값이 아니라 중심 탭의 이중 선형 값을 그대로 쓴다.
         vec4 historySample = sampleBindless(pushConstants.historyTexture, historyUv);
+        historySample.rgb = sampleHistoryCatmullRom(historyUv);
 
         // 이웃 분산으로 히스토리를 가둔다. 최소/최대로 자르는 것보다 좁아 잔상이 덜 남는다.
         //
