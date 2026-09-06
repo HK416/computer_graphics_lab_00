@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <cfloat>
-#include <chrono>
+#include <ctime>
 #include <format>
 #include <fstream>
 #include <string>
@@ -199,9 +199,17 @@ void ProfilerPlugin::window(Services& services) {
 }
 
 void ProfilerPlugin::saveCsv() const {
-    auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
-    std::string path =
-        std::format("profiler_{:%Y%m%d_%H%M%S}.csv", std::chrono::zoned_time{std::chrono::current_zone(), now});
+    // Apple libc++ 에는 std::chrono::zoned_time(시간대 DB)이 없어 C 시간 함수로 현지 시각을 찍는다.
+    std::time_t now = std::time(nullptr);
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    char stamp[32];
+    std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &local);
+    std::string path = std::format("profiler_{}.csv", stamp);
     std::ofstream file(path, std::ios::binary);
     if (!file) {
         spdlog::error("프로파일러 CSV 를 열지 못함: {}", path);
