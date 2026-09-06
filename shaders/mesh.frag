@@ -8,6 +8,8 @@ layout(location = 1) out vec2 outVelocity;
 layout(location = 2) out vec4 outNormalRoughness;
 // 광선 반사에 곱할 스페큘러 가중(F·A + B). 반사 대상이 아니면 0.
 layout(location = 3) out vec4 outReflectionWeight;
+// rgb 알베도, a 금속성. ReSTIR 직접광 컴퓨트가 표면을 되살리는 데 쓴다.
+layout(location = 4) out vec4 outDiffuseAlbedo;
 
 // 디버그 모드는 셰이딩 대신 중간 값을 그대로 보여준다.
 vec4 debugColor() {
@@ -70,8 +72,10 @@ void main() {
     // 디버그 뷰에서도 셰이딩을 돌려 안내 버퍼와 컷오프 discard 가 같게 나오도록 한다.
     vec4 normalRoughness;
     vec3 reflectionWeight;
-    vec4 shaded = shadeSurface(normalRoughness, reflectionWeight);
+    vec4 diffuseAlbedo;
+    vec4 shaded = shadeSurface(normalRoughness, reflectionWeight, diffuseAlbedo);
     outNormalRoughness = normalRoughness;
     outReflectionWeight = vec4(reflectionWeight, 1.0);
+    outDiffuseAlbedo = diffuseAlbedo;
     outColor = sceneDebugMode() != DEBUG_MODE_SHADED ? debugColor() : shaded;
 }

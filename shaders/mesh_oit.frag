@@ -15,7 +15,8 @@ void main() {
     // 반투명은 안내 버퍼를 쓰지 않는다. 파이프라인에 그 첨부물이 없어 값은 버려진다.
     vec4 normalRoughness;
     vec3 reflectionWeight;
-    vec4 shaded = shadeSurface(normalRoughness, reflectionWeight);
+    vec4 diffuseAlbedo;
+    vec4 shaded = shadeSurface(normalRoughness, reflectionWeight, diffuseAlbedo);
     float weight = oitWeight(gl_FragCoord.z, shaded.a);
     outAccumulation = vec4(shaded.rgb * shaded.a, shaded.a) * weight;
     outRevealage = shaded.a;

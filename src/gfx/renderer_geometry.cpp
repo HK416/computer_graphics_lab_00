@@ -82,7 +82,7 @@ void Renderer::createMeshPipelines() {
     constexpr VkColorComponentFlags VELOCITY_CHANNELS = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT;
     // 불투명 경로는 색상, 모션 벡터, 노멀·거칠기, 반사 가중치 넷이고 반투명 경로는 누적과 잔여
     // 투과율 둘이다.
-    constexpr uint32_t OPAQUE_ATTACHMENTS = 4;
+    constexpr uint32_t OPAQUE_ATTACHMENTS = 5;
     constexpr uint32_t TRANSLUCENT_ATTACHMENTS = 2;
     std::array<VkPipelineColorBlendAttachmentState, OPAQUE_ATTACHMENTS> blendAttachments{};
     std::array<VkFormat, OPAQUE_ATTACHMENTS> colorFormats{};
@@ -92,7 +92,8 @@ void Renderer::createMeshPipelines() {
         blendAttachments[1].colorWriteMask = VELOCITY_CHANNELS;
         blendAttachments[2].colorWriteMask = ALL_CHANNELS;
         blendAttachments[3].colorWriteMask = ALL_CHANNELS;
-        colorFormats = {COLOR_FORMAT, VELOCITY_FORMAT, COLOR_FORMAT, COLOR_FORMAT};
+        blendAttachments[4].colorWriteMask = ALL_CHANNELS;
+        colorFormats = {COLOR_FORMAT, VELOCITY_FORMAT, COLOR_FORMAT, COLOR_FORMAT, COLOR_FORMAT};
     };
     // 반투명은 누적과 잔여 투과율 두 대상에 기록한다. 누적은 더하고, 잔여 투과율은 (1 - 알파)를 곱해
     // 나간다. 고전 경로와 mesh shader 경로가 같은 상태를 써야 하므로 한 곳에서 정한다.

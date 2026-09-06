@@ -1,0 +1,241 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_ray_query : require
+
+#include "bindless.glsl"
+#include "ray_query.glsl"
+#include "restir.glsl"
+#include "scene_types.glsl"
+
+// ReSTIR DI. 불투명 패스가 남긴 깊이·노멀·거칠기·알베도로 표면을 되살리고, 픽셀마다 광원 후보를 RIS 로
+// 뽑아 지난 프레임(STAGE 0, 시간)과 이웃(STAGE 1, 공간)의 저장소와 합친 뒤 고른 광원 하나만 광선 질의로
+// 가시성을 판정해 HDR 색상에 더한다. 광원 수와 무관하게 픽셀당 광선 하나다. 켜져 있으면 래스터의 광원 루프는
+// 불투명 픽셀을 건너뛴다(mesh_shading.glsl, camera.flags.y).
+//
+// ponytail: 공간 재사용은 이웃 표본의 가시성을 다시 재지 않는 편향 방식이다. 그림자 경계가 이웃 쪽으로 조금
+// 번질 수 있다. 무편향으로 하려면 이웃마다 광선을 하나씩 더 쏜다.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(constant_id = 0) const uint STAGE = 0;
+
+layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevel;
+
+// bindless 슬롯 묶음. src/gfx/renderer_internal.h 의 RestirSlots 와 배치가 같아야 한다. 저장소 이미지는 비트를
+// 그대로 담으므로 샘플러 없이 imageLoad 로 읽는다.
+struct RestirSlots {
+    uint depth;
+    uint normalRoughness;
+    uint diffuseAlbedo;
+    uint velocity;
+    // 저장소(rgba32f): x 광원 번호 비트, y weightSum, z m, w W. 히스토리는 공간 패스가 쓰고 다음 프레임 시간 패스가
+    // 읽는다. 스크래치는 시간 패스가 쓰고 공간 패스가 읽는다.
+    uint historyStorage;
+    uint scratchStorage;
+    // 시간 검증용 기하(rgba16f: 노멀 xyz, 클립 w). 홀짝 교대.
+    uint geometryReadStorage;
+    uint geometryWriteStorage;
+    uint colorStorage;
+};
+
+layout(buffer_reference, scalar) readonly buffer RestirSlotsBuffer {
+    RestirSlots item;
+};
+
+layout(push_constant) uniform RestirPushConstants {
+    CameraBuffer camera;
+    LightBuffer lights;
+    RestirSlotsBuffer slots;
+    uint frameIndex;
+    // 하위 8비트 후보 수, 비트 8 시간 재사용, 비트 9 공간 재사용, 비트 10 히스토리 버림, 비트 20 부터 디버그 모드.
+    uint params;
+} push;
+
+uint restirCandidates() {
+    return max(push.params & 0xFFu, 1u);
+}
+bool restirTemporal() {
+    return (push.params & (1u << 8u)) != 0u;
+}
+bool restirSpatial() {
+    return (push.params & (1u << 9u)) != 0u;
+}
+bool restirReset() {
+    return (push.params & (1u << 10u)) != 0u;
+}
+uint restirDebugMode() {
+    return push.params >> 20u;
+}
+
+// 히스토리를 얼마나 길게 쓸지. 초기 후보 수의 이 배수까지만 쌓아 오래된 표본이 새 조명을 가리지 않게 한다.
+const float HISTORY_LIMIT = 20.0;
+const float SPATIAL_RADIUS = 16.0;
+const uint SPATIAL_NEIGHBORS = 4u;
+
+vec4 encodeReservoir(Reservoir r) {
+    return vec4(uintBitsToFloat(r.light), r.weightSum, r.m, r.w);
+}
+
+Reservoir decodeReservoir(vec4 value) {
+    Reservoir r;
+    r.light = floatBitsToUint(value.x);
+    r.weightSum = value.y;
+    r.m = value.z;
+    r.w = value.w;
+    return r;
+}
+
+Reservoir loadReservoir(uint slot, ivec2 pixel) {
+    return decodeReservoir(imageLoad(bindlessStorageImagesRgba[nonuniformEXT(slot)], pixel));
+}
+
+void storeReservoir(uint slot, ivec2 pixel, Reservoir r) {
+    imageStore(bindlessStorageImagesRgba[nonuniformEXT(slot)], pixel, encodeReservoir(r));
+}
+
+float clipDepth(mat4 viewProjection, vec3 position) {
+    return (viewProjection * vec4(position, 1.0)).w;
+}
+
+// 화면 픽셀에서 표면을 되살린다. 하늘(깊이 0)이면 거짓.
+bool loadSurface(RestirSlots slots, Camera camera, vec2 uv, out Surface surface) {
+    float depth = sampleBindless(slots.depth, uv).r;
+    if (depth <= 0.0) {
+        return false;
+    }
+    vec4 normalRoughness = sampleBindless(slots.normalRoughness, uv);
+    vec4 albedoMetallic = sampleBindless(slots.diffuseAlbedo, uv);
+    surface.position = worldFromDepth(camera, uv, depth);
+    surface.normal = normalize(normalRoughness.xyz);
+    surface.roughness = normalRoughness.w;
+    surface.view = normalize(camera.position.xyz - surface.position);
+    surface.albedo = albedoMetallic.rgb;
+    surface.metallic = albedoMetallic.a;
+    return true;
+}
+
+bool sameSurface(vec3 normalA, float depthA, vec3 normalB, float depthB) {
+    return depthB > 0.0 && abs(depthA - depthB) < 0.05 * max(depthA, 1.0e-3) && dot(normalA, normalB) > 0.9;
+}
+
+// 다른 저장소(지난 프레임·이웃)를 이 표면의 목표 함수로 다시 가중해 합친다.
+void mergeReservoir(inout Reservoir r, Reservoir other, Surface surface, uint lightCount, inout uint seed) {
+    if (other.light == RESTIR_NO_LIGHT || other.light >= lightCount || other.w <= 0.0 || other.m <= 0.0) {
+        return;
+    }
+    float target = restirTarget(push.lights.items[other.light], surface);
+    reservoirUpdate(r, other.light, target * other.w * other.m, other.m, randomFloat(seed));
+}
+
+void temporalStage(RestirSlots slots, ivec2 pixel, ivec2 size) {
+    Camera camera = push.camera.item;
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
+    Surface surface;
+    if (!loadSurface(slots, camera, uv, surface)) {
+        storeReservoir(slots.scratchStorage, pixel, emptyReservoir());
+        imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.geometryWriteStorage)], pixel, vec4(0.0));
+        return;
+    }
+    uint lightCount = camera.shading.x;
+    uint seed = pcgHash(uint(pixel.x) + uint(pixel.y) * uint(size.x) + push.frameIndex * 7919u);
+
+    Reservoir r = risPickLight(push.lights, lightCount, surface, restirCandidates(), seed);
+
+    if (restirTemporal() && !restirReset()) {
+        vec2 previousUv = uv + sampleBindless(slots.velocity, uv).rg;
+        if (all(greaterThanEqual(previousUv, vec2(0.0))) && all(lessThan(previousUv, vec2(1.0)))) {
+            ivec2 previousPixel = ivec2(previousUv * vec2(size));
+            vec4 geometry = imageLoad(bindlessStorageImagesRgba16[nonuniformEXT(slots.geometryReadStorage)], previousPixel);
+            float previousDepth = clipDepth(camera.previousViewProjection, surface.position);
+            if (sameSurface(surface.normal, previousDepth, geometry.xyz, geometry.w)) {
+                Reservoir previous = loadReservoir(slots.historyStorage, previousPixel);
+                previous.m = min(previous.m, HISTORY_LIMIT * float(restirCandidates()));
+                mergeReservoir(r, previous, surface, lightCount, seed);
+            }
+        }
+    }
+    if (r.light != RESTIR_NO_LIGHT) {
+        reservoirFinalize(r, restirTarget(push.lights.items[r.light], surface));
+    }
+    storeReservoir(slots.scratchStorage, pixel, r);
+    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.geometryWriteStorage)],
+               pixel,
+               vec4(surface.normal, clipDepth(camera.viewProjection, surface.position)));
+}
+
+void spatialStage(RestirSlots slots, ivec2 pixel, ivec2 size) {
+    Camera camera = push.camera.item;
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
+    Surface surface;
+    if (!loadSurface(slots, camera, uv, surface)) {
+        storeReservoir(slots.historyStorage, pixel, emptyReservoir());
+        return;
+    }
+    uint lightCount = camera.shading.x;
+    uint seed = pcgHash(uint(pixel.x) * 3u + uint(pixel.y) * uint(size.x) * 5u + push.frameIndex * 104729u);
+
+    Reservoir r = loadReservoir(slots.scratchStorage, pixel);
+    if (restirSpatial()) {
+        float centerDepth = clipDepth(camera.viewProjection, surface.position);
+        for (uint k = 0u; k < SPATIAL_NEIGHBORS; ++k) {
+            float angle = randomFloat(seed) * 6.28318530718;
+            float radius = sqrt(randomFloat(seed)) * SPATIAL_RADIUS;
+            ivec2 neighbor = pixel + ivec2(round(vec2(cos(angle), sin(angle)) * radius));
+            if (any(lessThan(neighbor, ivec2(0))) || any(greaterThanEqual(neighbor, size)) || neighbor == pixel) {
+                continue;
+            }
+            vec2 neighborUv = (vec2(neighbor) + 0.5) / vec2(size);
+            float neighborDepth = sampleBindless(slots.depth, neighborUv).r;
+            if (neighborDepth <= 0.0) {
+                continue;
+            }
+            vec3 neighborNormal = normalize(sampleBindless(slots.normalRoughness, neighborUv).xyz);
+            float neighborClip = clipDepth(camera.viewProjection, worldFromDepth(camera, neighborUv, neighborDepth));
+            if (!sameSurface(surface.normal, centerDepth, neighborNormal, neighborClip)) {
+                continue;
+            }
+            mergeReservoir(r, loadReservoir(slots.scratchStorage, neighbor), surface, lightCount, seed);
+        }
+        if (r.light != RESTIR_NO_LIGHT) {
+            reservoirFinalize(r, restirTarget(push.lights.items[r.light], surface));
+        }
+    }
+    storeReservoir(slots.historyStorage, pixel, r);
+
+    vec4 color = imageLoad(bindlessStorageImagesRgba16[nonuniformEXT(slots.colorStorage)], pixel);
+    if (restirDebugMode() == DEBUG_MODE_RESTIR_LIGHT) {
+        color.rgb = r.light == RESTIR_NO_LIGHT ? vec3(0.0) : debugPalette(r.light);
+        imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.colorStorage)], pixel, color);
+        return;
+    }
+    if (r.light == RESTIR_NO_LIGHT || r.light >= lightCount || r.w <= 0.0) {
+        return;
+    }
+    Light light = push.lights.items[r.light];
+    vec3 lightDirection;
+    vec3 contribution = lightContribution(light, surface, lightDirection);
+    if (contribution == vec3(0.0)) {
+        return;
+    }
+    // 고른 광원 하나만 광선으로 가린다. 방향광은 무한히 멀다.
+    float reach = uint(light.colorType.w) == LIGHT_TYPE_DIRECTIONAL
+                      ? 1.0e4
+                      : max(length(light.positionRange.xyz - surface.position) - 1.0e-3, 1.0e-4);
+    float visibility = rayQueryVisibility(topLevel, surface.position, surface.normal, lightDirection, reach);
+    color.rgb += contribution * visibility * r.w;
+    imageStore(bindlessStorageImagesRgba16[nonuniformEXT(slots.colorStorage)], pixel, color);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(push.camera.item.viewport.xy);
+    if (pixel.x >= size.x || pixel.y >= size.y) {
+        return;
+    }
+    RestirSlots slots = push.slots.item;
+    if (STAGE == 0u) {
+        temporalStage(slots, pixel, size);
+    } else {
+        spatialStage(slots, pixel, size);
+    }
+}

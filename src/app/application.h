@@ -67,6 +67,9 @@ struct Options {
     bool reflectionsGiven = false;
     // --no-denoise: 반사 디노이저를 끈다. 옛 누적 결과와 바이트로 견줄 때 쓴다.
     bool reflectionDenoise = true;
+    // --restir / --no-restir: ReSTIR 직접광. 주지 않으면 자동 튜닝이 정한다.
+    bool restir = false;
+    bool restirGiven = false;
     // 프레임마다 카메라를 이만큼(도) 궤도 회전한다. 정지 화면에서는 드러나지 않는 팝인을 재현한다.
     float orbitDegreesPerFrame = 0.0F;
     float triangleBudget = 0.0F;

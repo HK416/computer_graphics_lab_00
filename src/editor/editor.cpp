@@ -1557,6 +1557,30 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         }
     }
 
+    if (section("ReSTIR Direct Lighting")) {
+        ImGui::BeginDisabled(!rayQueryReady);
+        ImGui::Checkbox("ReSTIR Direct Lighting", &renderer.settings.useRestir);
+        ImGui::BeginDisabled(!renderer.settings.useRestir);
+        int candidates = static_cast<int>(renderer.settings.restirCandidates);
+        if (ImGui::SliderInt("광원 후보 수", &candidates, 1, 32)) {
+            renderer.settings.restirCandidates = static_cast<uint32_t>(candidates);
+        }
+        ImGui::Checkbox("Temporal 재사용", &renderer.settings.restirTemporal);
+        ImGui::SameLine();
+        ImGui::Checkbox("Spatial 재사용", &renderer.settings.restirSpatial);
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        if (rasterOnly) {
+            ImGui::TextDisabled("Path Tracing이 직접광을 직접 계산한다");
+        } else if (!rayQueryReady) {
+            ImGui::TextDisabled("이 장치는 Ray Query를 지원하지 않는다");
+        } else {
+            ImGui::TextDisabled(
+                "불투명 표면의 직접광을 광원 후보 재추출과 시간·공간 재사용으로 고른 광원 하나에 광선 하나로 "
+                "계산한다. 광원 수와 무관하게 픽셀당 광선 하나");
+        }
+    }
+
     if (section("환경 (IBL)")) {
         scene::Environment& env = active.environment;
         ImGui::Checkbox("IBL 사용", &renderer.settings.useIbl);
@@ -1815,7 +1839,8 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
                                                            "Cull Pass",
                                                            "Reflection Raw",
                                                            "Reflection Accumulated",
-                                                           "Reflection Filtered"};
+                                                           "Reflection Filtered",
+                                                           "ReSTIR Light"};
         // Path Tracing이나 이 장치가 못 만드는 값은 개별로 잠그고 사유를 보인다.
         if (ImGui::BeginCombo("디버그 뷰", DEBUG_MODE_NAMES[renderer.settings.debugMode])) {
             for (uint32_t mode = 0; mode < IM_ARRAYSIZE(DEBUG_MODE_NAMES); ++mode) {

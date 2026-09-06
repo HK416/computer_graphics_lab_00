@@ -54,6 +54,8 @@ struct HardwareProfile {
     uint32_t shadowCascades = 4;
     bool reflections = false;
     bool rayQueryShadows = false;
+    // ReSTIR 직접광. 광선 기능이 있는 높은 등급에서 켠다.
+    bool restir = false;
     // 유체 부품이 요청해도 이보다 많은 입자는 뿌리지 않는다.
     uint32_t fluidParticleLimit = 32768;
     // 사람이 읽을 판정 근거. 편집기가 그대로 보여 준다.

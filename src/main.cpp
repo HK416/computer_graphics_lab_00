@@ -66,6 +66,12 @@ int main(int argc, char* argv[]) {
             options.reflectionsGiven = true;
         } else if (argument == "--no-denoise") {
             options.reflectionDenoise = false;
+        } else if (argument == "--restir") {
+            options.restir = true;
+            options.restirGiven = true;
+        } else if (argument == "--no-restir") {
+            options.restir = false;
+            options.restirGiven = true;
         } else if (argument == "--no-colliders") {
             options.showColliders = false;
         } else if (argument == "--no-occlusion") {

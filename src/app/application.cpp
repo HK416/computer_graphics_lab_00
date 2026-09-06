@@ -143,6 +143,7 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
         settings.occlusionCulling = options.occlusionCulling;
         settings.useReflections = options.reflections;
         settings.reflectionDenoise = options.reflectionDenoise;
+        settings.useRestir = options.restir;
         if (!options.meshShader) {
             settings.useMeshShader = false;
         }
@@ -306,6 +307,9 @@ void Application::applyHardwareProfile() {
         settings.useReflections = hardwareProfile.reflections;
     }
     settings.useRayQueryShadows = hardwareProfile.rayQueryShadows;
+    if (!options.restirGiven) {
+        settings.useRestir = hardwareProfile.restir;
+    }
 
     spdlog::info("자동 튜닝({}): 등급 {}", gfx::autoTuneName(options.autoTune), gfx::tierName(hardwareProfile.tier));
     for (const std::string& reason : hardwareProfile.reasons) {

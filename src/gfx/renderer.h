@@ -58,6 +58,7 @@ inline constexpr uint32_t DEBUG_MODE_CULL_PHASE = 9;
 inline constexpr uint32_t DEBUG_MODE_REFLECTION_RAW = 10;
 inline constexpr uint32_t DEBUG_MODE_REFLECTION = 11;
 inline constexpr uint32_t DEBUG_MODE_REFLECTION_FILTERED = 12;
+inline constexpr uint32_t DEBUG_MODE_RESTIR_LIGHT = 13;
 
 // 경로 추적이 그릴 수 있는 디버그 뷰인지. meshlet 과 LOD 는 하위 가속 구조가 메쉬 단위 LOD 0 이라
 // 개념 자체가 없고, 캐스케이드는 그림자 맵을 읽지 않으며, 모션 벡터는 경로 추적 프레임에 갱신되지
@@ -184,6 +185,7 @@ struct RenderTargets {
     // 경로 추적 프레임에는 이 이미지가 GENERAL 스토리지라 이 슬롯을 읽으면 안 된다.
     uint32_t guideNormalSlot = 0;
     uint32_t guideSpecularAlbedoSlot = 0;
+    uint32_t guideDiffuseAlbedoSlot = 0;
     uint32_t guideRoughnessStorageSlot = 0;
     uint32_t guideDepthStorageSlot = 0;
 
@@ -213,6 +215,12 @@ struct RenderTargets {
     uint32_t reflectionFilteredStorageSlot = 0;
     // 반사 셰이더가 읽는 슬롯 묶음(ReflectSlots). 프레임 홀짝마다 하나. 슬롯을 배정할 때 채운다.
     std::array<Buffer, 2> reflectSlotBuffers;
+    // ReSTIR 저장소(rgba32f: 0 히스토리, 1 스크래치 — 교대하지 않음)와 시간 검증 기하(rgba16f, 홀짝 교대).
+    std::array<Image, 2> restirReservoir;
+    std::array<Image, 2> restirGeometry;
+    std::array<uint32_t, 2> restirReservoirStorageSlots{};
+    std::array<uint32_t, 2> restirGeometryStorageSlots{};
+    std::array<Buffer, 2> restirSlotBuffers;
     // 반사 컴퓨트가 HDR 색상에 직접 더할 때 쓰는 rgba16f 스토리지 슬롯.
     uint32_t colorStorageSlot = 0;
 
@@ -311,6 +319,8 @@ public:
     // 광선 기능이 처음 필요할 때 하위 가속 구조를 세운다. 예산을 넘으면 사유를 남기고 광선 기능을 끈다.
     bool ensureBottomLevel();
     bool reflectionsActive() const;
+    // ReSTIR 직접광이 이번 프레임 도는지. 설정이 켜져 있고 광선 질의가 있으며 경로 추적이 아닐 때.
+    bool restirActive() const;
     LodNetwork lodNetwork;
     uint32_t lastSelectedTriangles = 0;
 
@@ -439,6 +449,8 @@ private:
     // 광선 질의 컴퓨트로 반사를 추적하고 시간축으로 누적해 색상에 더한다. 광선 질의가 있을 때만 만든다.
     void createReflectionPipelines();
     void recordReflectionPass(VkCommandBuffer commandBuffer, const Frame& frame);
+    void createRestirPipelines();
+    void recordRestirPass(VkCommandBuffer commandBuffer, const Frame& frame);
     // Bloom 밉 사슬과 자동 노출. 톤 매핑이 읽을 이미지를 원본으로 받는다.
     void recordPostEffects(VkCommandBuffer commandBuffer,
                            const scene::PostProcess& post,
@@ -494,6 +506,12 @@ private:
     VkPipeline reflectionTracePipeline = VK_NULL_HANDLE;
     VkPipeline reflectionResolvePipeline = VK_NULL_HANDLE;
     VkPipeline reflectionFilterPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout restirPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline restirTemporalPipeline = VK_NULL_HANDLE;
+    VkPipeline restirSpatialPipeline = VK_NULL_HANDLE;
+    // ReSTIR 히스토리가 이어지는지와 지난 프레임 광원 수(광원 번호가 어긋나면 버린다).
+    bool restirHistoryValid = false;
+    uint32_t restirLastLightCount = 0;
     // 지난 프레임에 반사 히스토리를 남겼는지. 아니면 이번 해결은 히스토리를 버린다.
     bool reflectionHistoryValid = false;
     VkPipelineLayout bloomPipelineLayout = VK_NULL_HANDLE;

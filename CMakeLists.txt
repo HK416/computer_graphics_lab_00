@@ -100,6 +100,7 @@ set(shader_sources
     shaders/ssao.comp
     shaders/ssao_blur.comp
     shaders/reflect.comp
+    shaders/restir_di.comp
     shaders/cull_meshlets.comp
     shaders/skin.comp
     shaders/skin_bounds.comp
@@ -221,6 +222,7 @@ add_executable(cg_lab
     src/gfx/renderer_pathtrace.cpp
     src/gfx/renderer_post.cpp
     src/gfx/renderer_reflection.cpp
+    src/gfx/renderer_restir.cpp
     src/gfx/renderer_scene.cpp
     src/gfx/renderer_shadow.cpp
     src/gfx/renderer_ssao.cpp

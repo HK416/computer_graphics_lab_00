@@ -783,7 +783,8 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
         jitterNdc, reflectionsActive() ? settings.reflectionRoughnessCutoff : 0.0F, settings.reflectionIntensity};
     camera->fog = glm::vec4{scene.post.fogColor, scene.post.fogDensity};
     camera->fogParameters = glm::vec4{scene.post.fogHeight, scene.post.fogFalloff, 0.0F, 0.0F};
-    camera->flags = glm::uvec4{settings.debugMode, 0U, 0U, 0U};
+    // y: ReSTIR 가 직접광을 맡으면 1. 래스터의 불투명 픽셀은 광원 루프를 건너뛴다.
+    camera->flags = glm::uvec4{settings.debugMode, restirActive() ? 1U : 0U, 0U, 0U};
     previousViewProjection = unjitteredViewProjection;
     temporalResetThisFrame = temporalReset;
 

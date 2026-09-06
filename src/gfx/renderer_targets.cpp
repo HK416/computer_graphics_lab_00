@@ -171,8 +171,13 @@ void Renderer::createRenderTargets() {
     for (size_t i = 0; i < 2; ++i) {
         destroyImage(context, targets.reflectionMoments[i]);
         targets.reflectionMoments[i] = createImage(context, momentsDesc, i == 0 ? "반사 모멘트 0" : "반사 모멘트 1");
+        destroyImage(context, targets.restirReservoir[i]);
+        targets.restirReservoir[i] = createImage(context, momentsDesc, i == 0 ? "ReSTIR 히스토리" : "ReSTIR 스크래치");
+        destroyImage(context, targets.restirGeometry[i]);
+        targets.restirGeometry[i] = createImage(context, reflectionDesc, i == 0 ? "ReSTIR 기하 0" : "ReSTIR 기하 1");
     }
     reflectionHistoryValid = false;
+    restirHistoryValid = false;
 
     destroyImage(context, targets.pathAccumulation);
     ImageDesc pathAccumulationDesc = colorDesc;
@@ -334,6 +339,18 @@ void Renderer::createRenderTargets() {
         targets.guideNormalStorageSlot = bindless.addStorageImageRgba16(targets.guideNormal.view);
         targets.guideNormalSlot = bindless.add(targets.guideNormal.view, postSampler);
         targets.guideSpecularAlbedoSlot = bindless.add(targets.guideSpecularAlbedo.view, postSampler);
+        targets.guideDiffuseAlbedoSlot = bindless.add(targets.guideDiffuseAlbedo.view, postSampler);
+        for (size_t i = 0; i < 2; ++i) {
+            targets.restirReservoirStorageSlots[i] = bindless.addStorageImageRgba(targets.restirReservoir[i].view);
+            targets.restirGeometryStorageSlots[i] = bindless.addStorageImageRgba16(targets.restirGeometry[i].view);
+        }
+        for (Buffer& buffer : targets.restirSlotBuffers) {
+            buffer = createBuffer(context,
+                                  sizeof(RestirSlots),
+                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                  MemoryLocation::HOST_WRITE,
+                                  "ReSTIR 슬롯");
+        }
         targets.guideRoughnessStorageSlot = bindless.addStorageImage(targets.guideRoughness.view);
         targets.guideDepthStorageSlot = bindless.addStorageImage(targets.guideDepth.view);
         targets.colorStorageSlot = bindless.addStorageImageRgba16(targets.color.view);
@@ -403,6 +420,19 @@ void Renderer::createRenderTargets() {
             slots.colorStorage = targets.colorStorageSlot;
             std::memcpy(targets.reflectSlotBuffers[parity].mapped, &slots, sizeof(slots));
             vmaFlushAllocation(context.allocator, targets.reflectSlotBuffers[parity].allocation, 0, VK_WHOLE_SIZE);
+
+            RestirSlots restir{};
+            restir.depth = targets.depthSlot;
+            restir.normalRoughness = targets.guideNormalSlot;
+            restir.diffuseAlbedo = targets.guideDiffuseAlbedoSlot;
+            restir.velocity = targets.velocitySlot;
+            restir.historyStorage = targets.restirReservoirStorageSlots[0];
+            restir.scratchStorage = targets.restirReservoirStorageSlots[1];
+            restir.geometryReadStorage = targets.restirGeometryStorageSlots[read];
+            restir.geometryWriteStorage = targets.restirGeometryStorageSlots[write];
+            restir.colorStorage = targets.colorStorageSlot;
+            std::memcpy(targets.restirSlotBuffers[parity].mapped, &restir, sizeof(restir));
+            vmaFlushAllocation(context.allocator, targets.restirSlotBuffers[parity].allocation, 0, VK_WHOLE_SIZE);
         }
     } else {
         bindless.update(targets.colorSlot, targets.color.view, postSampler);
@@ -421,6 +451,11 @@ void Renderer::createRenderTargets() {
         bindless.updateStorageImageRgba16(targets.guideNormalStorageSlot, targets.guideNormal.view);
         bindless.update(targets.guideNormalSlot, targets.guideNormal.view, postSampler);
         bindless.update(targets.guideSpecularAlbedoSlot, targets.guideSpecularAlbedo.view, postSampler);
+        bindless.update(targets.guideDiffuseAlbedoSlot, targets.guideDiffuseAlbedo.view, postSampler);
+        for (size_t i = 0; i < 2; ++i) {
+            bindless.updateStorageImageRgba(targets.restirReservoirStorageSlots[i], targets.restirReservoir[i].view);
+            bindless.updateStorageImageRgba16(targets.restirGeometryStorageSlots[i], targets.restirGeometry[i].view);
+        }
         bindless.updateStorageImage(targets.guideRoughnessStorageSlot, targets.guideRoughness.view);
         bindless.updateStorageImage(targets.guideDepthStorageSlot, targets.guideDepth.view);
         bindless.updateStorageImageRgba16(targets.colorStorageSlot, targets.color.view);
@@ -502,6 +537,9 @@ const char* Renderer::debugModeBlockedReason(uint32_t mode) const {
          mode == DEBUG_MODE_REFLECTION_FILTERED) &&
         !rayQueryShadowsAvailable()) {
         return "광선 질의가 없어 반사를 계산하지 않는다";
+    }
+    if (mode == DEBUG_MODE_RESTIR_LIGHT && !rayQueryShadowsAvailable()) {
+        return "광선 질의가 없어 ReSTIR 가 돌지 않는다";
     }
     // mesh shader 경로는 meshlet 번호를 mesh 셰이더가 직접 넘기므로 gl_DrawID 가 필요 없다.
     if ((mode == DEBUG_MODE_MESHLET || mode == DEBUG_MODE_LOD) && !useMeshPath() && !context.caps.shaderDrawIndex) {

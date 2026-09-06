@@ -61,6 +61,13 @@ struct RenderSettings {
     // 반사 디노이저: 깊이·노멀로 히스토리를 검증하고, 매끈한 면은 히트 거리의 가상점으로 되짚고, 휘도 분산으로
     // 가중한 à-trous 를 세 번 돈다. 끄면 옛 누적만 한다(바이트 동일).
     bool reflectionDenoise = true;
+    // ReSTIR 직접광: 불투명 픽셀의 직접광을 광원 후보 재추출 + 시간·공간 재사용 + 광선 가시성으로 계산한다. 광원
+    // 수와 무관하게 픽셀당 광선 하나. 광선 질의가 있어야 하고 경로 추적 중에는 쉰다. 켜면 래스터 광원 루프는
+    // 불투명을 건너뛴다.
+    bool useRestir = false;
+    uint32_t restirCandidates = 8;
+    bool restirTemporal = true;
+    bool restirSpatial = true;
     // 장면 반지름에 대한 비율. 장면 크기가 제각각이라 절대 길이로 두지 않는다.
     float ssaoRadius = 0.04F;
     float ssaoIntensity = 1.0F;

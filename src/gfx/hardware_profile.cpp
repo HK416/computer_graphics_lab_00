@@ -104,6 +104,7 @@ HardwareProfile chooseProfile(const ProfileInputs& inputs, AutoTune level) {
         profile.shadowCascades = 4;
         profile.reflections = rayReady;
         profile.rayQueryShadows = aggressive && rayReady;
+        profile.restir = rayReady;
         profile.fluidParticleLimit = 32768;
         break;
     }
@@ -121,6 +122,9 @@ HardwareProfile chooseProfile(const ProfileInputs& inputs, AutoTune level) {
     }
     if (profile.rayQueryShadows) {
         profile.reasons.push_back("가까운 그림자를 광선으로 판정한다");
+    }
+    if (profile.restir) {
+        profile.reasons.push_back("직접광을 ReSTIR 로 계산한다(광원마다 광선 그림자)");
     }
     if (!inputs.meshShader) {
         profile.reasons.push_back("mesh shader 가 없어 고전 경로로 돈다");

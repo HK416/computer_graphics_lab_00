@@ -39,7 +39,7 @@ float screenSpaceOcclusion() {
 
 // 톤 매핑 이전의 선형 HDR 색과 알파를 돌려준다. 안내 버퍼용 노멀·거칠기와, 광선 반사가 곱할
 // 스페큘러 가중치도 함께 내놓는다.
-vec4 shadeSurface(out vec4 normalRoughness, out vec3 reflectionWeight) {
+vec4 shadeSurface(out vec4 normalRoughness, out vec3 reflectionWeight, out vec4 diffuseAlbedo) {
     Material material = pushConstants.materials.items[inMaterialIndex];
     // 재질 읽기와 노멀 맵은 경로 추적 적중 셰이더와 같은 함수를 쓴다.
     MaterialSample sampled = sampleMaterial(material, inUv);
@@ -57,12 +57,13 @@ vec4 shadeSurface(out vec4 normalRoughness, out vec3 reflectionWeight) {
     surface.metallic = sampled.metallic;
     surface.roughness = sampled.roughness;
 
-    // 조명이 많아도 그냥 훑는다.
+    // 조명이 많아도 그냥 훑는다. ReSTIR 직접광(camera.flags.y)이 켜져 있으면 불투명·컷오프 픽셀은 restir_di.comp
+    // 가 직접광을 맡으므로 건너뛴다. 반투명은 화면 공간 표면이 없어 루프를 그대로 돈다.
     //
-    // ponytail: 화면 전체에 대한 선형 순회라 조명이 수십 개를 넘어가면 타일/클러스터 컬링으로
-    // 올려야 한다. 편집기 규모에서는 이 편이 훨씬 단순하다.
+    // ponytail: 선형 순회라 조명이 수십 개를 넘어가면 반투명·물 표면은 느려진다. 그쪽은 타일/클러스터 컬링이 답이다.
     vec3 color = vec3(0.0);
-    uint lightCount = pushConstants.camera.item.shading.x;
+    bool restirLighting = ALPHA_MODE_VARIANT != ALPHA_MODE_TRANSLUCENT && pushConstants.camera.item.flags.y != 0u;
+    uint lightCount = restirLighting ? 0u : pushConstants.camera.item.shading.x;
     for (uint i = 0; i < lightCount; ++i) {
         Light light = pushConstants.lights.items[i];
         vec3 lightDirection;
@@ -83,6 +84,7 @@ vec4 shadeSurface(out vec4 normalRoughness, out vec3 reflectionWeight) {
     reflectionWeight =
         traceReflection ? specularAlbedo(camera, surface) * ambientOcclusion * camera.ambient.rgb : vec3(0.0);
     normalRoughness = vec4(surface.normal, surface.roughness);
+    diffuseAlbedo = vec4(surface.albedo, surface.metallic);
     color += sampled.emissive;
 
     // 안개는 카메라에서 표면까지의 구간에 건다. 반투명도 같은 식으로 잠긴다.

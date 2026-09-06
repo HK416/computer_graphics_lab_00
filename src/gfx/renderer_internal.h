@@ -269,6 +269,31 @@ struct ReflectSlots {
 };
 static_assert(sizeof(ReflectSlots) == 60, "반사 슬롯 배치가 셰이더와 어긋난다");
 
+// ReSTIR 컴퓨트의 슬롯 묶음. shaders/restir_di.comp 의 RestirSlots 와 배치가 같아야 한다. 저장소·기하 이미지는
+// 비트를 그대로 담아 imageLoad 로 읽으므로 스토리지 슬롯만 있다. 기하는 프레임 홀짝으로 읽는 쪽과 쓰는 쪽이 바뀐다.
+struct RestirSlots {
+    uint32_t depth;
+    uint32_t normalRoughness;
+    uint32_t diffuseAlbedo;
+    uint32_t velocity;
+    uint32_t historyStorage;
+    uint32_t scratchStorage;
+    uint32_t geometryReadStorage;
+    uint32_t geometryWriteStorage;
+    uint32_t colorStorage;
+};
+static_assert(sizeof(RestirSlots) == 36, "ReSTIR 슬롯 배치가 셰이더와 어긋난다");
+
+// shaders/restir_di.comp 의 동명 블록과 배치가 같아야 한다.
+struct RestirPushConstants {
+    VkDeviceAddress camera;
+    VkDeviceAddress lights;
+    VkDeviceAddress slots;
+    uint32_t frameIndex;
+    // 하위 8비트 후보 수, 비트 8 시간 재사용, 비트 9 공간 재사용, 비트 10 히스토리 버림, 비트 20 부터 디버그 모드.
+    uint32_t params;
+};
+
 struct ReflectPushConstants {
     VkDeviceAddress vertices;
     VkDeviceAddress skinnedVertices;

@@ -99,6 +99,7 @@ Renderer::Renderer(Context& context,
     }
     createFluidSurfacePipelines();
     createReflectionPipelines();
+    createRestirPipelines();
     createCullPipeline();
     createSkinPipeline();
     createShadowPipeline();
@@ -155,6 +156,9 @@ Renderer::~Renderer() {
     vkDestroyPipelineLayout(context.device, skinPipelineLayout, nullptr);
     destroyBuffer(context, skinnedBoundsBuffer);
     destroyBuffer(context, skinnedVertexBuffer);
+    vkDestroyPipeline(context.device, restirSpatialPipeline, nullptr);
+    vkDestroyPipeline(context.device, restirTemporalPipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, restirPipelineLayout, nullptr);
     vkDestroyPipeline(context.device, reflectionFilterPipeline, nullptr);
     vkDestroyPipeline(context.device, reflectionResolvePipeline, nullptr);
     vkDestroyPipeline(context.device, reflectionTracePipeline, nullptr);
@@ -217,6 +221,11 @@ Renderer::~Renderer() {
     destroyImage(context, targets.ssao);
     destroyImage(context, targets.ssaoRaw);
     destroyImage(context, targets.pathAccumulation);
+    for (size_t i = 0; i < 2; ++i) {
+        destroyImage(context, targets.restirReservoir[i]);
+        destroyImage(context, targets.restirGeometry[i]);
+        destroyBuffer(context, targets.restirSlotBuffers[i]);
+    }
     destroyImage(context, targets.reflectionFiltered);
     destroyImage(context, targets.reflectionMoments[1]);
     destroyImage(context, targets.reflectionMoments[0]);
@@ -497,9 +506,16 @@ void Renderer::recordCommands(Frame& frame,
           storage(targets.reflectionMoments[1],
                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT),
-          storage(targets.reflectionFiltered,
-                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)},
+          storage(
+              targets.reflectionFiltered, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT),
+          storage(
+              targets.restirReservoir[0], VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT),
+          storage(
+              targets.restirReservoir[1], VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT),
+          storage(
+              targets.restirGeometry[0], VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT),
+          storage(
+              targets.restirGeometry[1], VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)},
          {},
          [&](VkCommandBuffer) { postTargetsNeedInit = false; }});
 
@@ -631,11 +647,12 @@ void Renderer::recordCommands(Frame& frame,
         vkCmdPushConstants(cmd, sceneLayout, scenePushStages, 0, sizeof(scenePushConstants), &scenePushConstants);
     };
     auto drawOpaque = [&](VkCommandBuffer cmd, VkAttachmentLoadOp loadOp, uint32_t phase) {
-        std::array<VkRenderingAttachmentInfo, 4> opaqueColor{
+        std::array<VkRenderingAttachmentInfo, 5> opaqueColor{
             colorAttachment(targets.color.view, loadOp, {{0.05F, 0.05F, 0.07F, 1.0F}}),
             colorAttachment(targets.velocity.view, loadOp, {{0.0F, 0.0F, 0.0F, 0.0F}}),
             colorAttachment(targets.guideNormal.view, loadOp, {{0.0F, 0.0F, 0.0F, 0.0F}}),
-            colorAttachment(targets.guideSpecularAlbedo.view, loadOp, {{0.0F, 0.0F, 0.0F, 0.0F}})};
+            colorAttachment(targets.guideSpecularAlbedo.view, loadOp, {{0.0F, 0.0F, 0.0F, 0.0F}}),
+            colorAttachment(targets.guideDiffuseAlbedo.view, loadOp, {{0.0F, 0.0F, 0.0F, 0.0F}})};
         VkRenderingAttachmentInfo depth = depthAttachment;
         depth.loadOp = loadOp;
 
@@ -663,13 +680,15 @@ void Renderer::recordCommands(Frame& frame,
                 colorWrite(targets.velocity, true),
                 colorWrite(targets.guideNormal, true),
                 colorWrite(targets.guideSpecularAlbedo, true),
+                colorWrite(targets.guideDiffuseAlbedo, true),
                 depthWrite(true)},
                {},
                [&](VkCommandBuffer cmd) {
-                   // 광선 질의 그림자나 반사를 쓰면 TLAS 를 집합 1 로 함께 묶고, 장면이 바뀌었으면 먼저 다시
-                   // 만든다. 반사만 켜도 광선 질의 변종 프래그먼트가 돌지만, ambient.w 가 0 이라 그림자는
+                   // 광선 질의 그림자나 반사·ReSTIR 를 쓰면 TLAS 를 집합 1 로 함께 묶고, 장면이 바뀌었으면 먼저
+                   // 다시 만든다. 반사만 켜도 광선 질의 변종 프래그먼트가 돌지만, ambient.w 가 0 이라 그림자는
                    // 그림자 맵을 그대로 쓴다.
-                   rayQueryPass = (settings.useRayQueryShadows || reflectionsActive()) && rayQueryShadowsAvailable();
+                   rayQueryPass = (settings.useRayQueryShadows || reflectionsActive() || restirActive()) &&
+                                  rayQueryShadowsAvailable();
                    if (rayQueryPass) {
                        updateAccelerationStructures(cmd, scene);
                        rayQueryPass = rayTracer->ready();
@@ -705,6 +724,7 @@ void Renderer::recordCommands(Frame& frame,
                 colorWrite(targets.velocity, false),
                 colorWrite(targets.guideNormal, false),
                 colorWrite(targets.guideSpecularAlbedo, false),
+                colorWrite(targets.guideDiffuseAlbedo, false),
                 depthWrite(false)},
                {},
                [&](VkCommandBuffer cmd) { drawOpaque(cmd, VK_ATTACHMENT_LOAD_OP_LOAD, CULL_PHASE_SECOND); }});
@@ -714,7 +734,8 @@ void Renderer::recordCommands(Frame& frame,
                nullptr,
                raster,
                {sampled(targets.guideNormal, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT),
-                sampled(targets.guideSpecularAlbedo, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)},
+                sampled(targets.guideSpecularAlbedo, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT),
+                sampled(targets.guideDiffuseAlbedo, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)},
                {},
                {},
                [](VkCommandBuffer) {}});
@@ -768,6 +789,29 @@ void Renderer::recordCommands(Frame& frame,
                 colorWrite(targets.velocity, false),
                 depthWrite(false)},
                [&](VkCommandBuffer cmd) { recordFluidSurfacePass(cmd, frame, batches, scene); }});
+
+    // 2.5) ReSTIR 직접광. 불투명 표면의 직접광 전부를 여기서 더한다(래스터 루프는 건너뛰었다). 하늘이 먼저
+    //      채워져 있어야 되짚는 자리가 맞고, 반사보다 앞이라 두 패스가 같은 색상 버퍼에 차례로 더한다.
+    auto restirRuns = [&] { return !pathTracing && restirActive() && rayQueryPass; };
+    graph.add(
+        {"직접광 ReSTIR",
+         nullptr,
+         restirRuns,
+         {sampled(targets.guideNormal, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT),
+          sampled(targets.guideSpecularAlbedo, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT),
+          sampled(targets.guideDiffuseAlbedo, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)},
+         {},
+         {sampled(targets.velocity, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT),
+          colorWrite(targets.color, false),
+          depthWrite(false)},
+         [&](VkCommandBuffer cmd) { recordRestirPass(cmd, frame); }});
+    graph.add({"ReSTIR 히스토리 무효",
+               nullptr,
+               [&] { return !restirRuns(); },
+               {},
+               {},
+               {},
+               [&](VkCommandBuffer) { restirHistoryValid = false; }});
 
     // 3) 광선 반사. 불투명 깊이·노멀로 추적해 색상에 더한다. 하늘이 먼저 채워져 있어야 반사가
     //    되짚는 히스토리와 색상이 맞고, 반투명은 이 위에 합성된다. 패스 안에서 깊이·색상을 스토리지로

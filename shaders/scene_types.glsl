@@ -185,7 +185,7 @@ struct Camera {
     // x 기준 높이, y 높이 감쇠. zw 는 예약.
     vec4 fogParameters;
     // x 디버그 뷰(DEBUG_MODE_*). 푸시 상수가 128 바이트에 꽉 차서 프레임에 한 번 정해지는 값은 여기로
-    // 온다. yzw 예약.
+    // 온다. y ReSTIR 직접광이 켜져 있으면 1(불투명 픽셀은 광원 루프를 건너뛴다). zw 예약.
     uvec4 flags;
 };
 
@@ -238,6 +238,8 @@ struct DrawCommand {
 #define DEBUG_MODE_REFLECTION_RAW 10u
 #define DEBUG_MODE_REFLECTION 11u
 #define DEBUG_MODE_REFLECTION_FILTERED 12u
+// ReSTIR 가 픽셀마다 고른 광원 번호를 색으로.
+#define DEBUG_MODE_RESTIR_LIGHT 13u
 
 // 두 패스 오클루전 컬링의 단계. 컬 컴퓨트·태스크 셰이더가 판정에 쓰고 프래그먼트가 디버그 뷰에 쓴다.
 #define CULL_PHASE_NONE 0u   // 오클루전 끔. 후보면 그린다.

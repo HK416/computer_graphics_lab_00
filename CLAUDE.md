@@ -183,7 +183,7 @@ CPU 백엔드를 부르느라 `physics` 를 하나 본다.
 
 환경 맵 굽기(설정이 바뀔 때만) → 스킨 컴퓨트(변형 정점·meshlet 경계; 포즈가 바뀐 오브젝트만) → [강체 GPU 솔버: PhysicsPlugin 이 끼움] →
 유체 컴퓨트(입자 진행, 인스턴스와 TLAS 인스턴스 쓰기; CPU 백엔드는 지난 프레임이 띄운 스텝을 거둬 쓰고 노드 끝에서 다음 스텝을 백그라운드로 띄운다) → 그림자 패스 → [경로 추적] **또는** [컬(1차) → 불투명(1차, 끝에 유체 인스턴스 드로우)
-→ HZB → 컬(2차) → 불투명(2차) → 하늘 → 광선 반사 → OIT → 합성 → SSAO] → Bloom·자동 노출 → 시간축
+→ HZB → 컬(2차) → 불투명(2차) → 하늘 → 직접광 ReSTIR → 광선 반사 → OIT → 합성 → SSAO] → Bloom·자동 노출 → 시간축
 업스케일 → 톤 매핑 → 공간 업스케일 → UI.
 
 유체 입자 인스턴스는 오브젝트 인스턴스 **뒤**(`objects.size()` 부터)에 GPU 가 쓴다. CPU 는 앞쪽만
@@ -222,6 +222,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `FluidSurfacePushConstants` (`src/gfx/fluid.h`) | 동명 블록 (`shaders/fluid_surface_common.glsl`) |
 | `GpuFluidSurfaceInfo` `FLUID_FLAG_*` `FLUID_SURFACE_CUSTOM_INDEX` `FLUID_SURFACE_RAY_MASK` (`src/gfx/fluid.h`) | `FluidSurfaceInfo` `FLUID_FLAG_*` `FLUID_SURFACE_*` (`shaders/fluid_types.glsl`) |
 | `PathTracePushConstants` (`src/gfx/raytracing.cpp`) | 동명 블록 (`shaders/pathtrace_common.glsl`) — 128 바이트 한도라 작은 값은 16비트 둘씩 묶는다 |
+| `RestirPushConstants` `RestirSlots` (`src/gfx/renderer_internal.h`) | 동명 블록·구조체 (`shaders/restir_di.comp`); 저장소 인코딩은 `shaders/restir.glsl` 의 `Reservoir` |
 | `ReflectPushConstants` `ReflectSlots` (`src/gfx/renderer_internal.h`) | 동명 블록·구조체 (`shaders/reflect.comp`) — 슬롯은 버퍼로 넘기고 `samplesResetDebug`·`filterStep` 에 비트를 묶는다 |
 | `FluidDrawPushConstants` (`src/gfx/renderer_internal.h`) | 동명 블록 (`shaders/fluid_draw_common.glsl`) |
 | `physics::SurfaceVertex` (`src/physics/marching_cubes.h`) | `FluidSurfaceVertex` (`shaders/fluid_types.glsl`) |
