@@ -70,6 +70,8 @@ struct Options {
     // --restir / --no-restir: ReSTIR 직접광. 주지 않으면 자동 튜닝이 정한다.
     bool restir = false;
     bool restirGiven = false;
+    // --light-candidates <n>: 경로 추적·반사 NEE 와 ReSTIR 의 광원 후보 수. 0 이면 기본값. 1 이면 균등 선택과 같다.
+    uint32_t lightCandidates = 0;
     // 프레임마다 카메라를 이만큼(도) 궤도 회전한다. 정지 화면에서는 드러나지 않는 팝인을 재현한다.
     float orbitDegreesPerFrame = 0.0F;
     float triangleBudget = 0.0F;

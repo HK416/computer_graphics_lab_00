@@ -5,6 +5,7 @@
 #include "fog.glsl"
 #include "lighting.glsl"
 #include "pathtrace_common.glsl"
+#include "restir.glsl"
 
 layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevel;
 
@@ -54,15 +55,19 @@ vec2 skyVelocity(vec3 direction) {
     return (previousClip.xy / previousClip.w - current) * 0.5;
 }
 
-// 다음 사건 추정. 장면 조명 하나를 균등하게 골라 그림자 광선을 쏜다.
+// 다음 사건 추정. 광원 후보 몇 개를 그림자 없는 기여로 재추출(RIS, restir.glsl)해 하나를 고르고 그림자 광선을
+// 쏜다. 시간 재사용은 하지 않아 편향이 없고 누적과도 어긋나지 않는다. 후보가 1이면 균등 선택과 같다.
 vec3 nextEventEstimation(Surface surface, inout uint seed) {
     uint lightCount = pathTrace.camera.item.shading.x;
     if (lightCount == 0u) {
         return vec3(0.0);
     }
 
-    uint index = min(uint(randomFloat(seed) * float(lightCount)), lightCount - 1u);
-    Light light = pathTrace.lights.items[index];
+    Reservoir reservoir = risPickLight(pathTrace.lights, lightCount, surface, pathLightCandidates(), seed);
+    if (reservoir.light == RESTIR_NO_LIGHT || reservoir.w <= 0.0) {
+        return vec3(0.0);
+    }
+    Light light = pathTrace.lights.items[reservoir.light];
 
     vec3 lightDirection;
     float distanceToLight;
@@ -86,8 +91,8 @@ vec3 nextEventEstimation(Surface surface, inout uint seed) {
     if (shadowVisibility <= 0.0) {
         return vec3(0.0);
     }
-    // 균등하게 하나만 골랐으므로 개수를 곱해 되돌린다. BRDF 는 래스터 경로와 같은 것을 쓴다.
-    return evaluateBrdf(surface, lightDirection, radiance) * float(lightCount);
+    // 재추출 가중 W 가 «1 / 고른 확률» 의 추정치다. BRDF 는 래스터 경로와 같은 것을 쓴다.
+    return evaluateBrdf(surface, lightDirection, radiance) * reservoir.w;
 }
 
 // 첫 그림자 조명 하나만 보고 가시성을 잰다. 디버그 뷰 전용이며, 조명을 매 바운스 무작위로

@@ -91,6 +91,10 @@ uint pathDebugMode() {
 uint pathGuideDepthSlot() {
     return pathTrace.debugModeAndDepthSlot >> 16u;
 }
+// flags 의 비트 8~15: 다음 사건 추정이 재추출할 광원 후보 수.
+uint pathLightCandidates() {
+    return max((pathTrace.flags >> 8u) & 0xFFu, 1u);
+}
 
 // 그림자 광선의 마스크. 물 표면 인스턴스(마스크 0x01)를 지나가 물이 그림자를 던지지 않는다. 물 속 어두움은
 // 굴절 경로가 겪는 흡수가 낸다.

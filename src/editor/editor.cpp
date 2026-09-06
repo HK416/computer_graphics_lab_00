@@ -1797,6 +1797,14 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
             if (ImGui::SliderInt("프레임당 표본", &perFrame, 1, 16)) {
                 options.samplesPerFrame = static_cast<uint32_t>(perFrame);
             }
+            int lightCandidates = static_cast<int>(options.lightCandidates);
+            if (ImGui::SliderInt("광원 후보 수", &lightCandidates, 1, 32)) {
+                options.lightCandidates = static_cast<uint32_t>(lightCandidates);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "다음 사건 추정이 재추출(RIS)할 광원 후보 수. 광원이 많을수록 잡음이 준다. 1 이면 균등 선택");
+            }
             int maxSamples = static_cast<int>(options.maxSamples);
             if (ImGui::SliderInt("표본 상한", &maxSamples, 0, 4096, maxSamples == 0 ? "무제한" : "%d")) {
                 options.maxSamples = static_cast<uint32_t>(maxSamples);

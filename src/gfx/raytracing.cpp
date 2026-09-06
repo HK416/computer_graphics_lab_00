@@ -905,9 +905,11 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
     pushConstants.frameIndex = frameIndex;
     pushConstants.sampleCount = sampleCount;
     pushConstants.bouncesAndSamples = (options.maxBounces & 0xFFFFU) | (options.samplesPerFrame << 16);
+    // 비트 8~15 는 광원 후보 수(pathtrace_common.glsl 의 pathLightCandidates).
     pushConstants.flags = (options.nextEventEstimation ? PATH_FLAG_NEXT_EVENT : 0U) |
                           (options.russianRoulette ? PATH_FLAG_RUSSIAN_ROULETTE : 0U) |
-                          (guides.write ? PATH_FLAG_WRITE_GUIDES : 0U);
+                          (guides.write ? PATH_FLAG_WRITE_GUIDES : 0U) |
+                          (std::min(std::max(options.lightCandidates, 1U), 255U) << 8U);
     pushConstants.radianceClamp = options.radianceClamp;
     pushConstants.skyIntensity = options.skyIntensity;
     pushConstants.debugModeAndDepthSlot = (options.debugMode & 0xFFFFU) | (guides.depth << 16);

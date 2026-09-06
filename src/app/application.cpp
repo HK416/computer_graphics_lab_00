@@ -144,6 +144,10 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
         settings.useReflections = options.reflections;
         settings.reflectionDenoise = options.reflectionDenoise;
         settings.useRestir = options.restir;
+        if (options.lightCandidates > 0) {
+            settings.restirCandidates = options.lightCandidates;
+            settings.pathTrace.lightCandidates = options.lightCandidates;
+        }
         if (!options.meshShader) {
             settings.useMeshShader = false;
         }

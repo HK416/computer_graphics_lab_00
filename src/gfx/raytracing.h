@@ -30,6 +30,8 @@ struct PathTraceOptions {
     uint32_t maxSamples = 0;
     // 다음 사건 추정. 끄면 조명을 우연히 맞출 때만 밝아져 훨씬 느리게 수렴한다.
     bool nextEventEstimation = true;
+    // 다음 사건 추정이 광원을 고를 때 재추출(RIS)할 후보 수. 1 이면 균등 선택과 같다.
+    uint32_t lightCandidates = 8;
     bool russianRoulette = true;
     // 반딧불이 표본을 자르는 상한.
     float radianceClamp = 8.0F;

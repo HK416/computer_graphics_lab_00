@@ -107,6 +107,9 @@ void Renderer::recordReflectionPass(VkCommandBuffer commandBuffer, const Frame& 
     pushConstants.samplesResetDebug = (std::min(std::max(settings.reflectionMaxSamples, 1U), 0xFFFFU)) |
                                       (reset ? 1U << 16U : 0U) | (denoise ? 1U << 17U : 0U) |
                                       (settings.debugMode << 20U);
+    // 추적 단계가 읽는 광원 후보 수. 필터 반복은 하위 비트에 보폭을 덧씌운다.
+    const uint32_t CANDIDATE_BITS = std::min(std::max(settings.restirCandidates, 1U), 255U) << 16U;
+    pushConstants.filterStep = CANDIDATE_BITS;
 
     std::array<VkDescriptorSet, 2> sets{bindless.set(), rayTracer->accelerationSet()};
     vkCmdBindDescriptorSets(commandBuffer,
@@ -138,7 +141,7 @@ void Renderer::recordReflectionPass(VkCommandBuffer commandBuffer, const Frame& 
             memoryBarrier(VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                           VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
                               VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-            pushConstants.filterStep = step;
+            pushConstants.filterStep = step | CANDIDATE_BITS;
             vkCmdPushConstants(commandBuffer,
                                reflectionPipelineLayout,
                                VK_SHADER_STAGE_COMPUTE_BIT,

@@ -11,6 +11,7 @@
 #include "lighting.glsl"
 #include "material.glsl"
 #include "ray_query.glsl"
+#include "restir.glsl"
 #include "sampling.glsl"
 #include "scene_types.glsl"
 #include "water_shading.glsl"
@@ -76,7 +77,7 @@ layout(push_constant) uniform ReflectPushConstants {
     // 셋을 묶는다: 하위 16비트 누적 상한, 비트 16 히스토리 버림, 비트 17 디노이저 켬, 비트 20 부터 디버그 모드.
     uint samplesResetDebug;
     // à-trous: 하위 8비트 보폭, 비트 8 마지막 반복(색상에 더함), 비트 9 첫 반복(히스토리·모멘트에서 읽음),
-    // 비트 10 입력이 raw(아니면 filtered).
+    // 비트 10 입력이 raw(아니면 filtered). 비트 16~23 은 직접광의 광원 후보 수(추적 단계가 읽는다).
     uint filterStep;
 } push;
 
@@ -92,16 +93,22 @@ bool reflectDenoise() {
 uint reflectDebugMode() {
     return push.samplesResetDebug >> 20u;
 }
+uint reflectLightCandidates() {
+    return max((push.filterStep >> 16u) & 0xFFu, 1u);
+}
 
-// 직접광은 조명 하나를 균등하게 골라 그림자 광선 하나로 판정한다. 경로 추적의 다음 사건 추정과 같은 식이라
-// 시간축 누적이 평균을 맞춘다.
+// 직접광은 광원 후보를 재추출(RIS, restir.glsl)해 하나를 고르고 그림자 광선 하나로 판정한다. 경로 추적의 다음
+// 사건 추정과 같은 식이라 시간축 누적이 평균을 맞춘다.
 vec3 sampleDirectLight(Camera camera, Surface surface, inout uint seed) {
     uint lightCount = camera.shading.x;
     if (lightCount == 0u) {
         return vec3(0.0);
     }
-    uint index = min(uint(randomFloat(seed) * float(lightCount)), lightCount - 1u);
-    Light light = push.lights.items[index];
+    Reservoir reservoir = risPickLight(push.lights, lightCount, surface, reflectLightCandidates(), seed);
+    if (reservoir.light == RESTIR_NO_LIGHT || reservoir.w <= 0.0) {
+        return vec3(0.0);
+    }
+    Light light = push.lights.items[reservoir.light];
     vec3 lightDirection;
     float distanceToLight;
     vec3 radiance = sampleLightRadiance(light, surface.position, lightDirection, distanceToLight);
@@ -110,7 +117,7 @@ vec3 sampleDirectLight(Camera camera, Surface surface, inout uint seed) {
     }
     float visibility =
         rayQueryVisibility(topLevel, surface.position, surface.normal, lightDirection, min(distanceToLight - 1e-3, 1e4));
-    return evaluateBrdf(surface, lightDirection, radiance) * visibility * float(lightCount);
+    return evaluateBrdf(surface, lightDirection, radiance) * visibility * reservoir.w;
 }
 
 // 물 표면 히트. 마칭 큐브 정점을 바로 읽고, 래스터 물 표면과 같은 식(water_shading.glsl)으로 셰이딩한다. 두께
