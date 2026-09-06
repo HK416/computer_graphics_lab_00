@@ -984,7 +984,10 @@ DamagedHelmet 을 렌더 배율 0.5, 고정 LOD 로 그리고 4배 초표본 기
 소유하고 «스킨» 뒤에 «강체» 노드를 끼운다.
 
 지금 플러그인: 물리(CPU 스텝·GPU 솔버·«물리» 절), 유체(입자 상한·«유체» 절), 디버그 선(`--no-colliders`·«콜라이더
-표시» 절), 프로파일러(`--profile`·«프로파일러» 절·종료 시 로그). 그림자·SSAO·반사·IBL·컬링·Upscaling·Path Tracing 절은
+표시» 절·선 파이프라인과 «업스케일» 뒤에 끼우는 «디버그 선» 노드), 프로파일러(`--profile`·«프로파일러» 절·창·종료 시
+로그). 디버그 선 노드는 `FrameInfo` 가 넘기는 표시 대상과 깊이 이미지를 `reads`/`writes` 로 선언해 배리어를 그래프에
+맡긴다 — 플러그인이 이미지를 만지는 패스를 갖는 본보기다. `gfx::FluidSimulator` 는 인스턴스·TLAS 배치와 표면 패스가
+렌더러 안쪽과 열 군데 넘게 묶여 있어 Renderer 에 남긴다(`fluid_plugin.h` 표식). 그림자·SSAO·반사·IBL·컬링·Upscaling·Path Tracing 절은
 Renderer 필드만 만지므로 편집기(`editor.cpp`)에 그대로 있다 — 수명 주기가 없는 값 묶음을 플러그인으로 감싸면 구현
 하나짜리 인터페이스만 생긴다.
 

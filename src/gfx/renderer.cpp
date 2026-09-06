@@ -88,7 +88,6 @@ Renderer::Renderer(Context& context,
     createMeshPipelines();
     createPostPipelines();
     createBloomPipelines();
-    createDebugLinePipeline();
     // 두께 대상은 가산 혼합으로 쌓으므로 혼합을 지원하는 포맷이어야 한다.
     VkFormatProperties thicknessProperties{};
     vkGetPhysicalDeviceFormatProperties(context.physicalDevice, THICKNESS_FORMAT, &thicknessProperties);
@@ -143,8 +142,6 @@ Renderer::~Renderer() {
     }
     vkDestroyPipelineLayout(context.device, meshRayQueryPipelineLayout, nullptr);
     vkDestroyPipeline(context.device, wireframePipeline, nullptr);
-    vkDestroyPipeline(context.device, debugLinePipeline, nullptr);
-    vkDestroyPipelineLayout(context.device, debugLinePipelineLayout, nullptr);
     vkDestroyPipeline(context.device, fluidThicknessPipeline, nullptr);
     vkDestroyPipeline(context.device, fluidDepthPipeline, nullptr);
     vkDestroyPipeline(context.device, fluidSurfacePipeline, nullptr);
@@ -197,7 +194,6 @@ Renderer::~Renderer() {
     vkDestroySemaphore(context.device, frameTimeline, nullptr);
     destroyPresentSemaphores();
     for (Frame& frame : frames) {
-        destroyBuffer(context, frame.debugLineBuffer);
         destroyBuffer(context, frame.shadowDrawBuffer);
         destroyBuffer(context, frame.shadowMatrixBuffer);
         destroyBuffer(context, frame.lightBuffer);
@@ -1123,15 +1119,7 @@ void Renderer::recordCommands(Frame& frame,
                    vkCmdEndRendering(cmd);
                }});
 
-    // 7) 콜라이더 표시. 톤 매핑과 업스케일이 끝난 표시 해상도에 덧그린다. 여기서 그려야 노출과
-    // 업스케일이 색을 흔들지 않고, 깊이 버퍼를 텍스처로 읽어 물체 뒤로 숨을 수 있다.
-    graph.add({"디버그 선",
-               nullptr,
-               [&] { return settings.showColliders; },
-               {},
-               {},
-               {},
-               [&](VkCommandBuffer cmd) { recordDebugLines(cmd, frame, scene, currentDisplayExtent); }});
+    // 7) 콜라이더 표시(DebugLinesPlugin)는 «업스케일» 뒤에 끼어든다.
 
     // 8) 편집기 UI 를 스왑체인에 그린다. 표시 대상은 UI 가 샘플링할 수 있는 레이아웃으로 옮긴다.
     // 스왑체인 이미지는 프레임마다 새로 받아 그래프가 추적하지 않는다. 노드 안에서 전이한다.
@@ -1249,7 +1237,14 @@ void Renderer::recordCommands(Frame& frame,
                }});
 
     // 플러그인의 패스. 앵커 뒤에 끼우므로 위 노드가 모두 등록된 뒤에 부른다.
-    FrameInfo info{scene, frameIndex, static_cast<uint32_t>(frameIndex % FRAMES_IN_FLIGHT)};
+    FrameInfo info{scene,
+                   frameIndex,
+                   static_cast<uint32_t>(frameIndex % FRAMES_IN_FLIGHT),
+                   targets.present,
+                   targets.depth,
+                   targets.depthSlot,
+                   currentDisplayExtent,
+                   currentRenderExtent};
     for (PassHook& hook : passHooks) {
         hook(graph, info);
     }

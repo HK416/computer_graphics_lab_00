@@ -276,7 +276,7 @@ void Editor::build(scene::SceneManager& scenes, const gfx::GeometryStore& geomet
 
     // 콜라이더를 밝게 그릴 오브젝트. 삭제와 장면 열기가 선택을 바꾸므로 그것들을 다 처리한 뒤에
     // 넘긴다. 이 프레임의 렌더는 build 가 끝난 다음이다.
-    renderer.selectedObject = primarySelection();
+    selectedObject = primarySelection();
 
     updateHistory(scenes.active());
 

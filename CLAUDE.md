@@ -242,7 +242,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `scene::ColliderShape` (`src/scene/scene.h`) | `COLLIDER_SHAPE_*` (`collider_shapes.glsl`; `RIGID_SHAPE_*` `FLUID_COLLIDER_*` 는 그 별칭) |
 
 | `Options::debugMode`, `RenderSettings::debugMode` (`src/gfx/render_settings.h`) | `DEBUG_MODE_*` (`scene_types.glsl`) |
-| `DebugLineVertex` (`src/gfx/debug_lines.h`), `DebugLinePushConstants` (`renderer_internal.h`) | 동명 구조체 (`shaders/debug_line_common.glsl`) |
+| `DebugLineVertex` (`src/gfx/debug_lines.h`), `DebugLinePushConstants` (`src/app/plugins/debug_lines_plugin.cpp`) | 동명 구조체 (`shaders/debug_line_common.glsl`) |
 
 전부 `scalar` 레이아웃이다.
 

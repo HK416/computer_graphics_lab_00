@@ -234,7 +234,6 @@ add_executable(cg_lab
     src/gfx/render_graph.cpp
     src/gfx/renderer.cpp
     src/gfx/renderer_cull.cpp
-    src/gfx/renderer_debug_lines.cpp
     src/gfx/renderer_fluid_draw.cpp
     src/gfx/renderer_particle_draw.cpp
     src/gfx/renderer_geometry.cpp

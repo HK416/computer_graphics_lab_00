@@ -98,4 +98,35 @@ void imageBarrier(VkCommandBuffer commandBuffer,
                   uint32_t baseArrayLayer = 0,
                   uint32_t arrayLayerCount = VK_REMAINING_ARRAY_LAYERS);
 
+// 파이프라인·동적 렌더링에서 자주 쓰는 짧은 꼴. 렌더러와 자기 패스를 가진 플러그인이 함께 쓴다.
+inline VkPipelineShaderStageCreateInfo shaderStage(VkShaderStageFlagBits stage, VkShaderModule module) {
+    VkPipelineShaderStageCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    info.stage = stage;
+    info.module = module;
+    info.pName = "main";
+    return info;
+}
+
+inline VkRenderingAttachmentInfo colorAttachment(VkImageView view, VkAttachmentLoadOp loadOp, VkClearColorValue clear) {
+    VkRenderingAttachmentInfo info{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    info.imageView = view;
+    info.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    info.loadOp = loadOp;
+    info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    info.clearValue.color = clear;
+    return info;
+}
+
+inline void setFullViewport(VkCommandBuffer commandBuffer, VkExtent2D extent) {
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(extent.width);
+    viewport.height = static_cast<float>(extent.height);
+    viewport.maxDepth = 1.0F;
+    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.extent = extent;
+    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+}
+
 } // namespace gfx

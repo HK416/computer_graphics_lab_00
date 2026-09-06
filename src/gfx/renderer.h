@@ -15,7 +15,6 @@
 #include <vulkan/vulkan.h>
 
 #include "gfx/cloth.h"
-#include "gfx/debug_lines.h"
 #include "gfx/environment.h"
 #include "gfx/fluid.h"
 #include "gfx/lod_network.h"
@@ -310,6 +309,8 @@ public:
     };
     std::vector<TargetView> targetViews() const;
     VkImageView presentView() const { return targets.present.view; }
+    // 표시 대상 포맷. 크기가 바뀌어도 포맷은 그대로라 플러그인이 파이프라인을 한 번만 만든다.
+    VkFormat presentFormat() const { return targets.present.format; }
     // 대상이 다시 만들어질 때마다 증가한다. 편집기가 디스크립터를 다시 잡는 기준이다.
     uint64_t targetsGeneration() const { return generation; }
     VkFormat swapchainFormat() const;
@@ -322,8 +323,6 @@ public:
     bool capturePresent = false;
     void waitIdle();
 
-    // 밝게 그릴 오브젝트. 편집기가 고른 것을 넣는다.
-    int32_t selectedObject = -1;
     uint32_t shadowLayersDrawn() const { return shadowLayersRedrawn; }
     uint32_t shadowDrawCount() const { return shadowDrawsIssued; }
     uint32_t shadowDrawCandidates() const { return shadowDrawsTotal; }
@@ -376,10 +375,17 @@ public:
     }
     // 플러그인이 렌더 그래프에 패스를 끼우는 훅. recordCommands 가 자기 노드를 다 넣은 뒤 등록 순서대로 부른다.
     // 훅은 graph.addAfter(앵커, 노드) 로 끼운다. 앵커 이름은 recordCommands 의 노드 이름이다.
+    // 이미지는 플러그인 노드가 reads/writes 로 선언하고 첨부물로 열 수 있게 넘긴다. 깊이는 bindless 슬롯으로도.
     struct FrameInfo {
         const scene::Scene& scene;
         uint64_t frameIndex;
         uint32_t frameSlot;
+        // 표시 해상도의 톤 매핑·업스케일 결과. UI 앞에 덧그리는 패스가 쓴다.
+        const Image& present;
+        const Image& depth;
+        uint32_t depthSlot;
+        VkExtent2D displayExtent;
+        VkExtent2D renderExtent;
     };
     using PassHook = std::function<void(RenderGraph&, const FrameInfo&)>;
     void addPass(PassHook hook) { passHooks.push_back(std::move(hook)); }
@@ -423,9 +429,6 @@ private:
         // 시점별로 컬링해 압축한 그림자 그리기 명령. 시점 하나가 알파 경로 둘을 쓴다.
         Buffer shadowDrawBuffer;
         uint32_t shadowDrawCapacity = 0;
-        // 디버그 선의 정점. 콜라이더 표시를 켰을 때만 채운다.
-        Buffer debugLineBuffer;
-        uint32_t debugLineCapacity = 0;
         uint32_t lightCapacity = 0;
         uint32_t instanceCapacity = 0;
         uint32_t groupCapacity = 0;
@@ -473,10 +476,6 @@ private:
     void createShadowPipeline();
     void createSsaoPipelines();
     void createBloomPipelines();
-    // 편집기의 콜라이더·유체 경계 표시. 톤 매핑과 공간 업스케일 뒤, UI 앞에 표시 해상도로 그린다.
-    void createDebugLinePipeline();
-    void reserveDebugLines(Frame& frame, uint32_t vertexCount);
-    void recordDebugLines(VkCommandBuffer commandBuffer, Frame& frame, const scene::Scene& scene, VkExtent2D extent);
     // 광선 질의 컴퓨트로 반사를 추적하고 시간축으로 누적해 색상에 더한다. 광선 질의가 있을 때만 만든다.
     void createReflectionPipelines();
     void recordReflectionPass(VkCommandBuffer commandBuffer, const Frame& frame);
@@ -573,10 +572,6 @@ private:
     VkPipeline histogramPipeline = VK_NULL_HANDLE;
     VkPipelineLayout exposurePipelineLayout = VK_NULL_HANDLE;
     VkPipeline exposurePipeline = VK_NULL_HANDLE;
-    VkPipelineLayout debugLinePipelineLayout = VK_NULL_HANDLE;
-    VkPipeline debugLinePipeline = VK_NULL_HANDLE;
-    // 프레임마다 다시 채우는 선분 목록. 벡터를 그대로 두어 할당을 되쓴다.
-    std::vector<DebugLineVertex> debugLineVertices;
     // 자동 노출. 히스토그램은 프레임마다 지우고, 노출 값은 프레임을 넘어 적응한다.
     Buffer histogramBuffer;
     Buffer exposureBuffer;

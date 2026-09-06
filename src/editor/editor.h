@@ -217,6 +217,8 @@ public:
         bool gpuAvailable = false;
         uint32_t gpuBodies = 0;
     } rigidStatus;
+    // 콜라이더를 밝게 그릴 오브젝트. 디버그 선 플러그인이 읽는다.
+    int32_t selectedObject = -1;
 };
 
 } // namespace editor
