@@ -1063,8 +1063,8 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip(surfaceUsable
                                   ? "표면은 마칭 큐브로 등치면을 뽑아 물처럼 그린다.\n"
-                                    "Path Tracing 은 이 표면을 굴절·흡수로 추적한다. Ray Traced Reflections 와\n"
-                                    "그림자는 물을 지나간다"
+                                    "Path Tracing 은 이 표면을 굴절·흡수로 추적하고 Ray Traced Reflections 는\n"
+                                    "«반사 + 물빛» 으로 본다. 그림자는 받지만 던지지는 않는다"
                                   : "이 장치에서는 표면 컴퓨트를 만들지 못했다. CPU 백엔드로는 쓸 수 있다");
         }
         if (fluid.display == scene::FluidDisplay::SURFACE) {

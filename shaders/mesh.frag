@@ -35,7 +35,9 @@ vec4 debugColor() {
         for (uint i = 0; i < lightCount; ++i) {
             Light light = pushConstants.lights.items[i];
             if (uint(light.colorType.w) == LIGHT_TYPE_DIRECTIONAL) {
-                return vec4(debugPalette(shadowCascadeIndex(light, inWorldPosition) * 613u + 7u), 1.0);
+                return vec4(
+                    debugPalette(shadowCascadeIndex(pushConstants.camera.item, light, inWorldPosition) * 613u + 7u),
+                    1.0);
             }
         }
         return vec4(0.0);
@@ -50,7 +52,13 @@ vec4 debugColor() {
                 vec3 toLight = uint(light.colorType.w) == LIGHT_TYPE_DIRECTIONAL
                                    ? -light.directionIntensity.xyz
                                    : normalize(light.positionRange.xyz - inWorldPosition);
-                return vec4(vec3(shadowFactor(light, inWorldPosition, normal, toLight)), 1.0);
+                return vec4(vec3(shadowFactor(pushConstants.shadowMatrices,
+                                              pushConstants.camera.item,
+                                              light,
+                                              inWorldPosition,
+                                              normal,
+                                              toLight)),
+                            1.0);
             }
         }
         return vec4(1.0, 0.0, 1.0, 1.0);

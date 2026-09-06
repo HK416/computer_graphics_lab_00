@@ -71,7 +71,12 @@ vec4 shadeSurface(out vec4 normalRoughness, out vec3 reflectionWeight, out vec4 
         if (contribution == vec3(0.0)) {
             continue;
         }
-        color += contribution * shadowFactor(light, surface.position, surface.normal, lightDirection);
+        color += contribution * shadowFactor(pushConstants.shadowMatrices,
+                                             pushConstants.camera.item,
+                                             light,
+                                             surface.position,
+                                             surface.normal,
+                                             lightDirection);
     }
 
     float ambientOcclusion = sampled.occlusion * screenSpaceOcclusion();

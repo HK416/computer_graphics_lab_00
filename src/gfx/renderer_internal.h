@@ -384,8 +384,8 @@ struct FluidDrawPushConstants {
     glm::vec4 absorption{0.0F};
     uint32_t thicknessTexture = 0;
     uint32_t pad0 = 0;
-    uint32_t pad1 = 0;
-    uint32_t pad2 = 0;
+    // 그림자 행렬. 물 표면이 그림자 맵을 읽을 때 shadow.glsl 에 넘긴다.
+    VkDeviceAddress shadowMatrices = 0;
 };
 static_assert(sizeof(FluidDrawPushConstants) == 72, "물 표면 푸시 상수 배치가 셰이더와 어긋난다");
 

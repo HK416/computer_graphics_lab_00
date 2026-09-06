@@ -200,6 +200,7 @@ void Renderer::recordFluidSurfacePass(VkCommandBuffer commandBuffer,
         push.waterColor = glm::vec4{settings.waterColor, settings.surfaceRoughness};
         push.absorption = glm::vec4{settings.absorption, settings.thicknessScale};
         push.thicknessTexture = thicknessSlot;
+        push.shadowMatrices = frame.shadowMatrixBuffer.address;
         vkCmdPushConstants(commandBuffer,
                            fluidSurfaceLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

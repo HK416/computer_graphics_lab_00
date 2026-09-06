@@ -3,13 +3,11 @@
 
 #include "fluid_types.glsl"
 #include "lighting.glsl"
+#include "shadow.glsl"
 
-// 물 표면을 그리는 두 패스(두께 · 표면)의 푸시 상수. src/gfx/renderer.h 의 FluidDrawPushConstants 와
-// 배치가 같아야 한다(scalar).
-//
-// 그림자는 넣지 않았다. shadow.glsl 이 장면 푸시 상수 블록(pushConstants)을 이름으로 참조하는데
-// 여기서는 그 블록이 없다. 물은 거의 스페큘러라 그림자가 빠져도 눈에 잘 띄지 않는다.
-// ponytail: 그림자를 넣으려면 shadow.glsl 이 블록 대신 인자를 받게 고쳐야 한다.
+// 물 표면을 그리는 두 패스(두께 · 표면)의 푸시 상수. src/gfx/renderer_internal.h 의 FluidDrawPushConstants 와
+// 배치가 같아야 한다(scalar). 그림자 행렬은 shadow.glsl 이 인자로 받으므로 장면 푸시 상수 블록 없이도 그림자
+// 맵을 읽는다(광선 그림자 변종은 없다 — 집합 1 을 묶지 않는다).
 layout(push_constant, scalar) uniform FluidDrawPushConstants {
     CameraBuffer camera;
     FluidSurfaceVertexBuffer vertices;
@@ -21,8 +19,7 @@ layout(push_constant, scalar) uniform FluidDrawPushConstants {
     // 두께 텍스처 슬롯. INVALID_TEXTURE 면 두께를 흡수 계수의 기준값으로 본다.
     uint thicknessTexture;
     uint pad0;
-    uint pad1;
-    uint pad2;
+    ShadowMatrixBuffer shadowMatrices;
 }
 push;
 

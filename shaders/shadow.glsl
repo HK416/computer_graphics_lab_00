@@ -1,7 +1,9 @@
 #ifndef SHADOW_GLSL
 #define SHADOW_GLSL
 
-#include "scene_data.glsl"
+#include "scene_types.glsl"
+
+// 그림자 행렬·카메라를 인자로 받는다. 장면 푸시 상수 블록이 없는 물 표면 셰이더도 같은 함수를 쓰기 위해서다.
 
 #ifdef RAY_QUERY_SHADOWS
 #include "ray_query.glsl"
@@ -35,8 +37,8 @@ uint cubeFaceIndex(vec3 direction) {
 }
 
 // 한 층을 3x3 PCF 로 읽는다. 절두체를 벗어나면 -1 을 돌려준다.
-float sampleShadowLayer(uint layer, vec3 position, uint atlasSlot) {
-    vec4 clip = pushConstants.shadowMatrices.items[layer] * vec4(position, 1.0);
+float sampleShadowLayer(ShadowMatrixBuffer matrices, uint layer, vec3 position, uint atlasSlot) {
+    vec4 clip = matrices.items[layer] * vec4(position, 1.0);
     if (clip.w <= 0.0) {
         return -1.0;
     }
@@ -58,10 +60,10 @@ float sampleShadowLayer(uint layer, vec3 position, uint atlasSlot) {
 }
 
 // 1 이면 완전히 밝고 0 이면 완전히 가려진 것이다.
-float shadowFactor(Light light, vec3 position, vec3 normal, vec3 lightDirection) {
+float shadowFactor(ShadowMatrixBuffer matrices, Camera camera, Light light, vec3 position, vec3 normal, vec3 lightDirection) {
     int firstLayer = int(light.rightShadow.w);
     uint layerCount = uint(light.up.w);
-    if (firstLayer < 0 || pushConstants.camera.item.shading.y == INVALID_TEXTURE || layerCount == 0u) {
+    if (firstLayer < 0 || camera.shading.y == INVALID_TEXTURE || layerCount == 0u) {
         return 1.0;
     }
 
@@ -70,8 +72,8 @@ float shadowFactor(Light light, vec3 position, vec3 normal, vec3 lightDirection)
 #ifdef RAY_QUERY_SHADOWS
     // 하이브리드: 카메라 가까이는 광선으로 판정하고 먼 곳은 그림자 맵을 그대로 쓴다. ambient.w 가
     // 0 이면 광선 그림자가 꺼진 것이다.
-    float rayDistance = pushConstants.camera.item.ambient.w;
-    if (rayDistance > 0.0 && length(position - pushConstants.camera.item.position.xyz) < rayDistance) {
+    float rayDistance = camera.ambient.w;
+    if (rayDistance > 0.0 && length(position - camera.position.xyz) < rayDistance) {
         float reach = type == LIGHT_TYPE_DIRECTIONAL ? RAY_SHADOW_MAX_DISTANCE
                                                      : length(light.positionRange.xyz - position);
         return rayQueryVisibility(shadowTopLevel, position, normal, lightDirection, reach);
@@ -89,7 +91,7 @@ float shadowFactor(Light light, vec3 position, vec3 normal, vec3 lightDirection)
     } else if (type == LIGHT_TYPE_DIRECTIONAL) {
         // 카메라까지의 반지름 거리로 후보를 고른다. 축 거리보다 크거나 같아 항상 더 넓은
         // 캐스케이드를 골라 보수적으로 안전하다.
-        float distance = length(position - pushConstants.camera.item.position.xyz);
+        float distance = length(position - camera.position.xyz);
         while (cascade + 1u < layerCount && distance > light.cascadeSplits[cascade]) {
             ++cascade;
         }
@@ -106,7 +108,7 @@ float shadowFactor(Light light, vec3 position, vec3 normal, vec3 lightDirection)
         float offset = SHADOW_NORMAL_OFFSET * (0.5 + slope) *
                        (type == LIGHT_TYPE_DIRECTIONAL ? light.cascadeTexelSizes[attempt] : texelSize);
         uint target = type == LIGHT_TYPE_DIRECTIONAL ? layer + attempt : layer;
-        float lit = sampleShadowLayer(target, position + normal * offset, pushConstants.camera.item.shading.y);
+        float lit = sampleShadowLayer(matrices, target, position + normal * offset, camera.shading.y);
         if (lit >= 0.0) {
             return lit;
         }
@@ -118,12 +120,12 @@ float shadowFactor(Light light, vec3 position, vec3 normal, vec3 lightDirection)
 }
 
 // 캐스케이드 디버그 뷰가 쓰는 색. 방향광이 아니면 0 을 돌려준다.
-uint shadowCascadeIndex(Light light, vec3 position) {
+uint shadowCascadeIndex(Camera camera, Light light, vec3 position) {
     if (uint(light.colorType.w) != LIGHT_TYPE_DIRECTIONAL || light.rightShadow.w < 0.0) {
         return 0u;
     }
     uint layerCount = uint(light.up.w);
-    float distance = length(position - pushConstants.camera.item.position.xyz);
+    float distance = length(position - camera.position.xyz);
     uint cascade = 0u;
     while (cascade + 1u < layerCount && distance > light.cascadeSplits[cascade]) {
         ++cascade;

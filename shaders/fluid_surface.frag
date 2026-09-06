@@ -40,9 +40,13 @@ void main() {
     vec3 reflection = environmentLight(camera, surface, 1.0, true);
     uint lightCount = camera.shading.x;
     for (uint i = 0u; i < lightCount; ++i) {
+        Light light = push.lights.items[i];
         vec3 lightDirection;
-        // ponytail: 그림자를 곱하지 않는다. fluid_draw_common.glsl 의 주석 참조.
-        reflection += lightContribution(push.lights.items[i], surface, lightDirection);
+        vec3 contribution = lightContribution(light, surface, lightDirection);
+        if (contribution == vec3(0.0)) {
+            continue;
+        }
+        reflection += contribution * shadowFactor(push.shadowMatrices, camera, light, surface.position, normal, lightDirection);
     }
 
     // 통과. 두께는 뒷면에서 앞면을 뺀 시야 거리 합이다. 텍스처가 없으면 한 뼘으로 친다. 셰이딩 식은
