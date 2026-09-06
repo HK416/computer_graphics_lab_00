@@ -181,6 +181,15 @@ void buildDebugLines(const scene::Scene& scene, const DebugLineOptions& options,
             }
         }
 
+        // DDGI 볼륨. 위치 ± 배율의 축 정렬 상자. 꺼진 것도 그린다(자리를 잡는 중일 수 있다).
+        if (options.fluidBounds && object.ddgiVolume >= 0 &&
+            static_cast<size_t>(object.ddgiVolume) < scene.ddgiVolumes.size()) {
+            glm::vec3 center = glm::vec3(world[3]);
+            glm::vec3 half{
+                glm::length(glm::vec3(world[0])), glm::length(glm::vec3(world[1])), glm::length(glm::vec3(world[2]))};
+            axisAlignedBox(out, center - half, center + half, DEBUG_COLOR_DDGI_VOLUME);
+        }
+
         // 힘 마당. 바람은 앞(-Z) 화살표, 소용돌이는 +Y 축과 둘레 원, 점은 세 축 원. 반지름 0(무한)은 1 로 그린다.
         if (options.fluidBounds && object.forceField >= 0 &&
             static_cast<size_t>(object.forceField) < scene.forceFields.size()) {

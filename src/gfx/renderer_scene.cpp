@@ -858,14 +858,42 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     camera->probeSpacing = glm::vec4{0.0F};
     camera->probe = glm::uvec4{0U};
     ddgiResetThisFrame = false;
-    if (ddgiActive() && sceneHasBounds) {
-        uint32_t probes = std::clamp(settings.ddgiProbes, 2U, 16U);
+    // 켜진 첫 DDGI 볼륨 부품이 있으면 그 상자(오브젝트 위치 ± 배율)를, 없으면 장면 경계를 5 % 넓혀 쓴다.
+    const scene::DdgiVolume* volume = nullptr;
+    glm::vec3 volumeMinimum{0.0F};
+    glm::vec3 volumeMaximum{0.0F};
+    for (uint32_t index = 0; index < scene.objects.size() && volume == nullptr; ++index) {
+        int32_t slot = scene.objects[index].ddgiVolume;
+        if (slot < 0 || static_cast<size_t>(slot) >= scene.ddgiVolumes.size() || !scene.visibleCached(index) ||
+            !scene.ddgiVolumes[static_cast<size_t>(slot)].enabled) {
+            continue;
+        }
+        volume = &scene.ddgiVolumes[static_cast<size_t>(slot)];
+        const glm::mat4& world = scene.world(index);
+        glm::vec3 center = glm::vec3(world[3]);
+        // 회전은 무시하고 축마다의 배율 길이를 반폭으로 쓴다(격자는 축 정렬).
+        glm::vec3 half = glm::max(glm::vec3{glm::length(glm::vec3(world[0])),
+                                            glm::length(glm::vec3(world[1])),
+                                            glm::length(glm::vec3(world[2]))},
+                                  glm::vec3{1.0e-3F});
+        volumeMinimum = center - half;
+        volumeMaximum = center + half;
+    }
+    if (ddgiActive() && (sceneHasBounds || volume != nullptr)) {
+        uint32_t probes = std::clamp(volume != nullptr ? volume->probes : settings.ddgiProbes, 2U, 16U);
         uint32_t rays = std::clamp(settings.ddgiRays, 8U, 256U);
         ensureDdgiResources(probes, rays);
-        glm::vec3 extent = glm::max(sceneMaximum - sceneMinimum, glm::vec3{1.0e-3F});
-        glm::vec3 pad = extent * 0.05F;
-        glm::vec3 origin = sceneMinimum - pad;
-        glm::vec3 spacing = (extent + 2.0F * pad) / static_cast<float>(probes - 1);
+        glm::vec3 origin;
+        glm::vec3 spacing;
+        if (volume != nullptr) {
+            origin = volumeMinimum;
+            spacing = (volumeMaximum - volumeMinimum) / static_cast<float>(probes - 1);
+        } else {
+            glm::vec3 extent = glm::max(sceneMaximum - sceneMinimum, glm::vec3{1.0e-3F});
+            glm::vec3 pad = extent * 0.05F;
+            origin = sceneMinimum - pad;
+            spacing = (extent + 2.0F * pad) / static_cast<float>(probes - 1);
+        }
         bool moved = glm::any(glm::greaterThan(glm::abs(origin - ddgiOrigin), glm::vec3{1.0e-3F})) ||
                      glm::any(glm::greaterThan(glm::abs(spacing - ddgiSpacing), glm::vec3{1.0e-3F}));
         ddgiResetThisFrame = moved || !ddgiVolumeValid;

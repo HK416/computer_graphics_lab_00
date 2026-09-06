@@ -100,6 +100,10 @@ scene::Scene makeScene() {
     field.radius = 3.0F;
     field.falloff = 0.5F;
     scene.attachForceField(0, field);
+    scene::DdgiVolume volume;
+    volume.probes = 12;
+    volume.enabled = false;
+    scene.attachDdgiVolume(1, volume);
     return scene;
 }
 
@@ -167,6 +171,8 @@ int main() {
     assert(std::abs(loaded.scene.forceFields[0].strength + 2.5F) < 1e-5F);
     assert(std::abs(loaded.scene.forceFields[0].radius - 3.0F) < 1e-5F);
     assert(std::abs(loaded.scene.forceFields[0].falloff - 0.5F) < 1e-5F);
+    assert(loaded.scene.ddgiVolumes.size() == 1 && loaded.scene.objects[1].ddgiVolume == 0);
+    assert(loaded.scene.ddgiVolumes[0].probes == 12 && !loaded.scene.ddgiVolumes[0].enabled);
 
     // 부품이 없던 옛 판(1) 파일도 그대로 읽힌다.
     scene::SceneFile old = scene::readScene(R"({"version":1,"name":"옛 장면","objects":[{"name":"a"}]})");

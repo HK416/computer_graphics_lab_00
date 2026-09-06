@@ -423,6 +423,7 @@ SceneSnapshot Scene::capture() const {
     snapshot.particleSystems = particleSystems;
     snapshot.cloths = cloths;
     snapshot.forceFields = forceFields;
+    snapshot.ddgiVolumes = ddgiVolumes;
     snapshot.ambientColor = ambientColor;
     snapshot.ambientIntensity = ambientIntensity;
     snapshot.environment = environment;
@@ -445,6 +446,7 @@ void Scene::restore(const SceneSnapshot& snapshot) {
     particleSystems = snapshot.particleSystems;
     cloths = snapshot.cloths;
     forceFields = snapshot.forceFields;
+    ddgiVolumes = snapshot.ddgiVolumes;
     ambientColor = snapshot.ambientColor;
     ambientIntensity = snapshot.ambientIntensity;
     environment = snapshot.environment;
@@ -455,9 +457,9 @@ bool Scene::differsFrom(const SceneSnapshot& snapshot) const {
     if (name != snapshot.name || objects != snapshot.objects || meshRenderers != snapshot.meshRenderers ||
         lights != snapshot.lights || rigidBodies != snapshot.rigidBodies || fluids != snapshot.fluids ||
         particleSystems != snapshot.particleSystems || cloths != snapshot.cloths ||
-        forceFields != snapshot.forceFields || ambientColor != snapshot.ambientColor ||
-        ambientIntensity != snapshot.ambientIntensity || !(environment == snapshot.environment) ||
-        !(post == snapshot.post)) {
+        forceFields != snapshot.forceFields || ddgiVolumes != snapshot.ddgiVolumes ||
+        ambientColor != snapshot.ambientColor || ambientIntensity != snapshot.ambientIntensity ||
+        !(environment == snapshot.environment) || !(post == snapshot.post)) {
         return true;
     }
     if (animators.size() != snapshot.animators.size()) {
@@ -540,6 +542,10 @@ int32_t Scene::attachCloth(uint32_t index, const Cloth& cloth) {
 
 int32_t Scene::attachForceField(uint32_t index, const ForceField& field) {
     return attachComponent(objects, forceFields, index, &Object::forceField, field);
+}
+
+int32_t Scene::attachDdgiVolume(uint32_t index, const DdgiVolume& volume) {
+    return attachComponent(objects, ddgiVolumes, index, &Object::ddgiVolume, volume);
 }
 
 void Scene::detachComponent(uint32_t index, int32_t Object::* handle) {

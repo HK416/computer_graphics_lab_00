@@ -304,6 +304,15 @@ struct ForceField {
     bool operator==(const ForceField&) const = default;
 };
 
+// DDGI 프로브 볼륨 부품. 오브젝트 위치를 중심으로 배율만큼(±scale)의 축 정렬 상자에 축마다 probes 개의 프로브를
+// 깐다. 회전은 무시한다(격자는 축 정렬). 켜진 첫 볼륨이 장면 경계 격자를 대신한다. 장면에 하나만 쓴다.
+struct DdgiVolume {
+    uint32_t probes = 8;
+    bool enabled = true;
+
+    bool operator==(const DdgiVolume&) const = default;
+};
+
 struct Object {
     std::string name;
     // 부모 기준 지역 변환. 세계 변환은 Scene::worldMatrix 가 부모를 거슬러 올라가 만든다.
@@ -320,6 +329,7 @@ struct Object {
     int32_t particleSystem = -1;
     int32_t cloth = -1;
     int32_t forceField = -1;
+    int32_t ddgiVolume = -1;
 
     bool operator==(const Object&) const = default;
 };
@@ -384,6 +394,7 @@ struct SceneSnapshot {
     std::vector<ParticleSystem> particleSystems;
     std::vector<Cloth> cloths;
     std::vector<ForceField> forceFields;
+    std::vector<DdgiVolume> ddgiVolumes;
     glm::vec3 ambientColor{0.25F};
     float ambientIntensity = 1.0F;
     Environment environment;
@@ -404,6 +415,7 @@ struct Scene {
     std::vector<ParticleSystem> particleSystems;
     std::vector<Cloth> cloths;
     std::vector<ForceField> forceFields;
+    std::vector<DdgiVolume> ddgiVolumes;
     Camera camera;
     // 재생 중인지. 참일 때만 물리가 돌고, 편집기는 되돌리기 기록을 멈춘다. 저장하지 않는다.
     bool simulating = false;
@@ -475,6 +487,7 @@ struct Scene {
     int32_t attachParticleSystem(uint32_t index, const ParticleSystem& system = {});
     int32_t attachCloth(uint32_t index, const Cloth& cloth = {});
     int32_t attachForceField(uint32_t index, const ForceField& field = {});
+    int32_t attachDdgiVolume(uint32_t index, const DdgiVolume& volume = {});
     // 부품을 뗀다. 아무도 가리키지 않게 된 부품은 배열에서 빠지고 첨자가 다시 맞춰진다.
     void detachComponent(uint32_t index, int32_t Object::* handle);
     // 오브젝트에 붙은 T 부품. 없거나 첨자가 범위 밖이면 nullptr. 첨자를 손으로 가드하는 관용구를 대신한다.
@@ -535,6 +548,7 @@ template <typename SceneType, typename F> void forEachComponentKind(SceneType& s
     f(scene.particleSystems, &Object::particleSystem);
     f(scene.cloths, &Object::cloth);
     f(scene.forceFields, &Object::forceField);
+    f(scene.ddgiVolumes, &Object::ddgiVolume);
 }
 
 // 부품 타입 → Object 의 첨자 멤버와 Scene 의 배열.
@@ -553,6 +567,7 @@ CG_LAB_COMPONENT_SLOT(Fluid, fluid, fluids);
 CG_LAB_COMPONENT_SLOT(ParticleSystem, particleSystem, particleSystems);
 CG_LAB_COMPONENT_SLOT(Cloth, cloth, cloths);
 CG_LAB_COMPONENT_SLOT(ForceField, forceField, forceFields);
+CG_LAB_COMPONENT_SLOT(DdgiVolume, ddgiVolume, ddgiVolumes);
 #undef CG_LAB_COMPONENT_SLOT
 
 template <typename T> T* Scene::component(uint32_t index) {

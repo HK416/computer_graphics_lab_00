@@ -28,6 +28,7 @@
     "yaw": -90.0
   },
   "cloths": [],
+  "ddgiVolumes": [],
   "environment": {
     "ground": [
       0.1599999964237213,
@@ -362,5 +363,5 @@
       "useGravity": true
     }
   ],
-  "version": 4
+  "version": 5
 }

@@ -278,6 +278,12 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
     }
     document["forceFields"] = forceFields;
 
+    json ddgiVolumes = json::array();
+    for (const DdgiVolume& volume : scene.ddgiVolumes) {
+        ddgiVolumes.push_back({{"probes", volume.probes}, {"enabled", volume.enabled}});
+    }
+    document["ddgiVolumes"] = ddgiVolumes;
+
     json objects = json::array();
     for (uint32_t objectIndex = 0; objectIndex < scene.objects.size(); ++objectIndex) {
         const Object& object = scene.objects[objectIndex];
@@ -315,6 +321,9 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
         }
         if (object.forceField >= 0) {
             entry["forceField"] = object.forceField;
+        }
+        if (object.ddgiVolume >= 0) {
+            entry["ddgiVolume"] = object.ddgiVolume;
         }
         objects.push_back(std::move(entry));
     }
@@ -490,6 +499,13 @@ SceneFile readScene(const std::string& text) {
         file.scene.forceFields.push_back(field);
     }
 
+    for (const json& entry : document.value("ddgiVolumes", json::array())) {
+        DdgiVolume volume;
+        volume.probes = std::clamp(entry.value("probes", volume.probes), 2U, 16U);
+        volume.enabled = entry.value("enabled", volume.enabled);
+        file.scene.ddgiVolumes.push_back(volume);
+    }
+
     for (const json& entry : document.value("cloths", json::array())) {
         Cloth cloth;
         cloth.backend = toBackend(entry.value("backend", std::string{"auto"}));
@@ -531,6 +547,7 @@ SceneFile readScene(const std::string& text) {
         object.particleSystem = handle(entry.value("particleSystem", -1), file.scene.particleSystems.size());
         object.cloth = handle(entry.value("cloth", -1), file.scene.cloths.size());
         object.forceField = handle(entry.value("forceField", -1), file.scene.forceFields.size());
+        object.ddgiVolume = handle(entry.value("ddgiVolume", -1), file.scene.ddgiVolumes.size());
         auto skin = entry.value("skin", -1);
         file.scene.objects.push_back(std::move(object));
         file.objectModels.push_back(entry.value("model", -1));

@@ -391,6 +391,20 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         ImGui::TextDisabled("천·유체·입자가 읽는다. 강체는 읽지 않는다");
     }
 
+    if (object.ddgiVolume >= 0 && object.ddgiVolume < static_cast<int>(active.ddgiVolumes.size()) &&
+        componentHeader("DDGI Volume", &scene::Object::ddgiVolume)) {
+        scene::DdgiVolume& volume = active.ddgiVolumes[static_cast<size_t>(object.ddgiVolume)];
+        ImGui::Checkbox("켜기", &volume.enabled);
+        int probes = static_cast<int>(volume.probes);
+        if (ImGui::SliderInt("축별 프로브", &probes, 2, 16)) {
+            volume.probes = static_cast<uint32_t>(probes);
+        }
+        ImGui::TextDisabled("상자는 위치 ± 배율(회전 무시). 켜진 첫 볼륨이 장면 경계 격자를 대신한다");
+        if (!renderer.settings.useDdgi) {
+            ImGui::TextDisabled("렌더 설정의 DDGI 가 꺼져 있다");
+        }
+    }
+
     if (object.particleSystem >= 0 && object.particleSystem < static_cast<int>(active.particleSystems.size()) &&
         componentHeader("입자", &scene::Object::particleSystem)) {
         scene::ParticleSystem& system = active.particleSystems[static_cast<size_t>(object.particleSystem)];
@@ -542,6 +556,11 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         ImGui::BeginDisabled(object.forceField >= 0);
         if (ImGui::MenuItem("Force Field")) {
             active.attachForceField(objectIndex);
+        }
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(object.ddgiVolume >= 0);
+        if (ImGui::MenuItem("DDGI Volume")) {
+            active.attachDdgiVolume(objectIndex);
         }
         ImGui::EndDisabled();
         ImGui::BeginDisabled(object.cloth >= 0);
