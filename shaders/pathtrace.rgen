@@ -1,5 +1,7 @@
 #version 460
 #extension GL_EXT_nonuniform_qualifier : require
+// 안개 태양 가시성을 그림자 맵 대신 그림자 광선으로 잰다(아래 fogSunVisibility).
+#define FOG_CUSTOM_VISIBILITY
 
 #include "bindless.glsl"
 #include "fog.glsl"
@@ -125,6 +127,23 @@ float firstLightVisibility(vec3 position, vec3 normal) {
         return shadowVisibility;
     }
     return -1.0;
+}
+
+// 안개 표본점에서 태양까지의 가시성. 경로 추적기에는 그림자 맵이 없어 광선을 쏜다(fog.glsl 의 FOG_CUSTOM_VISIBILITY).
+float fogSunVisibility(Camera camera, vec3 position) {
+    shadowVisibility = 0.0;
+    traceRayEXT(topLevel,
+                PATH_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                PATH_SHADOW_RAY_MASK,
+                0,
+                0,
+                1,
+                position,
+                1e-3,
+                -camera.fogSun.xyz,
+                1e4,
+                1);
+    return shadowVisibility;
 }
 
 // 다음 방향을 뽑고 그 방향의 BSDF 가중치(brdf * cos / pdf)를 돌려준다. 확산과 거울 반사 로브를

@@ -195,7 +195,7 @@ struct Camera {
     vec4 fogSun;
     vec4 fogSunColor;
     // x 디버그 뷰(DEBUG_MODE_*). 푸시 상수가 128 바이트에 꽉 차서 프레임에 한 번 정해지는 값은 여기로
-    // 온다. y ReSTIR 직접광이 켜져 있으면 1(불투명 픽셀은 광원 루프를 건너뛴다). zw 예약.
+    // 온다. y ReSTIR 직접광이 켜져 있으면 1(불투명 픽셀은 광원 루프를 건너뛴다). z 프레임 번호(하위 16비트, 지터 씨앗).
     uvec4 flags;
     // DDGI 프로브 격자. probeOrigin xyz 원점, w 간격 길이. probeSpacing xyz 간격, w 히스테리시스.
     // probe x 축별 개수(8비트씩 x|y<<8|z<<16), y 조도 아틀라스 샘플 슬롯, z 가시성 아틀라스 샘플 슬롯, w 켜짐
@@ -203,6 +203,10 @@ struct Camera {
     vec4 probeOrigin;
     vec4 probeSpacing;
     uvec4 probe;
+    // 안개 태양 그림자. xy 그림자 행렬 버퍼 주소(하위·상위 32비트), z 태양 첫 층 | 층 수 << 16, w 표본 수(0 이면 해석식).
+    uvec4 fogShadow;
+    // 태양 캐스케이드 경계 거리.
+    vec4 fogCascadeSplits;
 };
 
 // DDGI 프로브 격자 헬퍼. src/gfx/renderer_ddgi.cpp 의 상수·아틀라스 배치와 같아야 한다. 프로브 (x, y, z) 는

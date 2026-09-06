@@ -88,6 +88,8 @@ int main(int argc, char* argv[]) {
             options.meshShader = false;
         } else if (argument == "--orbit" && i + 1 < argc) {
             options.orbitDegreesPerFrame = static_cast<float>(std::atof(argv[++i]));
+        } else if (argument == "--fog-shadow-samples" && i + 1 < argc) {
+            options.fogShadowSamples = std::atoi(argv[++i]);
         } else if (argument == "--profile") {
             options.profile = true;
         } else if (argument == "--triangle-budget" && i + 1 < argc) {

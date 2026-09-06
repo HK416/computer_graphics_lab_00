@@ -103,13 +103,18 @@ struct GpuCamera {
     // 안개 태양 인스캐터. fogSun xyz 첫 방향광의 진행 방향, w 산란 세기. fogSunColor rgb 색 × 세기, w 방향광 유무.
     glm::vec4 fogSun;
     glm::vec4 fogSunColor;
-    // x 디버그 뷰. 푸시 상수가 128 바이트에 꽉 차서 여기로 옮겼다. y ReSTIR 켜짐.
+    // x 디버그 뷰. 푸시 상수가 128 바이트에 꽉 차서 여기로 옮겼다. y ReSTIR 켜짐. z 프레임 번호(하위 16비트).
     glm::uvec4 flags;
     // DDGI 프로브 격자. probeOrigin xyz 원점, w 간격 길이. probeSpacing xyz 간격, w 히스테리시스.
     // probe x 축별 개수(8비트씩), y 조도 아틀라스 샘플 슬롯, z 가시성 샘플 슬롯, w 켜짐.
     glm::vec4 probeOrigin;
     glm::vec4 probeSpacing;
     glm::uvec4 probe;
+    // 안개 태양 그림자. xy 그림자 행렬 버퍼 주소(하위·상위 32비트), z 태양 첫 층 | 층 수 << 16, w 광선 표본 수(0 이면
+    // 해석식).
+    glm::uvec4 fogShadow;
+    // 태양 캐스케이드 경계 거리. fogSunVisibility 가 표본점의 캐스케이드를 고른다.
+    glm::vec4 fogCascadeSplits;
 };
 
 // shaders/scene_data.glsl 의 MeshletGroup 과 배치가 같아야 한다.

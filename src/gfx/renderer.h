@@ -776,6 +776,7 @@ private:
     glm::vec4 lastFogParameters{0.0F};
     glm::vec4 lastFogSun{0.0F};
     glm::vec4 lastFogSunColor{0.0F};
+    uint32_t lastFogShadowSamples = 0;
     // 모션 벡터용 지난 프레임 상태. 장면 구성이 바뀌면 현재 값으로 덮어 변위를 0 으로 만든다.
     glm::mat4 previousViewProjection{1.0F};
     std::vector<glm::mat4> previousWorld;

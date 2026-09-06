@@ -821,8 +821,37 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     camera->fogParameters = glm::vec4{scene.post.fogHeight, scene.post.fogFalloff, 0.0F, 0.0F};
     camera->fogSun = glm::vec4{sunDirection, scene.post.fogSunScatter};
     camera->fogSunColor = glm::vec4{sunColor, sunColor != glm::vec3{0.0F} ? 1.0F : 0.0F};
-    // y: ReSTIR 가 직접광을 맡으면 1. 래스터의 불투명 픽셀은 광원 루프를 건너뛴다.
-    camera->flags = glm::uvec4{settings.debugMode, restirActive() ? 1U : 0U, 0U, 0U};
+    // y: ReSTIR 가 직접광을 맡으면 1. 래스터의 불투명 픽셀은 광원 루프를 건너뛴다. z: 안개 그림자 지터 씨앗.
+    camera->flags =
+        glm::uvec4{settings.debugMode, restirActive() ? 1U : 0U, static_cast<uint32_t>(frameIndex & 0xFFFFU), 0U};
+    // 안개 태양 그림자. 첫 방향광(태양)의 그림자 층과 캐스케이드 경계를 넘긴다. 경로 추적은 그림자 맵이 없고
+    // 표본마다 광선을 쏘므로 표본 수를 8 로 묶는다.
+    {
+        uint32_t firstLayer = 0;
+        uint32_t layerCount = 0;
+        glm::vec4 splits{0.0F};
+        for (const GpuLight& light : frameLights) {
+            if (static_cast<uint32_t>(light.colorType.w) == static_cast<uint32_t>(scene::LightType::DIRECTIONAL)) {
+                if (light.rightShadow.w >= 0.0F) {
+                    firstLayer = static_cast<uint32_t>(light.rightShadow.w);
+                    layerCount = static_cast<uint32_t>(light.up.w);
+                    splits = light.cascadeSplits;
+                }
+                break;
+            }
+        }
+        bool pathTracing = settings.usePathTracing && rayTracer != nullptr;
+        uint32_t samples = pathTracing ? std::min(settings.fogShadowSamples, 8U) : settings.fogShadowSamples;
+        if (!pathTracing && layerCount == 0) {
+            samples = 0;
+        }
+        VkDeviceAddress matrices = frame.shadowMatrixBuffer.address;
+        camera->fogShadow = glm::uvec4{static_cast<uint32_t>(matrices & 0xFFFFFFFFU),
+                                       static_cast<uint32_t>(matrices >> 32U),
+                                       firstLayer | (layerCount << 16U),
+                                       samples};
+        camera->fogCascadeSplits = splits;
+    }
     // DDGI 프로브 격자. 장면 경계 상자를 조금 넓혀 축마다 n 개를 깐다. 원점·간격이 바뀐 프레임은 아틀라스를
     // 히스테리시스 없이 덮어쓴다.
     camera->probeOrigin = glm::vec4{0.0F};
@@ -860,13 +889,15 @@ FrameBatches Renderer::buildDrawCommands(Frame& frame, const scene::Scene& scene
     settings.pathTrace.debugMode = pathTraceSupportsDebugMode(settings.debugMode) ? settings.debugMode : 0U;
     bool traceInputsChanged = settings.pathTrace != lastPathTrace || settings.useIbl != lastUseIbl ||
                               camera->fog != lastFog || camera->fogParameters != lastFogParameters ||
-                              camera->fogSun != lastFogSun || camera->fogSunColor != lastFogSunColor;
+                              camera->fogSun != lastFogSun || camera->fogSunColor != lastFogSunColor ||
+                              camera->fogShadow.w != lastFogShadowSamples;
     lastPathTrace = settings.pathTrace;
     lastUseIbl = settings.useIbl;
     lastFog = camera->fog;
     lastFogParameters = camera->fogParameters;
     lastFogSun = camera->fogSun;
     lastFogSunColor = camera->fogSunColor;
+    lastFogShadowSamples = camera->fogShadow.w;
     if (camera->viewProjection != lastViewProjection || sceneChangedThisFrame || traceInputsChanged) {
         lastViewProjection = camera->viewProjection;
         pathSampleCount = 0;

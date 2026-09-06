@@ -81,6 +81,10 @@ struct RenderSettings {
     uint32_t ssaoSamples = 16;
 
     // GPU 컴퓨트가 meshlet 단위로 컬링하고 간접 그리기 명령을 만든다.
+    // 높이 안개의 태양 인스캐터에 그림자를 넣을 때 광선을 따라 읽는 표본 수. 0 이면 해석식만(그림자 없음).
+    // 경로 추적은 표본마다 그림자 광선이라 8 로 묶는다.
+    uint32_t fogShadowSamples = 12;
+
     bool useComputeCulling = true;
     bool frustumCulling = true;
     bool coneCulling = true;

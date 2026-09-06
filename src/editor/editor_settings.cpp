@@ -90,6 +90,16 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("첫 방향광 쪽을 볼수록 안개가 밝아진다(Henyey-Greenstein). 방향광이 없으면 효과가 없다");
         }
+        int fogShadowSamples = static_cast<int>(renderer.settings.fogShadowSamples);
+        ImGui::BeginDisabled(post.fogSunScatter <= 0.0F);
+        if (ImGui::SliderInt("태양 그림자 표본", &fogShadowSamples, 0, 32)) {
+            renderer.settings.fogShadowSamples = static_cast<uint32_t>(std::max(fogShadowSamples, 0));
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "광선을 따라 그림자 맵(Path Tracing 은 그림자 광선)을 읽어 태양 산란에 빛줄기를 낸다. 0 이면 끈다");
+        }
+        ImGui::EndDisabled();
         ImGui::EndDisabled();
     }
 

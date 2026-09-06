@@ -67,6 +67,8 @@ struct Options {
     bool reflectionsGiven = false;
     // --no-denoise: 반사 디노이저를 끈다. 옛 누적 결과와 바이트로 견줄 때 쓴다.
     bool reflectionDenoise = true;
+    // 안개 태양 그림자 표본 수. 음수면 기본값(RenderSettings)을 쓴다.
+    int32_t fogShadowSamples = -1;
     // --restir / --no-restir: ReSTIR 직접광. 주지 않으면 자동 튜닝이 정한다.
     bool restir = false;
     bool restirGiven = false;
