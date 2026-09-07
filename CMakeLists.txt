@@ -256,6 +256,7 @@ add_executable(cg_lab
     src/gfx/rigid_body_gpu.cpp
     src/gfx/shadow_math.cpp
     src/gfx/resources.cpp
+    src/gfx/rl_agent.cpp
     src/gfx/stb_impl.cpp
     src/gfx/texture.cpp
     src/gfx/swapchain.cpp
@@ -590,6 +591,16 @@ else()
     target_compile_options(cg_lab_neural_tests PRIVATE -Wall -Wextra)
 endif()
 
+# 에이전트 그래프 명세. neural_math 위에 얹은 순수 계산이라 여기도 Vulkan 이 없다.
+add_executable(cg_lab_rl_agent_tests tests/rl_agent_test.cpp src/gfx/rl_agent.cpp src/gfx/neural_math.cpp)
+target_include_directories(cg_lab_rl_agent_tests PRIVATE src)
+target_link_libraries(cg_lab_rl_agent_tests PRIVATE nlohmann_json::nlohmann_json)
+if(MSVC)
+    target_compile_options(cg_lab_rl_agent_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(cg_lab_rl_agent_tests PRIVATE -Wall -Wextra)
+endif()
+
 # 로봇 관측·행동과 진화 전략 학습. CPU 강체 솔버 위에서 돌므로 scene 과 작업 큐를 함께 링크한다.
 add_executable(cg_lab_robot_tests tests/robot_test.cpp src/physics/robot.cpp src/physics/policy.cpp
     src/physics/rigid_body.cpp src/scene/scene.cpp src/asset/animation.cpp src/core/error.cpp
@@ -626,7 +637,7 @@ foreach(test_target
         cg_lab_upscaler_tests cg_lab_vertex_pack_tests cg_lab_physics_tests cg_lab_primitives_tests
         cg_lab_debug_lines_tests cg_lab_hardware_profile_tests cg_lab_fluid_tests
         cg_lab_marching_cubes_tests cg_lab_cloth_tests cg_lab_policy_tests cg_lab_robot_tests
-        cg_lab_neural_tests)
+        cg_lab_neural_tests cg_lab_rl_agent_tests)
     if(MSVC)
         target_compile_options(${test_target} PRIVATE /UNDEBUG)
     else()
@@ -658,6 +669,7 @@ add_test(NAME physics COMMAND cg_lab_physics_tests)
 add_test(NAME policy COMMAND cg_lab_policy_tests)
 add_test(NAME robot COMMAND cg_lab_robot_tests)
 add_test(NAME neural COMMAND cg_lab_neural_tests)
+add_test(NAME rl_agent COMMAND cg_lab_rl_agent_tests)
 add_test(NAME marching_cubes COMMAND cg_lab_marching_cubes_tests)
 # 헤드리스 물리 회귀: 강체 장면을 120 프레임 돌려 저장한 결과가 기준 파일과 바이트로 같은지 본다.
 add_test(NAME headless_physics

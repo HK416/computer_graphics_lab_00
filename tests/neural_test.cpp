@@ -1,8 +1,10 @@
 // 신경망의 순수 계산. Vulkan 없이 CPU 기준 구현만 본다.
 //
-// 이 파일이 이 저장소에서 «역전파가 맞다» 를 말하는 유일한 근거다. GPU 커널은 여기서 검증한 CPU 기준과
-// 대조해 맞춘다. 그래서 검사는 전부 **중앙 유한차분**이다 — 손으로 유도한 수식을 손으로 유도한 수식과
-// 견주면 같은 실수를 두 번 하게 된다.
+// 이 파일이 이 저장소에서 «연산 하나하나의 역전파가 맞다» 를 말하는 근거다. GPU 커널은 여기서 검증한
+// CPU 기준과 대조해 맞춘다. 그래서 검사는 전부 **중앙 유한차분**이다(gradient_check.h) — 손으로 유도한
+// 수식을 손으로 유도한 수식과 견주면 같은 실수를 두 번 하게 된다.
+//
+// 연산을 엮어 만든 **에이전트 그래프** 는 rl_agent_test 가 같은 방식으로 본다.
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -14,127 +16,9 @@
 #include <vector>
 
 #include "gfx/neural_math.h"
+#include "gradient_check.h"
 
 namespace {
-
-// 해석 경사와 유한차분 경사의 상대 오차. 눈금은 «이 그래프에서 경사가 대개 얼마나 큰가»로 잡는다.
-// 자리마다 자기 크기로 나누면, 우연히 0 에 가까운 자리 하나가 반올림만으로 1e-2 를 찍어 구조적
-// 버그(전치·첨자 밀림)와 구별할 수 없게 된다.
-double relativeError(double a, double b, double typical) {
-    double scale = std::max({std::abs(a), std::abs(b), 0.05 * typical, 1.0e-6});
-    return std::abs(a - b) / scale;
-}
-
-// 그래프 하나를 세워 «해석 경사» 와 «유한차분 경사» 를 견준다. 흔드는 것은 파라미터와 입력 둘 다이며,
-// 어느 자리를 흔들지는 씨앗으로 고른다(전부 흔들면 큰 그래프에서 너무 느리다).
-struct GradientCheck {
-    gfx::Graph graph;
-    // 해석 경사는 **float** 로 낸다(실제로 쓰는 경로다). 유한차분은 **double** 로 잰다 — float 로 두
-    // 손실의 차를 내면 반올림이 그 차이를 통째로 먹는다.
-    std::vector<float> parameters;
-    std::vector<float> activations;
-    std::vector<float> parameterGradients;
-    std::vector<float> activationGradients;
-    std::vector<double> wideParameters;
-    std::vector<double> wideActivations;
-    // 흔들어 볼 입력 텐서들.
-    std::vector<uint32_t> inputs;
-
-    void allocate() {
-        parameters.assign(graph.parameterCount, 0.0F);
-        activations.assign(graph.activationCount, 0.0F);
-        parameterGradients.assign(graph.parameterCount, 0.0F);
-        activationGradients.assign(graph.activationCount, 0.0F);
-        wideParameters.assign(graph.parameterCount, 0.0);
-        wideActivations.assign(graph.activationCount, 0.0);
-    }
-
-    // 파라미터와 입력을 흩뿌린다. 0 근처만 보면 ReLU 의 갈림과 min 의 갈림을 못 밟는다.
-    void randomize(uint64_t seed) {
-        for (size_t i = 0; i < parameters.size(); ++i) {
-            parameters[i] = 0.7F * gfx::neuralGaussian(seed, i);
-            wideParameters[i] = parameters[i];
-        }
-        for (uint32_t tensor : inputs) {
-            const gfx::Tensor& item = graph.tensors[tensor];
-            for (uint32_t i = 0; i < item.count(); ++i) {
-                activations[item.offset + i] = 0.9F * gfx::neuralGaussian(seed + 977, item.offset + i);
-                wideActivations[item.offset + i] = activations[item.offset + i];
-            }
-        }
-    }
-
-    double loss() {
-        gfx::forward(graph, wideParameters.data(), wideActivations.data());
-        return wideActivations[graph.tensors[graph.ops.back().output].offset];
-    }
-
-    void analytic() {
-        gfx::forward(graph, parameters.data(), activations.data());
-        gfx::backward(
-            graph, parameters.data(), activations.data(), parameterGradients.data(), activationGradients.data());
-    }
-
-    // value 를 흔들어 중앙 유한차분을 잰다. double 이라 h 를 작게 잡을 수 있고, 그만큼 절단 오차가
-    // 사라진다(h 의 제곱에 비례한다).
-    double numeric(double& value) {
-        constexpr double H = 1.0e-5;
-        double original = value;
-        value = original + H;
-        double plus = loss();
-        value = original - H;
-        double minus = loss();
-        value = original;
-        return (plus - minus) / (2.0 * H);
-    }
-
-    // 파라미터에서 자리를 골라 견준다. 돌려주는 값은 최대 상대 오차.
-    double check(uint64_t seed, uint32_t samples) {
-        randomize(seed);
-        analytic();
-
-        // 이 그래프에서 경사가 «대개 얼마나 큰가». 상대 오차의 눈금이 된다.
-        double typical = 0.0;
-        for (float value : parameterGradients) {
-            typical = std::max(typical, static_cast<double>(std::abs(value)));
-        }
-        assert(typical > 0.0);
-
-        double worst = 0.0;
-        uint32_t checked = 0;
-        auto compare = [&](size_t index) {
-            double expected = parameterGradients[index];
-            double measured = numeric(wideParameters[index]);
-            worst = std::max(worst, relativeError(expected, measured, typical));
-            ++checked;
-        };
-        // 파라미터 **텐서마다** 몇 자리씩 반드시 훑는다. 평탄한 첨자에 무작위로 때리기만 하면 작은
-        // 텐서(편향은 두세 개다)가 체계적으로 밀려나 편향 경사가 통째로 검사되지 않는다.
-        for (uint32_t tensor : graph.parameterTensors()) {
-            const gfx::Tensor& item = graph.tensors[tensor];
-            uint32_t sweep = std::min(item.count(), 4U);
-            for (uint32_t i = 0; i < sweep; ++i) {
-                compare(item.offset + static_cast<size_t>(i) * (item.count() / sweep));
-            }
-        }
-        // 그 다음 나머지를 무작위로 흩어 본다.
-        for (uint32_t s = 0; s < samples; ++s) {
-            compare(static_cast<size_t>(std::abs(gfx::neuralGaussian(seed + 31, s)) * 1000.0F) % parameters.size());
-        }
-        // 입력을 흔들면 손실이 실제로 바뀌는지. 순전파가 그 값을 읽지 않으면 여기서 걸린다.
-        for (uint32_t tensor : inputs) {
-            const gfx::Tensor& item = graph.tensors[tensor];
-            double moved = 0.0;
-            for (uint32_t i = 0; i < item.count(); ++i) {
-                moved = std::max(moved, std::abs(numeric(wideActivations[item.offset + i])));
-            }
-            assert(moved > 1.0e-9);
-            ++checked;
-        }
-        assert(checked > 0);
-        return worst;
-    }
-};
 
 // ---- 연산별 검사. 모양은 일부러 비대칭으로 잡아 전치와 첨자 밀림이 드러나게 한다.
 //
@@ -227,6 +111,29 @@ double checkElementwise() {
     test.inputs = {input, target};
     test.allocate();
     return test.check(41, 40);
+}
+
+// 원소별 곱과 평균. 시간차 목표 y = r + γ(1-끝)·min(Q1', Q2') 과 액터 손실 -mean(Q) 가 쓰는 짝이다.
+double checkMulMean() {
+    GradientCheck test;
+    gfx::GraphBuilder builder(test.graph);
+    uint32_t input = builder.addInput(4, 3, 1, 1);
+    // 두 갈래가 **서로 다른 값** 을 내야 한다. 대칭이면 dA 와 dB 의 곱하는 짝을 뒤바꿔도 드러나지 않는다.
+    uint32_t left = builder.addTanh(addStem(builder, input, 5));
+    uint32_t right = builder.addRelu(addStem(builder, input, 5));
+    uint32_t product = builder.addMul(left, right);
+    // 경사를 받지 않는 짝과도 곱해 본다. 마스크가 그 자리다 — 곱한 쪽만 경사가 흐르고 값은 그대로 든다.
+    uint32_t mask = builder.addInput(4, 5, 1, 1);
+    uint32_t masked = builder.addMul(product, mask);
+    uint32_t merged = builder.addAdd(masked, left);
+    // 평균 뒤에 배율을 얹어 MEAN 이 받는 dy 를 1 이 아니게 만든다. 상류 경사를 무시하면 여기서 걸린다.
+    uint32_t loss = builder.addScale(builder.addMean(merged), -0.625F);
+    assert(loss != gfx::NO_TENSOR);
+    assert(test.graph.tensors[loss].count() == 1);
+
+    test.inputs = {input, mask};
+    test.allocate();
+    return test.check(83, 32);
 }
 
 double checkLayerNorm() {
@@ -604,6 +511,48 @@ void testValidate() {
         handmade.tensors[1].dims[0] = 2;
         handmade.tensors[1].dims[1] = 3;
         assert(gfx::validate(handmade));
+
+        // MUL 도 원소별이라 같은 검사를 받아야 한다.
+        gfx::Op mul;
+        mul.kind = gfx::OpKind::MUL;
+        mul.inputs[0] = 0;
+        mul.inputs[1] = 1;
+        mul.output = 2;
+        gfx::Op loss = mse;
+        loss.inputs[0] = 2;
+        loss.inputs[1] = 2;
+        loss.output = 3;
+        gfx::Tensor lossTensor = handmade.tensors[2];
+        lossTensor.offset = 13;
+        handmade.tensors[2].dims[0] = 2;
+        handmade.tensors[2].dims[1] = 3;
+        handmade.tensors.push_back(lossTensor);
+        handmade.activationCount = 19;
+        handmade.ops = {input0, input1, mul, loss};
+        assert(gfx::validateForward(handmade));
+        // 한쪽 모양만 어긋내면 거절이다. 두 입력을 나란히 훑으므로 범위 밖을 읽게 된다.
+        handmade.tensors[1].dims[1] = 6;
+        handmade.tensors[1].dims[0] = 1;
+        assert(!gfx::validateForward(handmade));
+        handmade.tensors[1].dims[0] = 2;
+        handmade.tensors[1].dims[1] = 3;
+        assert(gfx::validateForward(handmade));
+
+        // 접는 연산(MEAN·MSE·HUBER)의 **출력은 스칼라**여야 한다. 아니면 순전파가 y[0] 에만 쓰고
+        // 나머지는 지난 값으로 남아 다음 연산이 쓰레기를 읽는다.
+        gfx::Op mean;
+        mean.kind = gfx::OpKind::MEAN;
+        mean.inputs[0] = 0;
+        mean.output = 3;
+        handmade.ops = {input0, input1, mul, mean};
+        assert(gfx::validateForward(handmade));
+        handmade.tensors[3].dims[1] = 3;
+        assert(!gfx::validateForward(handmade));
+        handmade.tensors[3].dims[1] = 1;
+        // 손실도 같다.
+        handmade.ops = {input0, input1, mul, loss};
+        handmade.tensors[3].dims[1] = 3;
+        assert(!gfx::validateForward(handmade));
     }
 
     // 모양은 원소 수가 아니라 네 축을 견준다.
@@ -633,6 +582,7 @@ void testGradients() {
         {"conv2d batch1", checkConv2d(1, 1, 3, 3, 1)},
         {"linear", checkLinear()},
         {"elementwise", checkElementwise()},
+        {"mul mean", checkMulMean()},
         {"layernorm", checkLayerNorm()},
         {"concat", checkConcat()},
         {"scaled loss", checkScaledLoss()},
@@ -1047,6 +997,62 @@ void testPolyak() {
     }
 }
 
+// MEAN 이 «합» 이 아니라 «평균» 인지. 순전파와 역전파가 나란히 합으로 틀리면 유한차분은 자기 일관적이라
+// 통과한다 — 값 자체를 단정해야 한다. GPU 커널이 맞춰야 할 규약이기도 하다.
+void testMeanValue() {
+    gfx::Graph graph;
+    gfx::GraphBuilder builder(graph);
+    // 배치와 특징 둘 다 1 이 아니어야 «배치마다 평균» 과 «전체 평균» 이 갈린다. MEAN 은 전체다.
+    uint32_t input = builder.addInput(2, 3, 1, 1);
+    uint32_t mean = builder.addMean(input);
+    assert(mean != gfx::NO_TENSOR);
+    assert(graph.tensors[mean].count() == 1);
+
+    std::vector<float> parameters;
+    std::vector<float> activations(graph.activationCount, 0.0F);
+    float values[6] = {1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 9.0F};
+    for (uint32_t i = 0; i < 6; ++i) {
+        activations[graph.tensors[input].offset + i] = values[i];
+    }
+    gfx::forward(graph, parameters.data(), activations.data());
+    assert(std::abs(activations[graph.tensors[mean].offset] - 4.0F) < 1.0e-6F);
+
+    // 없는 텐서를 접으라면 거절한다. 원소 수는 볼 것이 없다 — 빌더가 축마다 1 을 하한으로 두므로
+    // 원소가 0 인 텐서는 애초에 만들어지지 않는다.
+    gfx::Graph empty;
+    gfx::GraphBuilder emptyBuilder(empty);
+    assert(emptyBuilder.addMean(gfx::NO_TENSOR) == gfx::NO_TENSOR);
+    assert(emptyBuilder.addInput(0, 0, 0, 0) != gfx::NO_TENSOR);
+    assert(empty.tensors[0].count() == 1);
+}
+
+// 손실이 없는 그래프는 validateForward 만 지나야 한다. 행동만 내는 정책 망이 그 꼴이다.
+void testForwardOnlyGraph() {
+    gfx::Graph graph;
+    gfx::GraphBuilder builder(graph);
+    uint32_t input = builder.addInput(2, 3, 1, 1);
+    uint32_t weight = builder.addParameter(4, 3, 1, 1);
+    uint32_t bias = builder.addParameter(4, 1, 1, 1);
+    uint32_t action = builder.addTanh(builder.addLinear(input, weight, bias));
+    assert(action != gfx::NO_TENSOR);
+    assert(gfx::validateForward(graph));
+    // 마지막이 스칼라가 아니므로 역전파는 못 한다. 조용히 0 을 돌려주지 않고 거짓을 낸다.
+    assert(!gfx::validate(graph));
+    std::vector<float> parameters(graph.parameterCount, 0.1F);
+    std::vector<float> activations(graph.activationCount, 0.0F);
+    std::vector<float> parameterGradients(graph.parameterCount, 0.0F);
+    std::vector<float> activationGradients(graph.activationCount, 0.0F);
+    gfx::forward(graph, parameters.data(), activations.data());
+    assert(!gfx::backward(
+        graph, parameters.data(), activations.data(), parameterGradients.data(), activationGradients.data()));
+
+    // 반대로 표 자체가 깨지면 둘 다 거짓이다.
+    gfx::Graph broken = graph;
+    broken.ops.back().inputs[0] = broken.ops.back().output;
+    assert(!gfx::validateForward(broken));
+    assert(!gfx::validate(broken));
+}
+
 // Huber 의 **값**. 유한차분은 경사만 보므로 꺾이는 지점 밖의 상수항(-delta^2/2)이 빠져도 안 걸린다.
 // 그 항이 없으면 손실이 그 지점에서 끊기고, 두 크리틱의 손실을 견주는 자리에서 눈금이 어긋난다.
 void testHuberValue() {
@@ -1265,6 +1271,8 @@ int main() {
     testAdamConvergence();
     testPolyak();
     testHuberValue();
+    testMeanValue();
+    testForwardOnlyGraph();
     testParameterFile();
     testGradients();
     std::printf("신경망 순수 계산 테스트 통과\n");

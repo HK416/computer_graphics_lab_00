@@ -280,6 +280,19 @@ uint32_t GraphBuilder::addAdd(uint32_t a, uint32_t b) {
     return emit(OpKind::ADD, a, b, NO_TENSOR, output);
 }
 
+uint32_t GraphBuilder::addMul(uint32_t a, uint32_t b) {
+    if (a >= graph.tensors.size() || b >= graph.tensors.size()) {
+        return NO_TENSOR;
+    }
+    const Tensor& first = graph.tensors[a];
+    if (!sameShape(first, graph.tensors[b])) {
+        return NO_TENSOR;
+    }
+    uint32_t output =
+        allocate(Arena::ACTIVATION, first.dims[0], first.dims[1], first.dims[2], first.dims[3], TENSOR_GRAD);
+    return emit(OpKind::MUL, a, b, NO_TENSOR, output);
+}
+
 uint32_t GraphBuilder::addConcat(uint32_t a, uint32_t b) {
     if (a >= graph.tensors.size() || b >= graph.tensors.size()) {
         return NO_TENSOR;
@@ -304,6 +317,15 @@ uint32_t GraphBuilder::addScale(uint32_t input, float factor) {
     emit(OpKind::SCALE, input, NO_TENSOR, NO_TENSOR, output);
     graph.ops.back().fparams[0] = factor;
     return output;
+}
+
+uint32_t GraphBuilder::addMean(uint32_t input) {
+    if (input >= graph.tensors.size()) {
+        return NO_TENSOR;
+    }
+    // 원소 수는 볼 것이 없다. allocate 가 축마다 1 을 하한으로 두므로 count() 는 늘 1 이상이다.
+    uint32_t output = allocate(Arena::ACTIVATION, 1, 1, 1, 1, TENSOR_GRAD);
+    return emit(OpKind::MEAN, input, NO_TENSOR, NO_TENSOR, output);
 }
 
 uint32_t GraphBuilder::addMin2(uint32_t a, uint32_t b) {
@@ -361,6 +383,10 @@ uint32_t GraphBuilder::addReshape(uint32_t tensor, uint32_t n, uint32_t c, uint3
     }
     graph.tensors.push_back(view);
     return static_cast<uint32_t>(graph.tensors.size() - 1);
+}
+
+size_t GraphBuilder::parameterCount() const {
+    return graph.parameterCount;
 }
 
 uint32_t GraphBuilder::featureCount(uint32_t tensor) const {
@@ -454,6 +480,13 @@ template <typename T> void forwardImpl(const Graph& graph, const T* parameters, 
             }
             break;
         }
+        case OpKind::MUL: {
+            const T* second = readTensor(graph.tensors[op.inputs[1]], parameters, constActivations);
+            for (uint32_t i = 0; i < out.count(); ++i) {
+                y[i] = x[i] * second[i];
+            }
+            break;
+        }
         case OpKind::CONCAT: {
             const Tensor& secondTensor = graph.tensors[op.inputs[1]];
             const T* second = readTensor(secondTensor, parameters, constActivations);
@@ -475,6 +508,17 @@ template <typename T> void forwardImpl(const Graph& graph, const T* parameters, 
                 y[i] = x[i] * static_cast<T>(op.fparams[0]);
             }
             break;
+        case OpKind::MEAN: {
+            uint32_t count = in.count();
+            // 순서대로 더한다. GLSL 짝은 트리 리덕션이라 반올림이 갈리지만, 유한한 배치에서 그 차이는
+            // 자기 검사의 허용치 안이다.
+            T sum = T{0};
+            for (uint32_t i = 0; i < count; ++i) {
+                sum += x[i];
+            }
+            y[0] = count > 0 ? sum / static_cast<T>(count) : T{0};
+            break;
+        }
         case OpKind::MIN2: {
             const T* second = readTensor(graph.tensors[op.inputs[1]], parameters, constActivations);
             for (uint32_t i = 0; i < out.count(); ++i) {
@@ -512,7 +556,7 @@ template <typename T> void forwardImpl(const Graph& graph, const T* parameters, 
 
 } // namespace
 
-bool validate(const Graph& graph) {
+bool validateForward(const Graph& graph) {
     if (graph.ops.empty()) {
         return false;
     }
@@ -537,6 +581,7 @@ bool validate(const Graph& graph) {
             required = 3;
             break;
         case OpKind::ADD:
+        case OpKind::MUL:
         case OpKind::CONCAT:
         case OpKind::MIN2:
         case OpKind::MSE:
@@ -546,6 +591,7 @@ bool validate(const Graph& graph) {
         case OpKind::RELU:
         case OpKind::TANH:
         case OpKind::SCALE:
+        case OpKind::MEAN:
             required = 1;
             break;
         }
@@ -566,6 +612,7 @@ bool validate(const Graph& graph) {
         // 읽은 표는 여기서 걸러야 범위 밖을 읽지 않는다.
         switch (op.kind) {
         case OpKind::ADD:
+        case OpKind::MUL:
         case OpKind::MIN2:
         case OpKind::MSE:
         case OpKind::HUBER:
@@ -576,6 +623,26 @@ bool validate(const Graph& graph) {
         default:
             break;
         }
+        // 접는 연산은 출력이 스칼라다. 아니면 순전파가 y[0] 에만 쓰고 나머지는 지난 프레임의 값으로
+        // 남아, 다음 연산이 쓰레기를 읽는다.
+        switch (op.kind) {
+        case OpKind::MEAN:
+        case OpKind::MSE:
+        case OpKind::HUBER:
+            if (graph.tensors[op.output].count() != 1) {
+                return false;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    return true;
+}
+
+bool validate(const Graph& graph) {
+    if (!validateForward(graph)) {
+        return false;
     }
     // 마지막 연산의 출력이 «경사를 받는 스칼라» 여야 역전파의 씨앗을 심을 수 있다.
     const Tensor& last = graph.tensors[graph.ops.back().output];
@@ -823,6 +890,21 @@ bool backward(const Graph& graph,
             }
             break;
         }
+        case OpKind::MUL: {
+            const Tensor& secondTensor = graph.tensors[op.inputs[1]];
+            const float* second = readTensor(secondTensor, parameters, activations);
+            float* dSecond = tensorGradient(secondTensor, parameterGradients, activationGradients);
+            for (uint32_t i = 0; i < out.count(); ++i) {
+                // 짝의 **값** 을 곱한다. 한쪽이 경사를 받지 않아도 다른 쪽 경사에는 그 값이 든다.
+                if (dx != nullptr) {
+                    dx[i] += dy[i] * second[i];
+                }
+                if (dSecond != nullptr) {
+                    dSecond[i] += dy[i] * x[i];
+                }
+            }
+            break;
+        }
         case OpKind::CONCAT: {
             const Tensor& secondTensor = graph.tensors[op.inputs[1]];
             float* dSecond = tensorGradient(secondTensor, parameterGradients, activationGradients);
@@ -851,6 +933,17 @@ bool backward(const Graph& graph,
                 }
             }
             break;
+        case OpKind::MEAN: {
+            uint32_t count = in.count();
+            if (dx == nullptr || count == 0) {
+                break;
+            }
+            float scale = dy[0] / static_cast<float>(count);
+            for (uint32_t i = 0; i < count; ++i) {
+                dx[i] += scale;
+            }
+            break;
+        }
         case OpKind::MIN2: {
             const Tensor& secondTensor = graph.tensors[op.inputs[1]];
             const float* second = readTensor(secondTensor, parameters, activations);

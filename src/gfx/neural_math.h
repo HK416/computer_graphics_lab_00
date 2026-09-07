@@ -63,10 +63,15 @@ enum class OpKind : uint32_t {
     LAYERNORM,
     // 원소별 합. 다중 뷰 병합 M = sum(V_i) 가 이것이라 병합의 역전파는 경사 복사로 끝난다.
     ADD,
+    // 원소별 곱. 시간차 목표의 γ(1 - 끝) 마스크가 이것이다 — 표본마다 값이 달라 SCALE 로는 안 된다.
+    MUL,
     // 특징 축으로 잇는다. 크리틱이 (특징, 행동) 을 함께 받는 자리.
     CONCAT,
     // 출력 = 입력 * fparams[0].
     SCALE,
+    // 모든 원소의 평균을 스칼라 하나로 접는다. 액터 손실 -mean(Q) 가 이것이다 — 손실 자리에 손실이
+    // 아닌 값(가치)을 놓아야 하므로 MSE·HUBER 로는 대신할 수 없다.
+    MEAN,
     // 원소별 최소. 쌍둥이 크리틱의 min(Q1, Q2) 다. 경사는 이긴 쪽만 받는다.
     MIN2,
     // (예측[B][1], 목표[B][1]) -> 손실[1]. 평균 제곱 오차.
@@ -106,6 +111,16 @@ struct Graph {
     std::vector<uint32_t> parameterTensors() const;
 };
 
+// 텐서 하나가 배열 안에서 시작하는 자리. 입력을 채우고 결과를 읽는 데 쓴다. arena 가 맞는 배열을
+// 주는 것은 부르는 쪽 몫이다(파라미터 텐서에 활성 배열을 주면 엉뚱한 자리를 가리킨다).
+inline float* tensorValues(const Graph& graph, uint32_t tensor, float* array) {
+    return array + graph.tensors[tensor].offset;
+}
+
+inline const float* tensorValues(const Graph& graph, uint32_t tensor, const float* array) {
+    return array + graph.tensors[tensor].offset;
+}
+
 // 그래프를 짓는다. 텐서 자리를 arena 에 이어 붙이고 연산을 표에 쌓는다. 모양이 맞지 않으면
 // core::fatal 이 아니라 **NO_TENSOR 를 돌려준다** — 테스트가 잘못된 모양을 확인할 수 있어야 한다.
 class GraphBuilder {
@@ -124,8 +139,10 @@ public:
     uint32_t addTanh(uint32_t input);
     uint32_t addLayerNorm(uint32_t input, uint32_t gain, uint32_t bias);
     uint32_t addAdd(uint32_t a, uint32_t b);
+    uint32_t addMul(uint32_t a, uint32_t b);
     uint32_t addConcat(uint32_t a, uint32_t b);
     uint32_t addScale(uint32_t input, float factor);
+    uint32_t addMean(uint32_t input);
     uint32_t addMin2(uint32_t a, uint32_t b);
     uint32_t addMse(uint32_t prediction, uint32_t target);
     uint32_t addHuber(uint32_t prediction, uint32_t target, float delta);
@@ -143,6 +160,9 @@ public:
     // (배치, 특징) 텐서의 특징 수. 다음 층의 가중치 모양을 잡을 때 쓴다.
     uint32_t featureCount(uint32_t tensor) const;
 
+    // 지금까지 잡은 파라미터의 float 개수. 구간을 나누며 짓는 쪽(rl_agent)이 경계를 여기서 읽는다.
+    size_t parameterCount() const;
+
 private:
     uint32_t allocate(Arena arena, uint32_t n, uint32_t c, uint32_t h, uint32_t w, uint32_t flags);
     uint32_t emit(OpKind kind, uint32_t a, uint32_t b, uint32_t c, uint32_t output);
@@ -153,9 +173,15 @@ private:
 // CONV2D 의 출력 한 변. 커널·보폭·여백에서 정한다.
 uint32_t convOutputSize(uint32_t input, uint32_t kernel, uint32_t stride, uint32_t pad);
 
-// 그래프가 순·역전파를 돌릴 꼴인지. 연산의 입출력 번호가 범위 안이고, 출력 번호가 늘 입력 번호보다
-// 커서(빌더가 지키는 불변식) **표를 거꾸로 훑는 것이 올바른 위상 정렬**이며, 마지막 연산의 출력이
-// 경사를 받는 스칼라(원소 하나)여야 한다.
+// 표가 **순전파를 돌릴** 꼴인지. 연산의 입출력 번호가 범위 안이고, 출력 번호가 늘 입력 번호보다
+// 커서(빌더가 지키는 불변식) **표를 훑는 순서가 올바른 위상 정렬**이며, 원소별 연산의 두 입력 모양이
+// 같은지를 본다.
+//
+// 손실이 없는 그래프 — 관측에서 행동만 내는 정책 망 — 는 이것으로 충분하다.
+bool validateForward(const Graph& graph);
+
+// 그 위에 **역전파의 씨앗을 심을 수 있는지**를 더 본다: 마지막 연산의 출력이 경사를 받는 스칼라(원소
+// 하나)여야 한다. backward 를 부를 그래프는 이것을 통과해야 한다.
 //
 // 빌더로 지은 그래프는 마지막 조건만 부르는 쪽 몫이다. 손으로 짓거나 파일에서 읽은 표는 여기서 건다.
 bool validate(const Graph& graph);
