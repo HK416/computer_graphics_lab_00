@@ -234,6 +234,7 @@ add_executable(cg_lab
     src/gfx/hardware_profile.cpp
     src/gfx/headless_compute.cpp
     src/gfx/lod_network.cpp
+    src/gfx/neural_math.cpp
     src/gfx/profiler.cpp
     src/gfx/profiler_math.cpp
     src/gfx/raytracing.cpp
@@ -579,6 +580,15 @@ else()
     target_compile_options(cg_lab_policy_tests PRIVATE -Wall -Wextra)
 endif()
 
+# 신경망의 순수 계산. 유한차분 경사 검사라 Vulkan 도 다른 것도 링크하지 않는다.
+add_executable(cg_lab_neural_tests tests/neural_test.cpp src/gfx/neural_math.cpp)
+target_include_directories(cg_lab_neural_tests PRIVATE src)
+if(MSVC)
+    target_compile_options(cg_lab_neural_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(cg_lab_neural_tests PRIVATE -Wall -Wextra)
+endif()
+
 # 로봇 관측·행동과 진화 전략 학습. CPU 강체 솔버 위에서 돌므로 scene 과 작업 큐를 함께 링크한다.
 add_executable(cg_lab_robot_tests tests/robot_test.cpp src/physics/robot.cpp src/physics/policy.cpp
     src/physics/rigid_body.cpp src/scene/scene.cpp src/asset/animation.cpp src/core/error.cpp
@@ -614,7 +624,8 @@ foreach(test_target
         cg_lab_scene_io_tests cg_lab_profiler_tests cg_lab_shadow_tests cg_lab_concurrency_tests
         cg_lab_upscaler_tests cg_lab_vertex_pack_tests cg_lab_physics_tests cg_lab_primitives_tests
         cg_lab_debug_lines_tests cg_lab_hardware_profile_tests cg_lab_fluid_tests
-        cg_lab_marching_cubes_tests cg_lab_cloth_tests cg_lab_policy_tests cg_lab_robot_tests)
+        cg_lab_marching_cubes_tests cg_lab_cloth_tests cg_lab_policy_tests cg_lab_robot_tests
+        cg_lab_neural_tests)
     if(MSVC)
         target_compile_options(${test_target} PRIVATE /UNDEBUG)
     else()
@@ -645,6 +656,7 @@ add_test(NAME cloth COMMAND cg_lab_cloth_tests)
 add_test(NAME physics COMMAND cg_lab_physics_tests)
 add_test(NAME policy COMMAND cg_lab_policy_tests)
 add_test(NAME robot COMMAND cg_lab_robot_tests)
+add_test(NAME neural COMMAND cg_lab_neural_tests)
 add_test(NAME marching_cubes COMMAND cg_lab_marching_cubes_tests)
 # 헤드리스 물리 회귀: 강체 장면을 120 프레임 돌려 저장한 결과가 기준 파일과 바이트로 같은지 본다.
 add_test(NAME headless_physics

@@ -55,7 +55,7 @@ ctest --test-dir build/debug --output-on-failure
 ```
 
 테스트 이름: `lod_network` `animation` `camera` `scene` `scene_io` `profiler` `shadow` `upscaler`
-`concurrency` `vertex_pack` `physics` `policy` `robot` `primitives` `debug_lines` `hardware_profile` `fluid`
+`concurrency` `vertex_pack` `physics` `policy` `robot` `neural` `primitives` `debug_lines` `hardware_profile` `fluid`
 `marching_cubes` `cloth` `headless_physics`(cg_lab 을 `--headless` 로 돌려 저장 결과를 `tests/scenes/expected/` 와 cmp).
 
 선택 기능:
@@ -166,7 +166,7 @@ CPU 백엔드를 부르느라 `physics` 를 본다.
 | `src/app` | 수명 주기, SDL 창, 이벤트 루프, 모델/장면 적재. `plugin.h` 의 `Plugin`/`Services` 와 `plugins/` 의 기능 플러그인(물리 등) |
 | `src/asset` | glTF 적재, meshlet/LOD DAG 구축, 애니메이션 샘플링. CPU 측 표현 |
 | `src/scene` | 장면 그래프, 카메라, 커스텀 JSON 직렬화 |
-| `src/gfx` | Vulkan 컨텍스트, 리소스, 렌더 경로 전부. `Renderer` 는 클래스 하나지만 정의가 `renderer_*.cpp` 에 기능별로 나뉜다(`renderer_internal.h` 가 공유 푸시 상수·포맷). `render_graph.h` 가 프레임 패스 목록. GPU SPH(`fluid.cpp`)도 여기 |
+| `src/gfx` | Vulkan 컨텍스트, 리소스, 렌더 경로 전부. 신경망의 순수 계산(`neural_math.h` — 텐서·연산 표와 CPU 기준 순/역전파)도 여기. `Renderer` 는 클래스 하나지만 정의가 `renderer_*.cpp` 에 기능별로 나뉜다(`renderer_internal.h` 가 공유 푸시 상수·포맷). `render_graph.h` 가 프레임 패스 목록. GPU SPH(`fluid.cpp`)도 여기 |
 | `src/physics` | 강체 솔버와 CPU SPH, 정책 망·진화 전략(`policy.h`)과 로봇 관측·행동·롤아웃(`robot.h`). `scene` 과 `core` 에만 의존한다. 강체는 재생 중 `Application::run` 이 고정 간격으로 부르고, 유체 CPU 백엔드는 `gfx::FluidSimulator` 가 부른다(그래서 `gfx` → `physics` 의존이 하나 있다) |
 | `src/editor` | ImGui 도킹 편집기. `Editor` 는 클래스 하나지만 정의가 `editor_*.cpp` 에 기능별로 나뉜다(`editor_internal.h` 가 공용 include·창 이름) |
 | `src/core` | `fatal`, 잠금 없는 작업 큐 |
