@@ -1,0 +1,69 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// 합성곱의 가중치 경사. dw[oc][ic][ky][kx] += sum_{n,oy,ox} dy[n][oc][oy][ox] * x[n][ic][iy][ix].
+//
+// 가중치 원소(필터 탭) 하나에 스레드 하나다. 계획은 «필터 탭 = 워크그룹 + shared 트리 리덕션» 이었지만
+// 그러면 부분합을 모으는 순서가 CPU 기준과 갈려 비트로 같지 않게 된다. 탭 하나를 스레드 하나가 통째로
+// 맡으면 순서를 그대로 지킬 수 있고, 탭 수(출력채널 x 입력채널 x 커널)가 이미 수만 개라 병렬성도 넉넉하다.
+//
+// ponytail: 대신 탭마다 배치 전체를 훑으므로 dy 와 x 를 여러 번 읽는다. 84x84 인코더에서 이것이
+// 대역폭을 먹는다. 계획의 트리 리덕션은 그때 허용 오차와 함께 다시 볼 자리다.
+layout(local_size_x_id = 0) in;
+
+void main() {
+    Op op = push.ops.items[push.op];
+    if (op.kind != NEURAL_OP_CONV2D) {
+        return;
+    }
+    Tensor source = push.tensors.items[op.inputs[0]];
+    Tensor weight = push.tensors.items[op.inputs[1]];
+    Tensor target = push.tensors.items[op.result];
+    if (!neuralHasGrad(target) || !neuralHasGrad(weight)) {
+        return;
+    }
+
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= neuralCount(weight)) {
+        return;
+    }
+    int stride = op.iparams[0];
+    int pad = op.iparams[1];
+    uint batch = source.dims[0];
+    uint inChannels = source.dims[1];
+    int inHeight = int(source.dims[2]);
+    int inWidth = int(source.dims[3]);
+    uint outChannels = target.dims[1];
+    uint outHeight = target.dims[2];
+    uint outWidth = target.dims[3];
+    uint kernelHeight = weight.dims[2];
+    uint kernelWidth = weight.dims[3];
+
+    uint kx = i % kernelWidth;
+    uint rest = i / kernelWidth;
+    uint ky = rest % kernelHeight;
+    rest /= kernelHeight;
+    uint ic = rest % inChannels;
+    uint oc = rest / inChannels;
+
+    precise float acc = neuralGradAt(weight, i);
+    for (uint n = 0; n < batch; ++n) {
+        for (uint oy = 0; oy < outHeight; ++oy) {
+            int iy = int(oy) * stride + int(ky) - pad;
+            if (iy < 0 || iy >= inHeight) {
+                continue;
+            }
+            for (uint ox = 0; ox < outWidth; ++ox) {
+                int ix = int(ox) * stride + int(kx) - pad;
+                if (ix < 0 || ix >= inWidth) {
+                    continue;
+                }
+                uint di = ((n * outChannels + oc) * outHeight + oy) * outWidth + ox;
+                uint xi = ((n * inChannels + ic) * uint(inHeight) + uint(iy)) * uint(inWidth) + uint(ix);
+                acc += neuralGradAt(target, di) * neuralRead(source, xi);
+            }
+        }
+    }
+    neuralSetGrad(weight, i, acc);
+}

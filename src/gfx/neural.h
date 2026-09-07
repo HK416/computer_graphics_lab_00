@@ -113,6 +113,11 @@ private:
     VkPipeline linearDxPipeline = VK_NULL_HANDLE;
     VkPipeline linearDwPipeline = VK_NULL_HANDLE;
     VkPipeline biasGradPipeline = VK_NULL_HANDLE;
+    // 합성곱도 방향마다 커널이 다르다. dx 는 «모아 읽기» 라 입력 원소마다, dw 는 필터 탭마다다.
+    VkPipeline convPipeline = VK_NULL_HANDLE;
+    VkPipeline convDxPipeline = VK_NULL_HANDLE;
+    VkPipeline convDwPipeline = VK_NULL_HANDLE;
+    VkPipeline convDbPipeline = VK_NULL_HANDLE;
 
     Buffer tensorBuffer;
     Buffer opBuffer;

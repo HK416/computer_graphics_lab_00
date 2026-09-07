@@ -127,6 +127,10 @@ set(shader_sources
     shaders/cloth_finish.comp
     shaders/cloth_write.comp
     shaders/neural_elementwise.comp
+    shaders/neural_conv.comp
+    shaders/neural_conv_dx.comp
+    shaders/neural_conv_dw.comp
+    shaders/neural_conv_db.comp
     shaders/neural_linear.comp
     shaders/neural_linear_dx.comp
     shaders/neural_linear_dw.comp

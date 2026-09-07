@@ -224,6 +224,82 @@ Case makeConcat() {
     return item;
 }
 
+// 합성곱. **보폭·여백·커널을 바꿔 가며** 본다.
+//
+// 시험할 층 **앞에 1x1 합성곱을 하나 둔다.** 그러지 않으면 그 층의 입력이 경사를 받지 않는 INPUT 이라
+// dx 가 두 엔진 모두에서 통째로 건너뛰어지고, 이 단계의 핵심인 모아 읽기 산술(보폭으로 나누어떨어지는지,
+// 여백을 더한 자리, ky 를 거꾸로 도는 것)이 보폭 1·여백 0 으로만 검사된다. 그것이 정확히 처음에 빠졌던
+// 함정이다 — 앞 층이 있어야 «보폭 2·여백 1 의 dx» 라는 말이 성립한다.
+//
+// 여백이 0 이어도 dx 의 건너뛰기는 돈다(범위 밖 출력이 생긴다). 보폭이 1 이어도 ky 마다 oy 가 달라
+// «거꾸로 돈다» 가 뜻을 갖는다. 그래서 두 축을 따로 흔든다.
+Case makeConv(const char* name, uint32_t stride, uint32_t pad, uint32_t kernelHeight, uint32_t kernelWidth) {
+    Case item;
+    item.name = name;
+    GraphBuilder builder(item.graph);
+    // 채널 수를 서로 다르게 둔다. 같으면 입력·출력 채널 첨자를 맞바꿔도 드러나지 않는다.
+    uint32_t input = builder.addInput(2, 3, 9, 11);
+    uint32_t stemWeight = builder.addParameter(3, 3, 1, 1);
+    uint32_t stemBias = builder.addParameter(3, 1, 1, 1);
+    uint32_t stem = builder.addConv2d(input, stemWeight, stemBias, 1, 0);
+    uint32_t weight = builder.addParameter(4, 3, kernelHeight, kernelWidth);
+    uint32_t bias = builder.addParameter(4, 1, 1, 1);
+    uint32_t hidden = builder.addConv2d(stem, weight, bias, stride, pad);
+    // 뒤에도 층을 하나 더 얹는다. 마지막 층의 dx 는 아무 파라미터에도 닿지 않는다.
+    uint32_t relu = builder.addRelu(hidden);
+    uint32_t secondWeight = builder.addParameter(2, 4, 2, 2);
+    uint32_t secondBias = builder.addParameter(2, 1, 1, 1);
+    uint32_t second = builder.addConv2d(relu, secondWeight, secondBias, 1, 0);
+    if (hidden == gfx::NO_TENSOR || second == gfx::NO_TENSOR) {
+        item.graph = Graph{};
+    }
+    item.inputs = {input};
+    return item;
+}
+
+// 출력 채널이 작업 그룹(128)보다 많은 합성곱. 편향 경사는 채널마다 스레드 하나라, 채널이 적으면
+// 디스패치 수를 줄여도 남는 스레드가 범위 밖이라 티가 나지 않는다. 1x1 커널에 공간을 작게 잡아
+// 채널만 늘린다.
+Case makeWideConv() {
+    Case item;
+    item.name = "wide conv";
+    GraphBuilder builder(item.graph);
+    uint32_t input = builder.addInput(1, 3, 4, 4);
+    uint32_t stemWeight = builder.addParameter(3, 3, 1, 1);
+    uint32_t stemBias = builder.addParameter(3, 1, 1, 1);
+    uint32_t stem = builder.addConv2d(input, stemWeight, stemBias, 1, 0);
+    uint32_t weight = builder.addParameter(140, 3, 1, 1);
+    uint32_t bias = builder.addParameter(140, 1, 1, 1);
+    uint32_t wide = builder.addConv2d(stem, weight, bias, 1, 0);
+    if (wide == gfx::NO_TENSOR) {
+        item.graph = Graph{};
+    }
+    item.inputs = {input};
+    return item;
+}
+
+// **합성곱 하나를 두 입력에 태운다.** 14단계의 다중 뷰 인코더가 정확히 이 모양이고, 검사로서도 두 가지를
+// 한꺼번에 밟는다: 가중치·편향 경사가 두 갈래에서 **쌓이므로** «이미 들어 있던 값에서 출발한다» 가
+// 비로소 검사되고(한 번만 쓰이면 0 + s 와 s + 0 이 비트까지 같아 증명 불가능하다), 가중치를 216 개로
+// 잡아 작업 그룹(128) 하나를 넘기므로 디스패치 수를 줄이는 결함도 드러난다.
+Case makeSharedConv() {
+    Case item;
+    item.name = "shared conv";
+    GraphBuilder builder(item.graph);
+    uint32_t input = builder.addInput(2, 3, 9, 11);
+    uint32_t weight = builder.addParameter(8, 3, 3, 3);
+    uint32_t bias = builder.addParameter(8, 1, 1, 1);
+    // 같은 가중치를 서로 다른 «뷰» 둘에 태운다.
+    uint32_t second = builder.addScale(input, 0.5F);
+    uint32_t left = builder.addConv2d(input, weight, bias, 2, 1);
+    uint32_t right = builder.addConv2d(second, weight, bias, 2, 1);
+    if (builder.addAdd(left, right) == gfx::NO_TENSOR) {
+        item.graph = Graph{};
+    }
+    item.inputs = {input};
+    return item;
+}
+
 // **작업 그룹 하나보다 큰 층.** 지금까지의 선형 경우는 가중치가 300 개보다 작아 전부 한 그룹에 들어가고,
 // 그러면 디스패치 수를 줄여도 남는 스레드가 어차피 범위 밖이라 티가 나지 않는다. 세 커널의 스레드 수
 // (배치x출력, 배치x입력, 출력x입력)가 모두 그룹 크기(128)를 넘게 잡는다.
@@ -282,6 +358,22 @@ Case makeFrozenLinear() {
     builder.detach(frozenBias);
     uint32_t second = builder.addLinear(first, liveWeight, frozenBias);
 
+    // 합성곱 쪽에도 얼린 가중치와 편향을 둔다. 선형 층만으로는 합성곱 커널의 같은 가드가 죽은 채로
+    // 남는다 — 커널이 넷씩 따로라 «선형에서 됐으니 합성곱도 될 것» 이 성립하지 않는다.
+    uint32_t picture = builder.addInput(2, 3, 7, 7);
+    uint32_t frozenKernel = builder.addParameter(4, 3, 3, 3);
+    uint32_t liveKernelBias = builder.addParameter(4, 1, 1, 1);
+    builder.detach(frozenKernel);
+    uint32_t convolved = builder.addConv2d(picture, frozenKernel, liveKernelBias, 2, 1);
+    uint32_t liveKernel = builder.addParameter(2, 4, 2, 2);
+    uint32_t frozenKernelBias = builder.addParameter(2, 1, 1, 1);
+    builder.detach(frozenKernelBias);
+    uint32_t deeper = builder.addConv2d(builder.addRelu(convolved), liveKernel, frozenKernelBias, 1, 0);
+    if (deeper == gfx::NO_TENSOR) {
+        item.graph = Graph{};
+    }
+    builder.addScale(deeper, 0.25F);
+
     // 학습하는 상수 벡터를 입력으로 받는 층. dx 가 파라미터 경사 쪽에 쌓인다.
     uint32_t constant = builder.addParameter(1, 4, 1, 1);
     uint32_t constantWeight = builder.addParameter(2, 4, 1, 1);
@@ -294,7 +386,7 @@ Case makeFrozenLinear() {
     uint32_t left = builder.addLinear(narrowed, headWeight, headBias);
     uint32_t right = builder.addLinear(view, headWeight, headBias);
     builder.addAdd(left, builder.addReshape(builder.addScale(right, 1.0F), 1, 1, 1, 1));
-    item.inputs = {input};
+    item.inputs = {input, picture};
     return item;
 }
 
@@ -339,6 +431,11 @@ bool runNeuralSelfCheck() {
     cases.push_back(makeLinear());
     cases.push_back(makeConcat());
     cases.push_back(makeWideLinear());
+    cases.push_back(makeConv("conv s1 p0", 1, 0, 3, 3));
+    cases.push_back(makeConv("conv s2 p1", 2, 1, 3, 3));
+    cases.push_back(makeConv("conv k2x3 s2", 2, 2, 2, 3));
+    cases.push_back(makeSharedConv());
+    cases.push_back(makeWideConv());
     cases.push_back(makeSharedLinear());
     cases.push_back(makeFrozenLinear());
 

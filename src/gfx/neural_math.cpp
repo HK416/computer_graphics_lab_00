@@ -214,6 +214,11 @@ uint32_t GraphBuilder::addConv2d(uint32_t input, uint32_t weight, uint32_t bias,
     if (w.dims[1] != in.dims[1] || bias >= graph.tensors.size() || graph.tensors[bias].count() != w.dims[0]) {
         return NO_TENSOR;
     }
+    // 세 입력이 같은 저장소를 나눠 쓰면 안 된다. GPU 는 dx·dw·db 를 배리어 없이 나란히 돌리므로
+    // (서로 다른 텐서라는 전제로) 겹쳐 있으면 두 커널이 같은 자리를 동시에 고친다.
+    if (overlaps(in, w) || overlaps(in, graph.tensors[bias]) || overlaps(w, graph.tensors[bias])) {
+        return NO_TENSOR;
+    }
     uint32_t outHeight = convOutputSize(in.dims[2], w.dims[2], stride, pad);
     uint32_t outWidth = convOutputSize(in.dims[3], w.dims[3], stride, pad);
     if (outHeight == 0 || outWidth == 0) {
@@ -234,6 +239,10 @@ uint32_t GraphBuilder::addLinear(uint32_t input, uint32_t weight, uint32_t bias)
     const Tensor& w = graph.tensors[weight];
     // 선형은 (배치, 특징) 으로만 본다. 합성곱 출력을 이어 붙일 때는 미리 평탄하게 잡아 둔다.
     if (in.dims[2] != 1 || in.dims[3] != 1 || w.dims[1] != in.dims[1] || graph.tensors[bias].count() != w.dims[0]) {
+        return NO_TENSOR;
+    }
+    // 합성곱과 같은 이유로 세 입력이 겹치면 안 된다.
+    if (overlaps(in, w) || overlaps(in, graph.tensors[bias]) || overlaps(w, graph.tensors[bias])) {
         return NO_TENSOR;
     }
     uint32_t output = allocate(Arena::ACTIVATION, in.dims[0], w.dims[0], 1, 1, TENSOR_GRAD);
@@ -634,9 +643,22 @@ bool validateForward(const Graph& graph) {
         default:
             break;
         }
-        // 이음의 두 조각이 겹치면 GPU 에서 경사 하나를 잃는다(addConcat 의 주석 참고). 빌더는 이미
-        // 막지만 손으로 짓거나 파일에서 읽은 표는 여기서 건다.
+        // 이음의 두 조각이 겹치면 GPU 에서 경사 하나를 잃는다(addConcat 의 주석 참고). 합성곱·선형은
+        // dx·dw·db 를 배리어 없이 나란히 돌리므로 세 입력이 겹치면 두 커널이 같은 자리를 동시에 고친다.
+        // 빌더는 이미 막지만 손으로 짓거나 파일에서 읽은 표는 여기서 건다.
         if (op.kind == OpKind::CONCAT && overlaps(graph.tensors[op.inputs[0]], graph.tensors[op.inputs[1]])) {
+            return false;
+        }
+        if (op.kind == OpKind::CONV2D || op.kind == OpKind::LINEAR) {
+            const Tensor& source = graph.tensors[op.inputs[0]];
+            const Tensor& weight = graph.tensors[op.inputs[1]];
+            const Tensor& bias = graph.tensors[op.inputs[2]];
+            if (overlaps(source, weight) || overlaps(source, bias) || overlaps(weight, bias)) {
+                return false;
+            }
+        }
+        // 합성곱의 보폭이 0 이면 GPU 의 모아 읽기가 0 으로 나눈다.
+        if (op.kind == OpKind::CONV2D && op.iparams[0] <= 0) {
             return false;
         }
         // 접는 연산은 출력이 스칼라다. 아니면 순전파가 y[0] 에만 쓰고 나머지는 지난 프레임의 값으로

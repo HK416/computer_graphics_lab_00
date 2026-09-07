@@ -1,0 +1,42 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// 합성곱의 편향 경사. db[oc] += sum_{n,oy,ox} dy[n][oc][oy][ox].
+//
+// 출력 채널 하나에 스레드 하나다. CPU 기준이 n -> oy -> ox 순으로 더하므로 같은 순서로 훑는다.
+layout(local_size_x_id = 0) in;
+
+void main() {
+    Op op = push.ops.items[push.op];
+    if (op.kind != NEURAL_OP_CONV2D) {
+        return;
+    }
+    Tensor source = push.tensors.items[op.inputs[0]];
+    Tensor bias = push.tensors.items[op.inputs[2]];
+    Tensor target = push.tensors.items[op.result];
+    if (!neuralHasGrad(target) || !neuralHasGrad(bias)) {
+        return;
+    }
+
+    uint outChannels = target.dims[1];
+    uint oc = gl_GlobalInvocationID.x;
+    if (oc >= outChannels) {
+        return;
+    }
+    // 배치는 **입력**에서 읽는다. 나머지 세 커널과 CPU 기준이 그렇게 하므로, 손으로 지은 표에서 두 값이
+    // 갈릴 때 여기만 다르게 도는 일이 없어야 한다.
+    uint batch = source.dims[0];
+    uint outHeight = target.dims[2];
+    uint outWidth = target.dims[3];
+
+    precise float acc = neuralGradAt(bias, oc);
+    for (uint n = 0; n < batch; ++n) {
+        for (uint oy = 0; oy < outHeight; ++oy) {
+            for (uint ox = 0; ox < outWidth; ++ox) {
+                acc += neuralGradAt(target, ((n * outChannels + oc) * outHeight + oy) * outWidth + ox);
+            }
+        }
+    }
+    neuralSetGrad(bias, oc, acc);
+}

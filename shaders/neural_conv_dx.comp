@@ -1,0 +1,77 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// 합성곱의 입력 경사. dx[n][ic][iy][ix] += sum_{oc,oy,ox} dy[n][oc][oy][ox] * w[oc][ic][ky][kx].
+//
+// **모아 읽기다.** 출력 쪽에서 흩어 쓰면 여러 출력이 같은 입력 자리를 건드려 원자 연산이 필요해진다.
+// 입력 원소 하나에 스레드 하나를 두고 그 자리에 기여하는 출력만 거꾸로 찾으면 그 자리를 만지는 스레드가
+// 하나뿐이 된다.
+//
+// ky 를 **거꾸로** 도는 것이 요점이다. iy = oy*보폭 + ky - 여백 이므로 ky 가 줄면 oy 가 는다. CPU 기준은
+// oy 를 오름차순으로 도므로, 같은 순서로 더하려면 ky 를 내림차순으로 돌아야 한다.
+layout(local_size_x_id = 0) in;
+
+void main() {
+    Op op = push.ops.items[push.op];
+    if (op.kind != NEURAL_OP_CONV2D) {
+        return;
+    }
+    Tensor source = push.tensors.items[op.inputs[0]];
+    Tensor weight = push.tensors.items[op.inputs[1]];
+    Tensor target = push.tensors.items[op.result];
+    if (!neuralHasGrad(target) || !neuralHasGrad(source)) {
+        return;
+    }
+
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= neuralCount(source)) {
+        return;
+    }
+    int stride = op.iparams[0];
+    int pad = op.iparams[1];
+    uint inChannels = source.dims[1];
+    uint inWidth = source.dims[3];
+    uint outChannels = target.dims[1];
+    int outHeight = int(target.dims[2]);
+    int outWidth = int(target.dims[3]);
+    int kernelHeight = int(weight.dims[2]);
+    int kernelWidth = int(weight.dims[3]);
+
+    uint ix = i % inWidth;
+    uint rest = i / inWidth;
+    uint iy = rest % source.dims[2];
+    rest /= source.dims[2];
+    uint ic = rest % inChannels;
+    uint n = rest / inChannels;
+
+    int spanY = int(iy) + pad;
+    int spanX = int(ix) + pad;
+    precise float acc = neuralGradAt(source, i);
+    for (uint oc = 0; oc < outChannels; ++oc) {
+        for (int ky = kernelHeight - 1; ky >= 0; --ky) {
+            int restY = spanY - ky;
+            if (restY < 0 || restY % stride != 0) {
+                continue;
+            }
+            int oy = restY / stride;
+            if (oy >= outHeight) {
+                continue;
+            }
+            for (int kx = kernelWidth - 1; kx >= 0; --kx) {
+                int restX = spanX - kx;
+                if (restX < 0 || restX % stride != 0) {
+                    continue;
+                }
+                int ox = restX / stride;
+                if (ox >= outWidth) {
+                    continue;
+                }
+                uint di = ((n * outChannels + oc) * uint(outHeight) + uint(oy)) * uint(outWidth) + uint(ox);
+                uint wi = ((oc * inChannels + ic) * uint(kernelHeight) + uint(ky)) * uint(kernelWidth) + uint(kx);
+                acc += neuralGradAt(target, di) * neuralRead(weight, wi);
+            }
+        }
+    }
+    neuralSetGrad(source, i, acc);
+}

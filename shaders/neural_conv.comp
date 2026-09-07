@@ -1,0 +1,62 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// 합성곱의 순전파. y[n][oc][oy][ox] = b[oc] + sum_{ic,ky,kx} x[n][ic][iy][ix] * w[oc][ic][ky][kx],
+// iy = oy*보폭 + ky - 여백.
+//
+// 출력 원소 하나에 스레드 하나이고 안쪽 세 겹을 CPU 기준과 같은 순서로 훑는다. 그래야 반올림까지 같다.
+layout(local_size_x_id = 0) in;
+
+void main() {
+    Op op = push.ops.items[push.op];
+    if (op.kind != NEURAL_OP_CONV2D) {
+        return;
+    }
+    Tensor source = push.tensors.items[op.inputs[0]];
+    Tensor weight = push.tensors.items[op.inputs[1]];
+    Tensor bias = push.tensors.items[op.inputs[2]];
+    Tensor target = push.tensors.items[op.result];
+
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= neuralCount(target)) {
+        return;
+    }
+    int stride = op.iparams[0];
+    int pad = op.iparams[1];
+    uint inChannels = source.dims[1];
+    int inHeight = int(source.dims[2]);
+    int inWidth = int(source.dims[3]);
+    uint outChannels = target.dims[1];
+    uint outWidth = target.dims[3];
+    uint kernelHeight = weight.dims[2];
+    uint kernelWidth = weight.dims[3];
+
+    // i = ((n*OC + oc)*OH + oy)*OW + ox 를 되푼다.
+    uint ox = i % outWidth;
+    uint rest = i / outWidth;
+    uint oy = rest % target.dims[2];
+    rest /= target.dims[2];
+    uint oc = rest % outChannels;
+    uint n = rest / outChannels;
+
+    precise float sum = neuralRead(bias, oc);
+    for (uint ic = 0; ic < inChannels; ++ic) {
+        for (uint ky = 0; ky < kernelHeight; ++ky) {
+            int iy = int(oy) * stride + int(ky) - pad;
+            if (iy < 0 || iy >= inHeight) {
+                continue;
+            }
+            for (uint kx = 0; kx < kernelWidth; ++kx) {
+                int ix = int(ox) * stride + int(kx) - pad;
+                if (ix < 0 || ix >= inWidth) {
+                    continue;
+                }
+                uint xi = ((n * inChannels + ic) * uint(inHeight) + uint(iy)) * uint(inWidth) + uint(ix);
+                uint wi = ((oc * inChannels + ic) * kernelHeight + ky) * kernelWidth + kx;
+                sum += neuralRead(source, xi) * neuralRead(weight, wi);
+            }
+        }
+    }
+    neuralWrite(target, i, sum);
+}

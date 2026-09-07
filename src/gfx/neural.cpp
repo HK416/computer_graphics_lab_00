@@ -93,8 +93,15 @@ NeuralExecutor::~NeuralExecutor() {
                            &readback}) {
         destroyBuffer(context, *buffer);
     }
-    for (VkPipeline pipeline :
-         {elementwisePipeline, linearPipeline, linearDxPipeline, linearDwPipeline, biasGradPipeline}) {
+    for (VkPipeline pipeline : {elementwisePipeline,
+                                linearPipeline,
+                                linearDxPipeline,
+                                linearDwPipeline,
+                                biasGradPipeline,
+                                convPipeline,
+                                convDxPipeline,
+                                convDwPipeline,
+                                convDbPipeline}) {
         vkDestroyPipeline(context.device, pipeline, nullptr);
     }
     vkDestroyPipelineLayout(context.device, pipelineLayout, nullptr);
@@ -119,9 +126,14 @@ void NeuralExecutor::createPipelines() {
     linearDxPipeline = createComputePipeline(context, pipelineLayout, "neural_linear_dx.comp.spv");
     linearDwPipeline = createComputePipeline(context, pipelineLayout, "neural_linear_dw.comp.spv");
     biasGradPipeline = createComputePipeline(context, pipelineLayout, "neural_bias_grad.comp.spv");
+    convPipeline = createComputePipeline(context, pipelineLayout, "neural_conv.comp.spv");
+    convDxPipeline = createComputePipeline(context, pipelineLayout, "neural_conv_dx.comp.spv");
+    convDwPipeline = createComputePipeline(context, pipelineLayout, "neural_conv_dw.comp.spv");
+    convDbPipeline = createComputePipeline(context, pipelineLayout, "neural_conv_db.comp.spv");
     ready = elementwisePipeline != VK_NULL_HANDLE && linearPipeline != VK_NULL_HANDLE &&
             linearDxPipeline != VK_NULL_HANDLE && linearDwPipeline != VK_NULL_HANDLE &&
-            biasGradPipeline != VK_NULL_HANDLE;
+            biasGradPipeline != VK_NULL_HANDLE && convPipeline != VK_NULL_HANDLE && convDxPipeline != VK_NULL_HANDLE &&
+            convDwPipeline != VK_NULL_HANDLE && convDbPipeline != VK_NULL_HANDLE;
     if (!ready) {
         spdlog::warn("신경망 GPU 실행기를 만들지 못했습니다. CPU 기준만 돕니다");
     }
@@ -139,6 +151,7 @@ bool NeuralExecutor::supported(OpKind kind) {
     case OpKind::MIN2:
     case OpKind::CONCAT:
     case OpKind::LINEAR:
+    case OpKind::CONV2D:
         return true;
     default:
         return false;
@@ -311,6 +324,21 @@ void NeuralExecutor::dispatch(VkCommandBuffer commandBuffer, uint32_t opIndex, u
             dispatchKernel(commandBuffer, linearDxPipeline, opIndex, flags, batch * inputs);
             dispatchKernel(commandBuffer, linearDwPipeline, opIndex, flags, outputs * inputs);
             dispatchKernel(commandBuffer, biasGradPipeline, opIndex, flags, outputs);
+        }
+    } else if (op.kind == OpKind::CONV2D) {
+        const Tensor& source = graph.tensors[op.inputs[0]];
+        const Tensor& weight = graph.tensors[op.inputs[1]];
+        if (!backward) {
+            dispatchKernel(commandBuffer, convPipeline, opIndex, flags, outputCount);
+        } else {
+            // 선형과 같은 이유로 셋 사이에 배리어를 두지 않는다. 입력 경사·가중치 경사·편향 경사가
+            // 서로 다른 텐서에 쓰기 때문이고, 그 «서로 다르다» 는 addConv2d 와 validateForward 가 세
+            // 입력의 저장소가 겹치는 표를 거절해서 성립한다.
+            // ponytail: 편향의 원소 수가 출력 채널 수보다 적은 표는 아직 아무도 막지 않는다. 빌더는
+            // 낼 수 없지만 파일에서 읽게 되면 db 커널이 편향 밖으로 쓴다.
+            dispatchKernel(commandBuffer, convDxPipeline, opIndex, flags, source.count());
+            dispatchKernel(commandBuffer, convDwPipeline, opIndex, flags, weight.count());
+            dispatchKernel(commandBuffer, convDbPipeline, opIndex, flags, graph.tensors[op.output].dims[1]);
         }
     } else {
         dispatchKernel(commandBuffer, elementwisePipeline, opIndex, flags, outputCount);
