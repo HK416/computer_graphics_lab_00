@@ -1254,6 +1254,104 @@ void testParameterFile() {
     assert(loaded == parameters);
 }
 
+// 리플레이 링의 첨자 규칙. **여기가 11단계에서 가장 틀리기 쉬운 자리다** — 링이 되감기고, 에피소드가
+// 경계를 긋고, 창이 앞에서 잘려 나가는 셋이 한 식에서 만난다.
+void testReplayIndex() {
+    // 아직 한 바퀴 돌지 않은 링. 살아 있는 창은 [0, count) 다.
+    gfx::ReplayWindow window;
+    window.capacity = 8;
+    window.count = 5;
+    window.cursor = 5;
+    assert(window.oldest() == 0);
+    assert(window.depthBack(4) == 4);
+    assert(window.depthBack(0) == 0);
+
+    // 에피소드 한가운데(걸음 3)에서는 그냥 거슬러 올라간다.
+    assert(gfx::replayStackIndex(window, 4, 3, 0) == 4);
+    assert(gfx::replayStackIndex(window, 4, 3, 1) == 3);
+    assert(gfx::replayStackIndex(window, 4, 3, 2) == 2);
+    // **에피소드 첫 걸음에서는 과거가 없다.** 같은 판이 세 채널에 겹쳐 들어가는 것이 옳다.
+    assert(gfx::replayStackIndex(window, 4, 0, 1) == 4);
+    assert(gfx::replayStackIndex(window, 4, 0, 2) == 4);
+    // 둘째 걸음이면 한 칸까지만.
+    assert(gfx::replayStackIndex(window, 4, 1, 1) == 3);
+    assert(gfx::replayStackIndex(window, 4, 1, 2) == 3);
+    // 걸음 수가 남아 있어도 **창이 없으면** 못 간다. 첨자 1 은 뒤에 한 칸뿐이다.
+    assert(gfx::replayStackIndex(window, 1, 9, 2) == 0);
+
+    // 한 바퀴 돈 링. 창이 cursor 에서 시작해 되감긴다.
+    gfx::ReplayWindow wrapped;
+    wrapped.capacity = 8;
+    wrapped.count = 8;
+    wrapped.cursor = 3;
+    assert(wrapped.oldest() == 3);
+    assert(wrapped.depthBack(3) == 0);
+    assert(wrapped.depthBack(2) == 7);
+    // 첨자 0 에서 두 칸 거슬러 오르면 되감겨 6 이다.
+    assert(gfx::replayStackIndex(wrapped, 0, 9, 2) == 6);
+    // 창의 맨 앞(3)에서는 더 갈 데가 없다.
+    assert(gfx::replayStackIndex(wrapped, 3, 9, 2) == 3);
+    assert(gfx::replayStackIndex(wrapped, 4, 9, 2) == 3);
+
+    // 유효 표본. 에피소드 번호가 갈리는 자리에서 끊긴다.
+    std::vector<uint32_t> episodes(8, 0);
+    episodes[2] = 1;
+    episodes[3] = 1;
+    episodes[4] = 1;
+    gfx::ReplayWindow full;
+    full.capacity = 8;
+    full.count = 6;
+    full.cursor = 6;
+    assert(gfx::replaySampleValid(full, 0, episodes.data()));
+    // 1 -> 2 는 에피소드가 갈린다.
+    assert(!gfx::replaySampleValid(full, 1, episodes.data()));
+    assert(gfx::replaySampleValid(full, 2, episodes.data()));
+    // 4 -> 5 도 갈린다(4 가 마지막 에피소드 칸).
+    assert(!gfx::replaySampleValid(full, 4, episodes.data()));
+    // 5 는 **마지막으로 쓴 칸**이라 다음이 없다.
+    assert(!gfx::replaySampleValid(full, 5, episodes.data()));
+    // 6, 7 은 아직 안 쓰였다.
+    assert(!gfx::replaySampleValid(full, 6, episodes.data()));
+    assert(!gfx::replaySampleValid(full, 7, episodes.data()));
+
+    // 칸이 하나뿐이면 전이가 없다.
+    gfx::ReplayWindow single;
+    single.capacity = 8;
+    single.count = 1;
+    single.cursor = 1;
+    assert(!gfx::replaySampleValid(single, 0, episodes.data()));
+
+    // 빈 링에서 아무 것도 죽지 않는다.
+    gfx::ReplayWindow empty;
+    assert(gfx::replayStackIndex(empty, 0, 0, 2) == 0);
+    assert(!gfx::replaySampleValid(empty, 0, episodes.data()));
+    std::printf("리플레이 첨자 규칙 통과\n");
+}
+
+// 무작위 이동 증강의 변위. 범위와 «표본마다 다르다» 를 본다.
+void testReplayShift() {
+    constexpr int32_t PADDING = 4;
+    int32_t histogram[2 * PADDING + 1] = {};
+    for (uint64_t i = 0; i < 4000; ++i) {
+        int32_t shift = gfx::replayShift(11, i, PADDING);
+        assert(shift >= -PADDING && shift <= PADDING);
+        histogram[shift + PADDING] += 1;
+    }
+    // 아홉 값이 모두 나와야 한다. 하나라도 비면 나머지 산술이 어딘가 잘린 것이다.
+    for (int32_t bucket : histogram) {
+        assert(bucket > 4000 / (2 * PADDING + 1) / 2);
+    }
+    // padding 0 이면 증강이 꺼진다.
+    for (uint64_t i = 0; i < 32; ++i) {
+        assert(gfx::replayShift(11, i, 0) == 0);
+    }
+    // **같은 씨앗·첨자면 같은 값이다.** 그래야 자기 검사가 CPU 와 GPU 를 바이트로 견줄 수 있다.
+    assert(gfx::replayShift(11, 7, PADDING) == gfx::replayShift(11, 7, PADDING));
+    assert(gfx::replayShift(11, 7, PADDING) != gfx::replayShift(12, 7, PADDING) ||
+           gfx::replayShift(11, 8, PADDING) != gfx::replayShift(12, 8, PADDING));
+    std::printf("무작위 이동 증강 통과\n");
+}
+
 } // namespace
 
 int main() {
@@ -1274,6 +1372,8 @@ int main() {
     testMeanValue();
     testForwardOnlyGraph();
     testParameterFile();
+    testReplayIndex();
+    testReplayShift();
     testGradients();
     std::printf("신경망 순수 계산 테스트 통과\n");
     return 0;

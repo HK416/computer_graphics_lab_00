@@ -1,0 +1,76 @@
+#version 460
+
+#include "replay_common.glsl"
+
+// 배치 한 벌을 링에서 뽑아 신경망 입력 텐서에 바로 채운다. **증강이 이 안에서 끝난다** — 이동 변위를
+// 읽는 첨자에 더하는 것뿐이라 따로 디스패치할 것이 없다.
+//
+// 상태와 «다음 상태» 를 함께 만든다. 다음 상태의 스택은 첨자를 하나 뒤에서 시작하는 것과 같다.
+layout(push_constant, scalar) uniform ReplaySamplePushConstants {
+    ReplayFrameBuffer frames;
+    ReplaySlotBuffer slots;
+    ReplayFloatBuffer actions;
+    ReplaySampleBuffer samples;
+    // 아래 넷이 신경망 입력 텐서의 자리다.
+    ReplayFloatBuffer state;
+    ReplayFloatBuffer nextState;
+    ReplayFloatBuffer batchAction;
+    ReplayFloatBuffer batchReward;
+    ReplayFloatBuffer batchDiscount;
+    uint capacity;
+    uint count;
+    uint cursor;
+    uint views;
+    uint stack;
+    uint size;
+    uint actionCount;
+    uint batch;
+}
+push;
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    uint plane = push.size * push.size;
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    uint lane = gl_GlobalInvocationID.z;
+    if (x >= push.size || y >= push.size || lane >= push.batch * push.views) {
+        return;
+    }
+    uint sampleIndex = lane / push.views;
+    uint view = lane - sampleIndex * push.views;
+    ReplaySample item = push.samples.items[sampleIndex];
+
+    uint index = item.index;
+    uint next = (index + 1u) % push.capacity;
+    uint step = push.slots.items[index].stepInEpisode;
+    uint nextStep = push.slots.items[next].stepInEpisode;
+
+    for (uint channel = 0u; channel < push.stack; ++channel) {
+        // 채널 0 이 가장 오래된 판이다. 인코드가 내놓는 순서와 같아야 정책이 같은 것을 본다.
+        uint age = push.stack - 1u - channel;
+        uint from = replayStackIndex(push.capacity, push.count, push.cursor, index, step, age);
+        uint nextFrom = replayStackIndex(push.capacity, push.count, push.cursor, next, nextStep, age);
+        uint target = ((sampleIndex * push.views + view) * push.stack + channel) * plane + y * push.size + x;
+        push.state.items[target] =
+            replayFetch(push.frames, from, view, push.views, push.size, int(x) + item.shiftX, int(y) + item.shiftY);
+        push.nextState.items[target] = replayFetch(push.frames,
+                                                   nextFrom,
+                                                   view,
+                                                   push.views,
+                                                   push.size,
+                                                   int(x) + item.nextShiftX,
+                                                   int(y) + item.nextShiftY);
+    }
+
+    // 행동·보상·감가는 표본마다 하나뿐이라 첫 스레드가 맡는다. 따로 디스패치할 값이 아니다.
+    if (view == 0u && x == 0u && y == 0u) {
+        for (uint a = 0u; a < push.actionCount; ++a) {
+            push.batchAction.items[sampleIndex * push.actionCount + a] =
+                push.actions.items[index * push.actionCount + a];
+        }
+        push.batchReward.items[sampleIndex] = push.slots.items[index].reward;
+        push.batchDiscount.items[sampleIndex] = push.slots.items[index].discount;
+    }
+}

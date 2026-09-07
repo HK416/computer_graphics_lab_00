@@ -1063,6 +1063,15 @@ float neuralGaussian(uint64_t seed, uint64_t index) {
     return std::sqrt(-2.0F * std::log(u1)) * std::cos(6.283185307179586F * u2);
 }
 
+uint32_t neuralRandomBelow(uint64_t seed, uint64_t index, uint32_t bound) {
+    if (bound == 0) {
+        return 0;
+    }
+    // 나머지 편향은 남는다(2^64 를 bound 로 나눈 나머지만큼). bound 가 표본 수나 변위 폭 규모라
+    // 편향이 2^-58 쯤이고, 거절 표집을 넣어 없앨 값어치가 없다.
+    return static_cast<uint32_t>(mix(seed * 0x9E3779B97F4A7C15ULL + index) % bound);
+}
+
 void initializeParameters(const Graph& graph, uint64_t seed, float* parameters) {
     std::fill(parameters, parameters + graph.parameterCount, 0.0F);
     // 편향은 0 으로 남기고 가중치만 채운다. layernorm 의 이득만 1 이다. 어느 파라미터가 무엇인지는

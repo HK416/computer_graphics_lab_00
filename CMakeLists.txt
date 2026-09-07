@@ -135,6 +135,8 @@ set(shader_sources
     shaders/observation.vert
     shaders/observation.frag
     shaders/observation_encode.comp
+    shaders/neural_replay_store.comp
+    shaders/neural_replay_sample.comp
     shaders/neural_adam.comp
     shaders/neural_polyak.comp
     shaders/neural_conv.comp
@@ -270,6 +272,7 @@ add_executable(cg_lab
     src/gfx/neural_math.cpp
     src/gfx/neural_selfcheck.cpp
     src/gfx/observation.cpp
+    src/gfx/replay.cpp
     src/gfx/profiler.cpp
     src/gfx/profiler_math.cpp
     src/gfx/raytracing.cpp

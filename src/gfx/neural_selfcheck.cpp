@@ -10,6 +10,8 @@
 #include "gfx/headless_compute.h"
 #include "gfx/neural.h"
 #include "gfx/neural_math.h"
+#include "gfx/observation.h"
+#include "gfx/replay.h"
 
 namespace gfx {
 
@@ -687,6 +689,359 @@ bool runPolyakEdges(NeuralExecutor& executor, HeadlessCompute& compute) {
     return exact;
 }
 
+// ---- 리플레이 링: 합성 패턴을 담고 뽑아 CPU 계산과 견준다
+//
+// 여기서 재는 것은 **바이트 동일**이다. 링 첨자·에피소드 경계·증강 변위가 모두 정수 산술이라 갈릴
+// 이유가 없고, 갈리면 그것은 반올림이 아니라 배선이 틀린 것이다.
+//
+// 합성 패턴을 쓰는 이유: 관측을 실제로 그리면 무엇이 담겼는지 CPU 가 다시 계산해야 하는데, 그러면
+// 관측 렌더까지 이 검사에 묶여 «어느 쪽이 틀렸는지» 를 못 가른다. 대신 화소마다 값을 정해 두고 그
+// 값이 그대로 나오는지만 본다.
+bool runReplayCheck(Context& context, HeadlessCompute& compute) {
+    constexpr uint32_t CAPACITY = 16;
+    constexpr uint32_t VIEWS = 2;
+    constexpr uint32_t ACTIONS = 2;
+    constexpr uint32_t BATCH = 10;
+    constexpr uint32_t PLANE = OBSERVATION_SIZE * OBSERVATION_SIZE;
+    // **링을 한 바퀴 넘겨 담는다.** 24 개를 16 칸에 담으므로 커서가 되감기고 앞쪽 여덟이 덮인다. 그러지
+    // 않으면 되감기·창 잘림 갈래를 한 번도 밟지 않아, 그 자리를 통째로 빼도 검사가 통과한다(돌연변이로
+    // 확인했다).
+    //
+    // **에피소드 길이를 용량의 약수가 아니게 잡는 것이 요점이다.** 5 걸음이면 창의 맨 앞 칸이 하필
+    // 에피소드의 마지막 칸과 겹쳐 표본이 되지 못하고, 그러면 «창 잘림» 갈래를 밟을 표본이 아예 없다.
+    // 6 걸음이면 창의 맨 앞이 에피소드 한가운데라 그 갈래가 산다.
+    constexpr uint32_t EPISODES = 4;
+    constexpr uint32_t STEPS = 6;
+
+    ReplayBuffer replay(context, VIEWS, ACTIONS);
+    if (!replay.available()) {
+        std::printf("  리플레이: 파이프라인을 만들지 못했습니다\n");
+        return false;
+    }
+    if (replay.reserve(CAPACITY, BATCH) != CAPACITY) {
+        std::printf("  리플레이: 링을 잡지 못했습니다\n");
+        return false;
+    }
+
+    // 인코드가 내놓는 꼴 그대로의 버퍼. store 는 스택의 **마지막 채널**만 읽는다.
+    Buffer features = createBuffer(context,
+                                   static_cast<VkDeviceSize>(VIEWS) * OBSERVATION_STACK * PLANE * sizeof(float),
+                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                   MemoryLocation::HOST_WRITE,
+                                   "리플레이 검사 입력");
+    auto* featureFloats = static_cast<float*>(features.mapped);
+
+    // 링 칸마다 무엇을 담았는지 호스트가 기억한다. CPU 기준을 만드는 데 쓴다.
+    std::vector<uint32_t> storedTag(CAPACITY, 0);
+    // 화소 값 규칙. 담은 순서와 뷰·자리만으로 정해진다.
+    auto pattern = [](uint32_t tag, uint32_t view, uint32_t x, uint32_t y) {
+        return static_cast<uint8_t>((tag * 37U + view * 91U + y * 5U + x * 3U) % 256U);
+    };
+    // **역수 곱이다.** replay_common.glsl 의 replayFetch 가 그렇게 푼다. b / 255.0f 로 쓰면 어떤 바이트에서
+    // 마지막 비트가 갈려 «값은 같아 보이는데 비교는 갈리는» 자리가 된다 — 1/255 는 정확히 담기지 않으므로
+    // 나눗셈과 역수 곱의 결과가 같지 않다. 두 엔진이 같은 연산을 해야 «바이트까지 같음» 이 뜻을 갖는다.
+    auto greyToFloat = [](uint8_t value) { return static_cast<float>(value) * (1.0F / 255.0F); };
+
+    uint32_t tag = 0;
+    std::vector<float> action(ACTIONS, 0.0F);
+    for (uint32_t episode = 0; episode < EPISODES; ++episode) {
+        for (uint32_t step = 0; step < STEPS; ++step) {
+            for (uint32_t view = 0; view < VIEWS; ++view) {
+                for (uint32_t y = 0; y < OBSERVATION_SIZE; ++y) {
+                    for (uint32_t x = 0; x < OBSERVATION_SIZE; ++x) {
+                        float value = greyToFloat(pattern(tag, view, x, y));
+                        featureFloats[(view * OBSERVATION_STACK + (OBSERVATION_STACK - 1)) * PLANE +
+                                      y * OBSERVATION_SIZE + x] = value;
+                    }
+                }
+            }
+            for (uint32_t i = 0; i < ACTIONS; ++i) {
+                action[i] = static_cast<float>(tag) + static_cast<float>(i) * 0.5F;
+            }
+            // **감가 0 은 마지막 칸이 아니라 그 앞 칸이다.** 칸 i 가 담는 것은 «o_i 에서 a_i 를 해서
+            // o_{i+1} 로 갔다» 이므로, 종료 상태로 들어가는 전이는 STEPS-2 다. 마지막 칸에 붙이면 그 칸은
+            // 뒤가 없어 표본이 되지 못해 감가 갈래를 한 번도 밟지 않는다(리뷰가 짚었다).
+            float discount = step + 2 == STEPS ? 0.0F : 0.99F;
+            storedTag[replay.windowState().cursor] = tag;
+            replay.beginSlot(episode, step, static_cast<float>(tag) * 0.25F, discount, action.data());
+            compute.submit(
+                [&](VkCommandBuffer commandBuffer, uint64_t) { replay.recordStore(commandBuffer, features.address); });
+            ++tag;
+        }
+    }
+
+    // 표집이 채울 자리. 신경망 텐서 대신 여기서는 그냥 버퍼다.
+    size_t stateFloats = static_cast<size_t>(BATCH) * VIEWS * OBSERVATION_STACK * PLANE;
+    auto makeTarget = [&](size_t floats, const char* name) {
+        return createBuffer(context,
+                            static_cast<VkDeviceSize>(std::max<size_t>(floats, 1)) * sizeof(float),
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                            MemoryLocation::DEVICE,
+                            name);
+    };
+    Buffer state = makeTarget(stateFloats, "리플레이 검사 상태");
+    Buffer nextState = makeTarget(stateFloats, "리플레이 검사 다음 상태");
+    Buffer batchAction = makeTarget(static_cast<size_t>(BATCH) * ACTIONS, "리플레이 검사 행동");
+    Buffer batchReward = makeTarget(BATCH, "리플레이 검사 보상");
+    Buffer batchDiscount = makeTarget(BATCH, "리플레이 검사 감가");
+    size_t readbackFloats = stateFloats * 2 + static_cast<size_t>(BATCH) * (ACTIONS + 2);
+    Buffer readback = createBuffer(context,
+                                   static_cast<VkDeviceSize>(readbackFloats) * sizeof(float),
+                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                   MemoryLocation::HOST_READ,
+                                   "리플레이 검사 되읽기");
+
+    ReplayBatchTargets targets;
+    targets.state = state.address;
+    targets.nextState = nextState.address;
+    targets.action = batchAction.address;
+    targets.reward = batchReward.address;
+    targets.discount = batchDiscount.address;
+
+    ReplayWindow window = replay.windowState();
+    // replaySampleValid 가 에피소드 배열을 받는다. 링의 메타 사본에서 뽑아 온다.
+    std::vector<uint32_t> episodeMirror(window.capacity, 0);
+    for (uint32_t index = 0; index < window.capacity; ++index) {
+        episodeMirror[index] = replay.hostSlots()[index].episode;
+    }
+    const std::vector<GpuReplaySlot>& slotList = replay.hostSlots();
+    constexpr uint32_t OLDEST_AGE = OBSERVATION_STACK - 1;
+
+    // 갈래 판정. 셋 다 «실제로 묶는» 경우만 참이다 — 다른 것이 이미 더 짧게 자르고 있으면 그 갈래를
+    // 빼도 답이 같아, 느슨하게 세면 그 자리를 뺀 돌연변이가 살아남는다.
+    auto episodeBinds = [&](uint32_t index) {
+        return slotList[index].stepInEpisode < std::min(OLDEST_AGE, window.depthBack(index));
+    };
+    auto windowBinds = [&](uint32_t index) {
+        return window.depthBack(index) < std::min(OLDEST_AGE, slotList[index].stepInEpisode);
+    };
+    auto ringWraps = [&](uint32_t index) {
+        return replayStackIndex(window, index, slotList[index].stepInEpisode, OLDEST_AGE) > index;
+    };
+
+    // **표본을 두 벌 본다.**
+    //
+    // 첫째는 무작위 표집이다 — 고르는 쪽(유효 판정·증강 뽑기)이 도는지 본다. 그런데 링의 갈래
+    // (에피소드 경계·되감기·창 잘림)를 그 뽑기가 밟아 줄지는 **우연**이다. 이 설정에서 되감기가
+    // 일어나는 유효 칸은 하나뿐이라, 흐름 번호만 바꿔도 값은 다 맞는데 덮개가 모자라 검사가 빨개진다.
+    // 그래서 둘째로 갈래를 **골라 밟는** 표본을 손으로 만들어 같은 눈으로 견준다.
+    std::vector<GpuReplaySample> chosen;
+    auto pushChosen = [&](uint32_t index) {
+        GpuReplaySample item;
+        item.index = index;
+        // 변위도 손으로 준다. 상태와 다음 상태를 다르게, 음수·양수·0 을 골고루.
+        auto span = static_cast<int32_t>(chosen.size());
+        item.shiftX = span % 3 - 1;
+        item.shiftY = REPLAY_SHIFT_PADDING - span % 5;
+        item.nextShiftX = -item.shiftX - 1;
+        item.nextShiftY = span % 4 - REPLAY_SHIFT_PADDING;
+        chosen.push_back(item);
+    };
+    for (uint32_t index = 0; index < window.capacity; ++index) {
+        if (replaySampleValid(window, index, episodeMirror.data()) &&
+            (episodeBinds(index) || windowBinds(index) || ringWraps(index))) {
+            pushChosen(index);
+        }
+    }
+    for (uint32_t index = 0; index < window.capacity && chosen.size() < BATCH; ++index) {
+        if (replaySampleValid(window, index, episodeMirror.data()) && !episodeBinds(index) && !windowBinds(index) &&
+            !ringWraps(index)) {
+            pushChosen(index);
+        }
+    }
+    if (chosen.size() < BATCH) {
+        std::printf("  리플레이: 갈래를 밟는 표본을 %zu 개밖에 못 만들었습니다(배치 %u)\n", chosen.size(), BATCH);
+        return false;
+    }
+    chosen.resize(BATCH);
+
+    // CPU 기준. 같은 순수 함수로 첨자를 내고, 담을 때 쓴 규칙으로 값을 되살린다.
+    auto expected = [&](const std::vector<GpuReplaySample>& list,
+                        uint32_t sampleIndex,
+                        bool next,
+                        uint32_t view,
+                        uint32_t channel,
+                        uint32_t x,
+                        uint32_t y) {
+        const GpuReplaySample& item = list[sampleIndex];
+        uint32_t base = next ? (item.index + 1) % window.capacity : item.index;
+        int32_t shiftX = next ? item.nextShiftX : item.shiftX;
+        int32_t shiftY = next ? item.nextShiftY : item.shiftY;
+        uint32_t age = OBSERVATION_STACK - 1 - channel;
+        uint32_t from = replayStackIndex(window, base, slotList[base].stepInEpisode, age);
+        auto clampAxis = [](int32_t value) {
+            return static_cast<uint32_t>(std::clamp(value, 0, static_cast<int32_t>(OBSERVATION_SIZE) - 1));
+        };
+        uint32_t sourceX = clampAxis(static_cast<int32_t>(x) + shiftX);
+        uint32_t sourceY = clampAxis(static_cast<int32_t>(y) + shiftY);
+        return greyToFloat(pattern(storedTag[from], view, sourceX, sourceY));
+    };
+
+    // 한 벌을 제출하고 되읽어 CPU 기준과 견준다. 두 벌 모두 같은 눈으로 본다.
+    auto verify = [&](bool explicitPick) {
+        bool sampled = false;
+        compute.submit([&](VkCommandBuffer commandBuffer, uint64_t) {
+            sampled = explicitPick ? replay.recordSampleWith(commandBuffer, targets, chosen)
+                                   : replay.recordSample(commandBuffer, targets, 4242, 7);
+            if (!sampled) {
+                return;
+            }
+            VkDeviceSize cursor = 0;
+            auto copy = [&](const Buffer& source, size_t floats) {
+                VkBufferCopy region{};
+                region.dstOffset = cursor;
+                region.size = static_cast<VkDeviceSize>(floats) * sizeof(float);
+                vkCmdCopyBuffer(commandBuffer, source.handle, readback.handle, 1, &region);
+                cursor += region.size;
+            };
+            copy(state, stateFloats);
+            copy(nextState, stateFloats);
+            copy(batchAction, static_cast<size_t>(BATCH) * ACTIONS);
+            copy(batchReward, BATCH);
+            copy(batchDiscount, BATCH);
+        });
+        if (!sampled) {
+            std::printf("  리플레이: %s 표집이 표본을 못 만들었습니다\n", explicitPick ? "고른" : "무작위");
+            return false;
+        }
+        vmaInvalidateAllocation(context.allocator, readback.allocation, 0, VK_WHOLE_SIZE);
+        const auto* result = static_cast<const float*>(readback.mapped);
+        const std::vector<GpuReplaySample>& picked = replay.lastSamples();
+
+        uint32_t mismatches = 0;
+        uint32_t nextMismatches = 0;
+        for (uint32_t sampleIndex = 0; sampleIndex < BATCH; ++sampleIndex) {
+            for (uint32_t view = 0; view < VIEWS; ++view) {
+                for (uint32_t channel = 0; channel < OBSERVATION_STACK; ++channel) {
+                    for (uint32_t y = 0; y < OBSERVATION_SIZE; ++y) {
+                        for (uint32_t x = 0; x < OBSERVATION_SIZE; ++x) {
+                            size_t offset =
+                                ((static_cast<size_t>(sampleIndex) * VIEWS + view) * OBSERVATION_STACK + channel) *
+                                    PLANE +
+                                static_cast<size_t>(y) * OBSERVATION_SIZE + x;
+                            if (result[offset] != expected(picked, sampleIndex, false, view, channel, x, y)) {
+                                ++mismatches;
+                            }
+                            if (result[stateFloats + offset] !=
+                                expected(picked, sampleIndex, true, view, channel, x, y)) {
+                                ++nextMismatches;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 행동·보상·감가도 함께 본다. 관측만 맞고 스칼라가 밀리는 것이 흔한 실수다.
+        const float* actionResult = result + stateFloats * 2;
+        const float* rewardResult = actionResult + static_cast<size_t>(BATCH) * ACTIONS;
+        const float* discountResult = rewardResult + BATCH;
+        for (uint32_t sampleIndex = 0; sampleIndex < BATCH; ++sampleIndex) {
+            uint32_t index = picked[sampleIndex].index;
+            for (uint32_t i = 0; i < ACTIONS; ++i) {
+                float want = static_cast<float>(storedTag[index]) + static_cast<float>(i) * 0.5F;
+                mismatches += actionResult[sampleIndex * ACTIONS + i] == want ? 0U : 1U;
+            }
+            mismatches += rewardResult[sampleIndex] == slotList[index].reward ? 0U : 1U;
+            mismatches += discountResult[sampleIndex] == slotList[index].discount ? 0U : 1U;
+        }
+        // **뽑힌 표본이 정말 에피소드 안에 있는가.** 경계를 넘은 것이 뽑히면 다음 상태가 남의 그림이다.
+        uint32_t crossed = 0;
+        // 무작위 뽑기가 상태와 다음 상태의 변위를 **다른 흐름에서** 뽑는지도 여기서 본다. 아래 고른
+        // 표본은 변위를 손으로 주므로 그쪽으로는 이 자리를 검사할 수 없다(돌연변이가 드러냈다).
+        uint32_t drawnDiffered = 0;
+        for (const GpuReplaySample& item : picked) {
+            uint32_t next = (item.index + 1) % window.capacity;
+            crossed += slotList[item.index].episode == slotList[next].episode ? 0U : 1U;
+            drawnDiffered += item.shiftX != item.nextShiftX || item.shiftY != item.nextShiftY ? 1U : 0U;
+        }
+        if (!explicitPick && drawnDiffered == 0) {
+            std::printf("      무작위 뽑기가 상태와 다음 상태에 같은 변위를 줍니다(흐름이 하나입니다)\n");
+            return false;
+        }
+        if (mismatches != 0 || nextMismatches != 0 || crossed != 0) {
+            std::printf("      %s 표집이 갈립니다 — 상태 %u, 다음 상태 %u, 경계를 넘은 표본 %u\n",
+                        explicitPick ? "고른" : "무작위",
+                        mismatches,
+                        nextMismatches,
+                        crossed);
+            return false;
+        }
+        return true;
+    };
+
+    bool ok = verify(false) && verify(true);
+
+    // **골라 밟은 표본이 갈래를 다 덮는가.** 값이 맞는 것만으로는 모자란다 — 밟지 않은 갈래는 통째로
+    // 빼도 통과하고, 그것을 돌연변이가 그대로 드러냈다.
+    uint32_t episodeClamped = 0;
+    uint32_t ringWrapped = 0;
+    uint32_t windowClamped = 0;
+    uint32_t shifted = 0;
+    uint32_t shiftDiffered = 0;
+    uint32_t terminal = 0;
+    for (const GpuReplaySample& item : chosen) {
+        episodeClamped += episodeBinds(item.index) ? 1U : 0U;
+        windowClamped += windowBinds(item.index) ? 1U : 0U;
+        ringWrapped += ringWraps(item.index) ? 1U : 0U;
+        shifted += item.shiftX != 0 || item.shiftY != 0 || item.nextShiftX != 0 || item.nextShiftY != 0 ? 1U : 0U;
+        shiftDiffered += item.shiftX != item.nextShiftX || item.shiftY != item.nextShiftY ? 1U : 0U;
+        // 종료 전이(감가 0)도 하나는 있어야 한다. 없으면 부트스트랩 절단이 한 번도 검사되지 않는다.
+        terminal += slotList[item.index].discount == 0.0F ? 1U : 0U;
+    }
+    bool covered =
+        episodeClamped > 0 && ringWrapped > 0 && windowClamped > 0 && shifted > 0 && shiftDiffered > 0 && terminal > 0;
+    ok = ok && covered;
+    std::printf("  리플레이 표집(전이 %u/%u, 배치 %u, 뷰 %u, 무작위 + 고른 표본): %s\n",
+                window.count,
+                window.capacity,
+                BATCH,
+                VIEWS,
+                ok ? "바이트까지 같음" : "갈림");
+    if (!covered) {
+        std::printf("      갈래를 다 밟지 못했습니다 — 에피소드 경계 %u, 링 되감기 %u, 창 잘림 %u, "
+                    "증강 %u, 변위가 갈린 표본 %u, 종료 전이 %u (전부 1 이상이어야 한다)\n",
+                    episodeClamped,
+                    ringWrapped,
+                    windowClamped,
+                    shifted,
+                    shiftDiffered,
+                    terminal);
+    }
+
+    destroyBuffer(context, features);
+    destroyBuffer(context, state);
+    destroyBuffer(context, nextState);
+    destroyBuffer(context, batchAction);
+    destroyBuffer(context, batchReward);
+    destroyBuffer(context, batchDiscount);
+    destroyBuffer(context, readback);
+    return ok;
+}
+
+// 예산 게이트. **줄어드는 것을 실제로 본다** — 자기 검사가 늘 넉넉한 예산에서 도니까 그냥 두면 이
+// 갈래를 한 번도 밟지 않고, 그러면 게이트를 통째로 빼도 검사가 통과한다(돌연변이로 확인했다).
+//
+// 예산을 흉내 내는 것이 아니라 Context 의 --gpu-budget 자리를 잠시 눌러 진짜 경로를 태운다.
+bool runReplayBudgetCheck(Context& context) {
+    constexpr uint32_t REQUESTED = 4096;
+    ReplayBuffer replay(context, 1, 1);
+    if (!replay.available()) {
+        return false;
+    }
+    VkDeviceSize saved = context.memoryBudgetOverride;
+    // 이미 잡은 것보다 작은 예산을 준다. 그러면 남는 몫이 0 이라 «최소로 줄여라» 갈래가 산다.
+    context.memoryBudgetOverride = 1;
+    uint32_t clamped = replay.reserve(REQUESTED, 4);
+    context.memoryBudgetOverride = saved;
+    bool ok = clamped != 0 && clamped < REQUESTED;
+    std::printf("  리플레이 예산 게이트: 전이 %u 요청 -> %u (%s)\n", REQUESTED, clamped, ok ? "줄었음" : "안 줄었음");
+    if (!ok) {
+        std::printf("      예산이 바닥인데도 요청한 용량이 그대로 잡혔습니다\n");
+    }
+    return ok;
+}
+
 // ---- 열 걸음 등가 검사
 //
 // **이 스택의 관문이다.** 지금까지는 연산 하나하나를 한 걸음씩 견줬다. 여기서는 CPU 기준과 GPU 가 같은
@@ -1108,6 +1463,8 @@ bool runNeuralSelfCheck() {
     }
     // 마지막이 이 스택의 관문이다 — polyak 의 갈래들과 열 걸음 등가 검사. 둘 다 표를 다시 올리므로
     // 위 경우들 뒤에 둔다.
+    ok = runReplayCheck(context, compute) && ok;
+    ok = runReplayBudgetCheck(context) && ok;
     ok = runPolyakEdges(executor, compute) && ok;
     ok = runTenSteps(executor, compute) && ok;
     std::fflush(stdout);

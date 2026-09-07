@@ -226,6 +226,74 @@ void backwardFrom(const Graph& graph,
 // 고치면 다른 쪽도 고친다.
 float neuralGaussian(uint64_t seed, uint64_t index);
 
+// 같은 흐름의 [0, bound) 균등 정수. 표본 첨자와 증강 변위를 고르는 데 쓴다. bound 가 0 이면 0 이다.
+uint32_t neuralRandomBelow(uint64_t seed, uint64_t index, uint32_t bound);
+
+// ---- 리플레이 링의 첨자 규칙
+//
+// 여기가 순수 함수인 것이 요점이다. 링·에피소드 경계·유효 표본 판정은 **글로 읽어서는 맞는지 알 수
+// 없는** 종류의 산술이라 테스트가 붙어야 하는데, 정작 그 값을 쓰는 곳은 GPU 셰이더다. 그래서 규칙만
+// 여기 떼어 두고 셰이더는 같은 식을 한 벌 더 쓴다(CLAUDE.md 의 CPU/GPU 대응표에 줄이 하나 는다).
+//
+// 링에는 **전이마다 관측 한 판**만 담는다. 프레임 스택(최근 세 판)은 저장하지 않고 첨자를 거슬러
+// 읽어서 만든다 — 스택을 통째로 담으면 같은 그림이 세 번 들어가 메모리가 세 배가 된다.
+struct ReplayWindow {
+    // 링 칸 수.
+    uint32_t capacity = 0;
+    // 지금까지 쓴 칸 수. capacity 에서 멈춘다.
+    uint32_t count = 0;
+    // 다음에 쓸 자리. count < capacity 면 곧 쓸 꼬리이기도 하다.
+    uint32_t cursor = 0;
+
+    // 살아 있는 가장 오래된 칸.
+    uint32_t oldest() const { return count < capacity ? 0U : cursor; }
+    // index 에서 몇 칸이나 거슬러 올라갈 수 있는지(자기 자신은 세지 않는다).
+    uint32_t depthBack(uint32_t index) const { return capacity == 0 ? 0U : (index + capacity - oldest()) % capacity; }
+};
+
+// index 에서 age 만큼 거슬러 올라간 링 첨자. **세 가지가 함께 막는다** — 에피소드 시작(stepInEpisode),
+// 살아 있는 창의 끝(depthBack), 그리고 링의 되감기. 셋 중 하나라도 빠지면 프레임 스택이 남의 그림을
+// 물어 온다. 에피소드 첫 걸음에서는 같은 판이 세 채널에 겹쳐 들어가고, 그것이 옳다(과거가 없다).
+inline uint32_t replayStackIndex(const ReplayWindow& window, uint32_t index, uint32_t stepInEpisode, uint32_t age) {
+    if (window.capacity == 0) {
+        return index;
+    }
+    uint32_t back = age;
+    back = back < stepInEpisode ? back : stepInEpisode;
+    uint32_t depth = window.depthBack(index);
+    back = back < depth ? back : depth;
+    return (index + window.capacity - back) % window.capacity;
+}
+
+// index 가 표본으로 쓸 수 있는지. 전이 하나에는 **다음 관측**이 필요하므로 뒤 칸이 살아 있고 같은
+// 에피소드여야 한다. 마지막으로 쓴 칸은 뒤가 없어 늘 빠진다.
+inline bool replaySampleValid(const ReplayWindow& window, uint32_t index, const uint32_t* episodes) {
+    if (window.capacity == 0 || window.count < 2 || index >= window.capacity) {
+        return false;
+    }
+    // 살아 있는 창 안인가. 창은 [oldest, oldest + count) 를 링으로 돈 것이다.
+    if (window.depthBack(index) >= window.count) {
+        return false;
+    }
+    uint32_t next = (index + 1) % window.capacity;
+    // 다음 칸이 아직 안 쓰였거나(꼬리) 다른 에피소드면 전이가 되지 않는다.
+    if (next == window.cursor || window.depthBack(next) >= window.count) {
+        return false;
+    }
+    return episodes[index] == episodes[next];
+}
+
+// 무작위 이동 증강의 변위. DrQ-v2 는 가장자리를 복제해 padding 만큼 덧대고 무작위로 잘라 내는데,
+// 잘라 내는 자리를 고르는 것과 [-padding, padding] 변위를 고르는 것이 같다. 표본마다 하나씩이고
+// 채널·화소에 걸쳐 **같은 값**이어야 한다 — 화소마다 흔들면 증강이 아니라 잡음이다.
+inline int32_t replayShift(uint64_t seed, uint64_t index, int32_t padding) {
+    if (padding <= 0) {
+        return 0;
+    }
+    uint32_t span = static_cast<uint32_t>(padding) * 2U + 1U;
+    return static_cast<int32_t>(neuralRandomBelow(seed, index, span)) - padding;
+}
+
 // 파라미터를 초기화한다. 합성곱·선형의 가중치는 팬인에 맞춘 He 정규(ReLU 를 전제), 편향은 0,
 // layernorm 의 이득은 1 이다. 어느 텐서가 무엇인지는 연산 표를 훑어 정한다.
 void initializeParameters(const Graph& graph, uint64_t seed, float* parameters);

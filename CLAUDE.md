@@ -58,7 +58,8 @@ ctest --test-dir build/debug --output-on-failure
 `concurrency` `vertex_pack` `physics` `policy` `robot` `neural` `rl_agent` `primitives` `debug_lines` `hardware_profile` `fluid`
 `marching_cubes` `cloth` `headless_physics`(cg_lab 을 `--headless` 로 돌려 저장 결과를 `tests/scenes/expected/` 와 cmp)
 `neural_selfcheck`(cg_lab 을 `--neural-selfcheck` 로 돌려 신경망 컴퓨트 커널을 CPU 기준과 견준다 — GPU 가 있어야 돈다.
-연산마다 최대 오차를 찍고, 마지막에 **두 엔진이 열 걸음 학습한 뒤 가중치가 같은지**를 본다. 네 번째 열은
+연산마다 최대 오차를 찍고, 리플레이 표집이 CPU 계산과 바이트로 같은지 보며, 마지막에 **두 엔진이 열 걸음
+학습한 뒤 가중치가 같은지**를 본다. 네 번째 열은
 협력 행렬 가속 변종인데 **이 열만 상대 오차이고 «0 이 아닌 것이 정상»** 이다 — 덧셈 순서가 다르고 fp16
 모양은 입력을 반정밀도로 누른다).
 
@@ -278,6 +279,12 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 
 | `Options::debugMode`, `RenderSettings::debugMode` (`src/gfx/render_settings.h`) | `DEBUG_MODE_*` (`scene_types.glsl`) |
 | `DebugLineVertex` (`src/gfx/debug_lines.h`), `DebugLinePushConstants` (`src/app/plugins/debug_lines_plugin.cpp`) | 동명 구조체 (`shaders/debug_line_common.glsl`) |
+| `GpuReplaySlot` `GpuReplaySample` `ReplayStorePushConstants` `ReplaySamplePushConstants` (`src/gfx/replay.h`) | `ReplaySlot` `ReplaySample`·동명 블록 (`shaders/replay_common.glsl`, `neural_replay_*.comp`) — **첨자 규칙이 두 벌이다**: `replayStackIndex`(`src/gfx/neural_math.h`) ↔ 동명 함수(`replay_common.glsl`). 링 되감기·에피소드 경계·창 잘림 셋이 한 식에서 만나는 자리라 C++ 쪽을 순수 함수로 떼어 `neural` 테스트가 본다. 한쪽을 고치면 다른 쪽도 고친다 |
+
+회색값을 float 로 푸는 자리는 **역수 곱이어야 한다**(`observation_encode.comp` 의 `round(g*255)*(1/255)`,
+`replay_common.glsl` 의 `replayFetch`, 자기 검사의 `greyToFloat`). `b / 255.0f` 로 바꾸면 어떤 바이트에서
+마지막 비트가 갈려 «살아 있는 관측» 과 «리플레이에서 꺼낸 관측» 이 달라진다 — 1/255 는 정확히 담기지
+않으므로 나눗셈과 역수 곱의 결과가 같지 않다.
 | `GpuObservationView` `ObservationPushConstants` `ObservationEncodePushConstants` (`src/gfx/observation.h`) | `ObservationView`·동명 블록 (`shaders/observation_common.glsl`, `observation_encode.comp`) — 인코드의 작업 그룹 `ENCODE_GROUP`(8) 은 `local_size` 와 같아야 하고, `OBSERVATION_SIZE`/`OBSERVATION_STACK` 은 푸시 상수로 실어 보내 두 벌이 되지 않는다 |
 | `Tensor` `Op` `Arena` `TENSOR_GRAD` (`src/gfx/neural_math.h`), `NeuralPushConstants` `NEURAL_FLAG_BACKWARD` (`src/gfx/neural.h`) | 동명 구조체·`NEURAL_ARENA_*` `NEURAL_TENSOR_GRAD` (`shaders/neural_common.glsl`) — `OpKind` 와 `Arena` 는 **번호**가 `NEURAL_OP_*` `NEURAL_ARENA_*` 와 같아야 하고, GLSL 의 `Op::result` 는 C++ 의 `output` 이다(예약어) |
 | 연산의 순·역전파 (`forwardImpl`·`backwardFrom`, `src/gfx/neural_math.cpp`) | 같은 갈래 (`shaders/neural_*.comp`) — 알고리즘이 두 벌이라 한쪽을 고치면 다른 쪽도 **같은 순서로** 고친다. 누산 순서까지 같아야 두 엔진이 비트로 같고, 그래서 GLSL 쪽 누산기에는 `precise` 를 붙여 FMA 축약을 막는다(CPU 쪽은 CMake 가 `-ffp-contract=off`). **나눗셈과 `sqrt` 가 있는 연산만은 비트로 같을 수 없다** — Vulkan 이 정확 반올림을 요구하는 것은 덧셈·뺄셈·곱셈·FMA 뿐이고 `OpFDiv` 2.5 ULP, `Sqrt` 3.0 ULP 까지 허용한다. layernorm 이 그 경우다. `--neural-selfcheck` 가 연산마다 견주고, 마지막에 «열 걸음 학습 뒤 가중치» 까지 본다 |

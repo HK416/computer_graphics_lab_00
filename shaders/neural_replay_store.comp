@@ -1,0 +1,44 @@
+#version 460
+
+#include "replay_common.glsl"
+
+// 관측 한 판을 링의 한 칸에 담는다. 인코드가 내놓은 **가장 새 채널**(스택의 마지막)을 uint8 로 눌러
+// 넣는다. 인코드가 이미 uint8 정밀도로 반올림해 두었으므로 이 왕복은 값을 바꾸지 않는다.
+//
+// 스레드 하나가 uint32 하나(화소 넷)를 맡는다. 그래야 원자 연산 없이 바이트를 묶을 수 있다.
+layout(push_constant, scalar) uniform ReplayStorePushConstants {
+    // 인코드 결과. 뷰 x 스택 x H x W 이고 오래된 것부터 담겨 있다.
+    ReplayFloatBuffer features;
+    ReplayFrameBuffer frames;
+    uint slot;
+    uint views;
+    uint stack;
+    uint size;
+}
+push;
+
+layout(local_size_x = 64) in;
+
+void main() {
+    uint plane = push.size * push.size;
+    uint words = (plane * push.views) / 4u;
+    uint word = gl_GlobalInvocationID.x;
+    if (word >= words) {
+        return;
+    }
+    uint packed = 0u;
+    for (uint i = 0u; i < 4u; ++i) {
+        uint pixel = word * 4u + i;
+        uint view = pixel / plane;
+        uint offset = pixel - view * plane;
+        // 스택의 마지막 채널이 이번 판이다.
+        float value = push.features.items[(view * push.stack + (push.stack - 1u)) * plane + offset];
+        // round 가 자르기와 결과가 같다 — 인코드가 이미 round(g*255)*(1/255) 로 눌러 두어서 들어오는
+        // 값이 늘 k/255 꼴이기 때문이다(돌연변이로 확인했다: 자르기로 바꿔도 자기 검사가 통과한다).
+        // 그래도 round 를 쓴다. 그 전제가 깨지는 날 자르기는 값을 통째로 1 씩 낮추고, 그것은 관측이
+        // 조용히 어두워지는 종류의 결함이다.
+        uint byteValue = uint(round(clamp(value, 0.0, 1.0) * 255.0));
+        packed |= byteValue << (i * 8u);
+    }
+    push.frames.items[push.slot * (plane * push.views / 4u) + word] = packed;
+}
