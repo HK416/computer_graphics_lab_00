@@ -71,6 +71,8 @@ int main(int argc, char* argv[]) {
             options.rolloutFrames = static_cast<uint32_t>(std::atoi(argv[++i]));
         } else if (argument == "--fixed-dt" && i + 1 < argc) {
             options.fixedDeltaSeconds = static_cast<float>(std::atof(argv[++i]));
+        } else if (argument == "--observation-dump" && i + 1 < argc) {
+            options.observationDumpPath = argv[++i];
         } else if (argument == "--capture" && i + 1 < argc) {
             std::string_view target = argv[++i];
             options.capturePresent = target == "present";

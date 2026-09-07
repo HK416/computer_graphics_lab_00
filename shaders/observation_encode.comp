@@ -1,0 +1,75 @@
+#version 460
+
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+#include "bindless.glsl"
+
+// 관측 배열(RGBA8, 층 = 뷰)을 **회색 float NCHW** 로 접고 프레임 스택을 만든다.
+//
+// 채널을 «RGB x 3 프레임 = 9» 대신 «회색 x 3 프레임 = 3» 으로 둔 것은 메모리 때문이다(1/3). 진자와
+// 리처는 색으로 상태를 가리지 않으므로 잃는 것이 없다.
+//   ponytail: 색이 단서인 태스크(같은 모양의 빨강·파랑 목표)에서는 회색으로 접으면 안 된다.
+//
+// 스택은 **고리**로 둔다. 매 프레임 세 칸을 밀면 같은 값을 세 번 옮겨 쓰게 되고, 그것을 한 디스패치
+// 안에서 하면 스레드끼리 읽기·쓰기가 얽힌다. 대신 이번 칸에만 쓰고, 내놓을 때 오래된 것부터 골라
+// 담는다. 스레드 하나가 자기 화소의 세 칸만 만지므로 얽힐 자리가 없다.
+layout(buffer_reference, scalar, buffer_reference_align = 4) buffer ObservationFloatBuffer {
+    float items[];
+};
+
+layout(push_constant, scalar) uniform ObservationEncodePushConstants {
+    // 뷰 x 스택 x H x W. 고리 순서로 담긴다.
+    ObservationFloatBuffer history;
+    // 뷰 x 스택 x H x W. 오래된 것부터 담긴 신경망 입력.
+    ObservationFloatBuffer features;
+    // 관측 색 배열의 bindless 슬롯.
+    uint colorSlot;
+    uint views;
+    uint size;
+    uint stack;
+    // 이번 프레임이 쓸 고리 칸.
+    uint slot;
+    // 에피소드의 첫 프레임이면 1. 스택을 이번 그림으로 통째로 채운다 — 그러지 않으면 지난 에피소드의
+    // 마지막 그림이 새 에피소드의 «과거» 로 섞여 들어간다.
+    uint reset;
+}
+push;
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    uvec3 id = gl_GlobalInvocationID;
+    if (id.x >= push.size || id.y >= push.size || id.z >= push.views) {
+        return;
+    }
+    uint plane = push.size * push.size;
+    uint pixel = id.y * push.size + id.x;
+    uint viewBase = id.z * push.stack * plane;
+
+    // texelFetch 는 필터링을 타지 않아 샘플러 설정에 결과가 흔들리지 않는다. 관측은 화소를 그대로
+    // 읽어야 하므로 이 쪽이다.
+    uint imageIndex = push.colorSlot & 0x00FFFFFFu;
+    uint samplerIndex = push.colorSlot >> 24;
+    vec3 rgb = texelFetch(sampler2DArray(bindlessArrays[nonuniformEXT(imageIndex)],
+                                         bindlessSamplers[nonuniformEXT(samplerIndex)]),
+                          ivec3(id.xy, id.z),
+                          0)
+                   .rgb;
+    // Rec.709 휘도. 채널 셋을 하나로 접는 표준 가중치다.
+    float grey = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+
+    if (push.reset != 0u) {
+        for (uint c = 0u; c < push.stack; ++c) {
+            push.history.items[viewBase + c * plane + pixel] = grey;
+        }
+    } else {
+        push.history.items[viewBase + push.slot * plane + pixel] = grey;
+    }
+
+    // slot 이 «이번» 칸이므로 그 다음 칸이 가장 오래된 것이다.
+    for (uint c = 0u; c < push.stack; ++c) {
+        uint from = (push.slot + 1u + c) % push.stack;
+        push.features.items[viewBase + c * plane + pixel] = push.history.items[viewBase + from * plane + pixel];
+    }
+}

@@ -17,6 +17,8 @@
 #include "gfx/context.h"
 #include "gfx/geometry.h"
 #include "gfx/hardware_profile.h"
+#include "gfx/headless_compute.h"
+#include "gfx/observation.h"
 #include "gfx/renderer.h"
 #include "gfx/texture.h"
 #include "scene/scene.h"
@@ -114,6 +116,10 @@ struct Options {
     uint32_t population = 32;
     // 롤아웃 하나가 밟을 프레임 수. 프레임마다 정책을 한 번 부르고 물리를 1/120 초로 두 번 진행한다.
     uint32_t rolloutFrames = 300;
+    // --observation-dump <파일>: 「정책이 보는 그림」을 콘택트 시트 PNG 로 저장한다. 가로가 프레임 스택
+    // (오래된 것부터), 세로가 뷰다. --screenshot-frame 째에 뜨고 그 다음 프레임에 종료한다. 헤드리스에서도
+    // 돈다(창 없는 장치를 만들고 모델을 올린다).
+    std::filesystem::path observationDumpPath;
 };
 
 class Application {
@@ -126,6 +132,11 @@ public:
     void run();
 
 private:
+    // --observation-dump 가 요구하는 GPU 자원을 헤드리스에서도 만들지. 장면을 열기 **전**에 정해져야
+    // 지오메트리 저장소가 모델을 받을 수 있다.
+    bool needsObservationDevice() const { return !options.observationDumpPath.empty(); }
+    // 관측 한 판을 그려 특징을 되읽고, 목표 프레임이면 콘택트 시트를 쓴다. 쓴 경우에만 참.
+    bool stepObservation(uint64_t frameCount);
     // 한 번 적재한 모델. 같은 파일을 두 번 올리지 않고, 장면 파일이 가리킬 대상이 된다.
     struct LoadedModel {
         std::filesystem::path path;
@@ -216,6 +227,18 @@ private:
     gfx::RenderSettings settings;
     std::unique_ptr<gfx::Renderer> renderer;
     std::unique_ptr<editor::Editor> editorUi;
+    // 「정책이 보는 그림」. --observation-dump 가 있을 때만 만든다.
+    //
+    // ponytail: 저장소 규약은 «새 기능은 app::Plugin 으로» 인데 이것은 Application 멤버로 들어갔다.
+    // 지금 부르는 곳이 덤프뿐이라 플러그인 훅(update/addPass)에 맞는 자리가 없기 때문이다. 학습
+    // 플러그인이 같은 것을 쓰는 12단계에서 그쪽으로 옮긴다 — 그림을 만드는 자리가 편집기와 헤드리스에서
+    // 같아야 학습과 덤프가 같은 것을 본다.
+    std::unique_ptr<gfx::ObservationRenderer> observation;
+    // 관측 판을 제출하고 기다리는 자리. 이름과 달리 컴퓨트 전용이 아니라 그래픽스 큐를 쓴다.
+    std::unique_ptr<gfx::HeadlessCompute> observationSubmit;
+    // 셰이더가 없어 한 번 실패했으면 다시 시도하지 않는다.
+    bool observationDisabled = false;
+    bool observationWarned = false;
     core::JobSystem jobs;
 
     // 백그라운드에서 해석 중인 모델 하나. 스레드는 model 과 progress 만 만지고, GPU 자원과 장면은

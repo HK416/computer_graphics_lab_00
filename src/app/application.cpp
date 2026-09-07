@@ -13,6 +13,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <SDL3/SDL.h>
 #include <spdlog/spdlog.h>
+#include <stb_image_write.h>
 
 #include "app/plugins/debug_lines_plugin.h"
 #include "app/plugins/fluid_plugin.h"
@@ -110,6 +111,16 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
         textures = std::make_unique<gfx::TextureCache>(*context, *bindless);
         geometry = std::make_unique<gfx::GeometryStore>(*context);
     }
+    // **장면을 열기 전**이라야 지오메트리 저장소가 모델을 받는다. 헤드리스에서 관측을 뜨려면 창 없는
+    // 장치와 지오메트리·텍스처가 모두 있어야 하므로 여기서 만든다. 창이 있는 실행은 위에서 이미 만들었다.
+    if (options.headless && needsObservationDevice()) {
+        context = std::make_unique<gfx::Context>(nullptr);
+        context->memoryBudgetOverride = options.gpuBudgetMegabytes * 1024ULL * 1024ULL;
+        bindless = std::make_unique<gfx::BindlessTextures>(*context);
+        textures = std::make_unique<gfx::TextureCache>(*context, *bindless);
+        geometry = std::make_unique<gfx::GeometryStore>(*context);
+        spdlog::info("헤드리스 GPU 장치 준비: 관측 렌더");
+    }
     // 내장 도형은 헤드리스에서도 올린다. 장면 파일이 가리키는 메쉬 번호와 메쉬 콜라이더가 여기서 나온다.
     registerBuiltinModels();
     loadScenes();
@@ -206,6 +217,10 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
 // 데 수백 ms 가 들므로 CPU 백엔드만 쓰는 장면(회귀 테스트가 그렇다)이나 재생하지 않는 실행은 지금까지처럼
 // 그냥 돈다. 유체·천·입자의 GPU 경로는 렌더러 자원에 얽혀 있어 헤드리스에서 돌지 않는다.
 void Application::createHeadlessDevice() {
+    // 관측 때문에 이미 만들었으면 그대로 쓴다.
+    if (context != nullptr) {
+        return;
+    }
     if (!options.play) {
         return;
     }
@@ -302,6 +317,10 @@ Application::~Application() {
     // 렌더러가 쓰는 서피스는 윈도우보다 먼저 파괴되어야 한다.
     editorUi.reset();
     renderer.reset();
+    // 관측도 여기서 놓는다. **멤버 선언 순서에 기대면 안 된다** — 아래에서 context 를 명시적으로 놓으므로,
+    // 그때까지 살아 있으면 죽은 장치에 대고 이미지와 파이프라인을 파괴한다(헤드리스 종료가 그렇게 죽었다).
+    observationSubmit.reset();
+    observation.reset();
     geometry.reset();
     textures.reset();
     bindless.reset();
@@ -832,8 +851,12 @@ void Application::completeLoad() {
     uint64_t uploadStart = SDL_GetTicksNS();
 
     uint32_t modelIndex = registerModel(load.path, load.model);
-    if (renderer != nullptr) {
+    // **지오메트리로 판정한다.** 헤드리스에서도 관측을 뜰 때는 저장소가 있고, build 를 빠뜨리면 CPU 표에는
+    // 있고 GPU 버퍼에는 없는 메쉬가 생겨 셰이더가 버퍼 밖을 읽는다(BDA 라 검증 레이어도 못 잡는다).
+    if (geometry != nullptr) {
         geometry->build();
+    }
+    if (renderer != nullptr) {
         renderer->onGeometryChanged();
     }
     instantiateModel(modelIndex, target);
@@ -982,9 +1005,11 @@ void Application::resolveModels(scene::SceneFile& loaded) {
         }
         modelIndices.push_back(index);
     }
-    if (!loaded.models.empty() && renderer != nullptr) {
+    if (!loaded.models.empty() && geometry != nullptr) {
         geometry->build();
-        renderer->onGeometryChanged();
+        if (renderer != nullptr) {
+            renderer->onGeometryChanged();
+        }
     }
     scene::Scene& created = loaded.scene;
     auto resolved = [&](int32_t model) {
@@ -1050,6 +1075,7 @@ void Application::runHeadless() {
             plugin->update(shared, deltaSeconds);
         }
         scene.refresh(&jobs);
+        stepObservation(frame + 1);
     }
     spdlog::info("헤드리스 {} 프레임 완료 (간격 {:.4f} 초, 강체 {} 개)",
                  options.frames,
@@ -1060,6 +1086,91 @@ void Application::runHeadless() {
     } else {
         dumpRigidBodies();
     }
+}
+
+// 관측 한 판을 그리고, 목표 프레임이면 콘택트 시트를 쓴다.
+//
+// **매 프레임 그린다.** 프레임 스택(최근 세 판)이 차 있어야 덤프가 뜻이 있고, 그 스택을 만드는 자리가
+// 12단계의 학습 경로와 같아야 «학습이 보는 것» 과 «사람이 보는 것» 이 어긋나지 않는다.
+bool Application::stepObservation(uint64_t frameCount) {
+    if (!needsObservationDevice() || observationDisabled || context == nullptr || geometry == nullptr) {
+        return false;
+    }
+    scene::Scene& scene = scenes.active();
+    gfx::ObservationLayout layout = gfx::buildObservationLayout(scene);
+    if (layout.empty()) {
+        // 한 번만 알린다. --frames 가 --screenshot-frame 보다 작으면 목표 프레임에 닿지도 못한다.
+        if (!observationWarned) {
+            observationWarned = true;
+            spdlog::warn("관측 카메라가 없습니다. 장면에 카메라 부품을 붙여야 합니다");
+        }
+        return false;
+    }
+    if (observation == nullptr) {
+        observation = std::make_unique<gfx::ObservationRenderer>(*context, *bindless, *geometry);
+        // **은퇴 자원을 거두지 않는다.** 창이 있는 실행에서는 렌더러가 아직 도는 프레임에 맡긴 것이
+        // 섞여 있다(HeadlessCompute 헤더에 이유를 적었다).
+        observationSubmit = std::make_unique<gfx::HeadlessCompute>(*context, false);
+        if (!observation->available()) {
+            // 한 번 실패하면 다시 시도하지 않는다. 프레임마다 만들었다 지우면 경고만 쏟아진다.
+            observationDisabled = true;
+            observation.reset();
+            observationSubmit.reset();
+            return false;
+        }
+    }
+    // 표가 바뀌면 다시 잡고 프레임 스택도 처음부터다. 판정은 렌더러가 한다.
+    if (!observation->reserve(layout)) {
+        return false;
+    }
+    bool wanted = frameCount == options.screenshotFrame;
+    // ponytail: 프레임마다 따로 제출하고 **기다린다.** 덤프 실행에서는 문제가 없지만 편집기 안에서
+    // 학습을 돌리면 이대로는 프레임이 끊긴다. 12단계에서 관측·인코드·정책을 프레임 명령 버퍼 하나에
+    // 함께 기록한다.
+    observationSubmit->submit([&](VkCommandBuffer commandBuffer, uint64_t) {
+        // 스킨 컴퓨트는 렌더러의 그래프 안에 있어 여기서 돌지 않는다. 스킨 없는 정점을 그대로 쓴다.
+        observation->record(commandBuffer, scene, layout, 0, false);
+        if (wanted) {
+            observation->recordDownload(commandBuffer);
+        }
+    });
+    if (!wanted) {
+        return false;
+    }
+
+    // 콘택트 시트: 가로가 프레임 스택(왼쪽이 가장 오래된 것), 세로가 뷰다.
+    uint32_t columns = gfx::OBSERVATION_STACK;
+    uint32_t rows = layout.count();
+    uint32_t width = columns * gfx::OBSERVATION_SIZE;
+    uint32_t height = rows * gfx::OBSERVATION_SIZE;
+    std::vector<uint8_t> sheet(static_cast<size_t>(width) * height);
+    const float* source = observation->featureResult();
+    for (uint32_t view = 0; view < rows; ++view) {
+        for (uint32_t channel = 0; channel < columns; ++channel) {
+            size_t base =
+                (static_cast<size_t>(view) * columns + channel) * gfx::OBSERVATION_SIZE * gfx::OBSERVATION_SIZE;
+            for (uint32_t y = 0; y < gfx::OBSERVATION_SIZE; ++y) {
+                for (uint32_t x = 0; x < gfx::OBSERVATION_SIZE; ++x) {
+                    float value = source[base + static_cast<size_t>(y) * gfx::OBSERVATION_SIZE + x];
+                    size_t target = static_cast<size_t>(view * gfx::OBSERVATION_SIZE + y) * width +
+                                    channel * gfx::OBSERVATION_SIZE + x;
+                    sheet[target] = static_cast<uint8_t>(std::lround(std::clamp(value, 0.0F, 1.0F) * 255.0F));
+                }
+            }
+        }
+    }
+    std::string path = options.observationDumpPath.generic_string();
+    if (stbi_write_png(path.c_str(),
+                       static_cast<int>(width),
+                       static_cast<int>(height),
+                       1,
+                       sheet.data(),
+                       static_cast<int>(width)) == 0) {
+        spdlog::error("관측 덤프를 쓰지 못했습니다: {}", path);
+        return false;
+    }
+    spdlog::info("관측 덤프 저장: {} ({}x{}, 뷰 {} 개 x 스택 {})", path, width, height, rows, columns);
+    return true;
 }
 
 void Application::dumpRigidBodies() const {
@@ -1177,6 +1288,9 @@ void Application::run() {
             collectedTopology = scenes.active().topologyRevision();
             collectUnusedModels(false);
         }
+        // 관측은 렌더 그래프에 노드를 끼우지 않는다. 주 렌더와 아무 자원도 나누지 않으므로 그리기 앞에
+        // 따로 제출한다 — 그래서 --capture present 회귀가 이 단계로 바뀌지 않는다.
+        stepObservation(frameCount + 1);
         renderer->drawFrame(scenes.active());
         ++frameCount;
 

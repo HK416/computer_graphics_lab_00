@@ -5,7 +5,8 @@
 
 namespace gfx {
 
-HeadlessCompute::HeadlessCompute(Context& context) : context(context) {
+HeadlessCompute::HeadlessCompute(Context& context, bool collectRetired)
+    : context(context), collectRetired(collectRetired) {
     VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     poolInfo.queueFamilyIndex = context.queueFamilies.graphics;
@@ -43,8 +44,9 @@ uint64_t HeadlessCompute::submit(const std::function<void(VkCommandBuffer, uint6
     VK_CHECK(vkWaitForFences(context.device, 1, &fence, VK_TRUE, UINT64_MAX));
 
     // 기다렸으니 이 제출이 붙들고 있던 것은 아무도 읽지 않는다. 편집기 없이 도는 경로라 자원이
-    // 사라지는 일은 드물지만, 맡긴 것이 있으면 여기서 지운다.
-    if (context.hasRetired()) {
+    // 사라지는 일은 드물지만, 맡긴 것이 있으면 여기서 지운다. 창이 있는 실행에서는 이 갈래를 끈다
+    // (헤더에 이유를 적었다).
+    if (collectRetired && context.hasRetired()) {
         context.collectRetired();
     }
     return index;

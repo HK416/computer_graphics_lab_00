@@ -132,6 +132,9 @@ set(shader_sources
     shaders/neural_layernorm_dparam.comp
     shaders/neural_reduce.comp
     shaders/neural_reduce_dx.comp
+    shaders/observation.vert
+    shaders/observation.frag
+    shaders/observation_encode.comp
     shaders/neural_adam.comp
     shaders/neural_polyak.comp
     shaders/neural_conv.comp
@@ -266,6 +269,7 @@ add_executable(cg_lab
     src/gfx/neural.cpp
     src/gfx/neural_math.cpp
     src/gfx/neural_selfcheck.cpp
+    src/gfx/observation.cpp
     src/gfx/profiler.cpp
     src/gfx/profiler_math.cpp
     src/gfx/raytracing.cpp
