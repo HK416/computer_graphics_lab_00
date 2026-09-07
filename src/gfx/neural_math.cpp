@@ -3,8 +3,16 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <system_error>
+
+#include <nlohmann/json.hpp>
 
 namespace gfx {
+
+using nlohmann::json;
+
 namespace {
 
 // splitmix64. 계수 하나를 섞어 균등한 64비트를 낸다. 씨앗이 1 씩 이어져도 결과가 이어지지 않는다.
@@ -322,6 +330,19 @@ uint32_t GraphBuilder::addMse(uint32_t prediction, uint32_t target) {
     return emit(OpKind::MSE, prediction, target, NO_TENSOR, output);
 }
 
+uint32_t GraphBuilder::addHuber(uint32_t prediction, uint32_t target, float delta) {
+    if (prediction >= graph.tensors.size() || target >= graph.tensors.size()) {
+        return NO_TENSOR;
+    }
+    if (!sameShape(graph.tensors[prediction], graph.tensors[target]) || !(delta > 0.0F)) {
+        return NO_TENSOR;
+    }
+    uint32_t output = allocate(Arena::ACTIVATION, 1, 1, 1, 1, TENSOR_GRAD);
+    emit(OpKind::HUBER, prediction, target, NO_TENSOR, output);
+    graph.ops.back().fparams[0] = delta;
+    return output;
+}
+
 uint32_t GraphBuilder::addReshape(uint32_t tensor, uint32_t n, uint32_t c, uint32_t h, uint32_t w) {
     if (tensor >= graph.tensors.size()) {
         return NO_TENSOR;
@@ -472,6 +493,19 @@ template <typename T> void forwardImpl(const Graph& graph, const T* parameters, 
             y[0] = count > 0 ? sum / static_cast<T>(count) : T{0};
             break;
         }
+        case OpKind::HUBER: {
+            const T* target = readTensor(graph.tensors[op.inputs[1]], parameters, constActivations);
+            uint32_t count = in.count();
+            T delta = static_cast<T>(op.fparams[0]);
+            T sum = T{0};
+            for (uint32_t i = 0; i < count; ++i) {
+                T error = std::abs(x[i] - target[i]);
+                // 꺾이는 지점에서 값과 기울기가 모두 이어지도록 뒤쪽 식에 delta/2 를 뺀다.
+                sum += error <= delta ? T{0.5} * error * error : delta * (error - T{0.5} * delta);
+            }
+            y[0] = count > 0 ? sum / static_cast<T>(count) : T{0};
+            break;
+        }
         }
     }
 }
@@ -506,6 +540,7 @@ bool validate(const Graph& graph) {
         case OpKind::CONCAT:
         case OpKind::MIN2:
         case OpKind::MSE:
+        case OpKind::HUBER:
             required = 2;
             break;
         case OpKind::RELU:
@@ -526,6 +561,20 @@ bool validate(const Graph& graph) {
         }
         if (graph.tensors[op.output].offset + graph.tensors[op.output].count() > graph.activationCount) {
             return false;
+        }
+        // 원소별로 두 입력을 훑는 연산은 모양이 같아야 한다. 빌더는 이미 막지만, 손으로 짓거나 파일에서
+        // 읽은 표는 여기서 걸러야 범위 밖을 읽지 않는다.
+        switch (op.kind) {
+        case OpKind::ADD:
+        case OpKind::MIN2:
+        case OpKind::MSE:
+        case OpKind::HUBER:
+            if (!sameShape(graph.tensors[op.inputs[0]], graph.tensors[op.inputs[1]])) {
+                return false;
+            }
+            break;
+        default:
+            break;
         }
     }
     // 마지막 연산의 출력이 «경사를 받는 스칼라» 여야 역전파의 씨앗을 심을 수 있다.
@@ -838,6 +887,29 @@ bool backward(const Graph& graph,
             }
             break;
         }
+        case OpKind::HUBER: {
+            const Tensor& targetTensor = graph.tensors[op.inputs[1]];
+            const float* target = readTensor(targetTensor, parameters, activations);
+            float* dTarget = tensorGradient(targetTensor, parameterGradients, activationGradients);
+            uint32_t count = in.count();
+            if (count == 0) {
+                break;
+            }
+            float delta = op.fparams[0];
+            float scale = dy[0] / static_cast<float>(count);
+            for (uint32_t i = 0; i < count; ++i) {
+                float error = x[i] - target[i];
+                // 꺾이는 지점 밖에서는 기울기가 delta 로 눕는다. 정확히 그 지점에서는 안쪽 식을 쓴다.
+                float slope = std::abs(error) <= delta ? error : (error > 0.0F ? delta : -delta);
+                if (dx != nullptr) {
+                    dx[i] += scale * slope;
+                }
+                if (dTarget != nullptr) {
+                    dTarget[i] -= scale * slope;
+                }
+            }
+            break;
+        }
         }
     }
     return true;
@@ -892,6 +964,153 @@ void initializeParameters(const Graph& graph, uint64_t seed, float* parameters) 
             break;
         }
     }
+}
+
+void adamStep(const AdamSettings& settings,
+              uint32_t step,
+              size_t count,
+              const float* gradients,
+              float* moments,
+              float* parameters) {
+    // step 은 1부터 센다. 0 이면 아래 편향 보정이 0 이 되어 어차피 걸리지만, 뜻을 여기서 밝혀 둔다.
+    if (step == 0) {
+        return;
+    }
+    // 편향 보정. m 과 v 가 0 에서 시작하므로 초반 몇 걸음은 실제보다 작게 잡힌다. 그만큼 되돌린다.
+    float firstCorrection = 1.0F - std::pow(settings.beta1, static_cast<float>(step));
+    float secondCorrection = 1.0F - std::pow(settings.beta2, static_cast<float>(step));
+    if (firstCorrection <= 0.0F || secondCorrection <= 0.0F) {
+        return;
+    }
+    float* first = moments;
+    float* second = moments + count;
+    for (size_t i = 0; i < count; ++i) {
+        float gradient = gradients[i];
+        first[i] = settings.beta1 * first[i] + (1.0F - settings.beta1) * gradient;
+        second[i] = settings.beta2 * second[i] + (1.0F - settings.beta2) * gradient * gradient;
+        float correctedFirst = first[i] / firstCorrection;
+        float correctedSecond = second[i] / secondCorrection;
+        parameters[i] -= settings.learningRate * correctedFirst / (std::sqrt(correctedSecond) + settings.epsilon);
+    }
+}
+
+void polyakStep(float tau, size_t count, const float* online, float* target) {
+    tau = std::clamp(tau, 0.0F, 1.0F);
+    if (tau == 0.0F) {
+        return;
+    }
+    if (tau == 1.0F) {
+        // 대입으로 처리한다. a + (b - a) 는 두 값의 크기 차가 크면 b 가 되지 않는다.
+        std::copy(online, online + count, target);
+        return;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        target[i] += tau * (online[i] - target[i]);
+    }
+}
+
+uint64_t graphHash(const Graph& graph) {
+    // 값 하나를 섞어 넣는다. splitmix64 를 되풀이해 순서까지 결과에 남긴다.
+    uint64_t state = 0x9E3779B97F4A7C15ULL;
+    auto fold = [&state](uint64_t value) { state = mix(state ^ mix(value)); };
+    for (const Tensor& tensor : graph.tensors) {
+        fold(static_cast<uint64_t>(tensor.arena));
+        fold(tensor.offset);
+        for (uint32_t axis = 0; axis < 4; ++axis) {
+            fold(tensor.dims[axis]);
+        }
+        fold(tensor.flags);
+    }
+    for (const Op& op : graph.ops) {
+        fold(static_cast<uint64_t>(op.kind));
+        for (uint32_t i = 0; i < 3; ++i) {
+            fold(op.inputs[i]);
+        }
+        fold(op.output);
+        for (uint32_t i = 0; i < 4; ++i) {
+            fold(static_cast<uint64_t>(static_cast<int64_t>(op.iparams[i])));
+        }
+        for (uint32_t i = 0; i < 2; ++i) {
+            // 실수는 비트 그대로 섞는다. 값이 조금만 달라도 다른 그래프다.
+            uint32_t bits = 0;
+            std::memcpy(&bits, &op.fparams[i], sizeof(bits));
+            fold(bits);
+        }
+    }
+    fold(graph.parameterCount);
+    fold(graph.activationCount);
+    return state;
+}
+
+ParameterLayout parameterLayout(const Graph& graph) {
+    ParameterLayout layout;
+    layout.count = graph.parameterCount;
+    for (uint32_t tensor : graph.parameterTensors()) {
+        const Tensor& item = graph.tensors[tensor];
+        for (uint32_t axis = 0; axis < 4; ++axis) {
+            layout.shapes.push_back(item.dims[axis]);
+        }
+    }
+    return layout;
+}
+
+bool saveParameters(const Graph& graph, const float* parameters, const std::string& path) {
+    ParameterLayout layout = parameterLayout(graph);
+    for (size_t i = 0; i < layout.count; ++i) {
+        // JSON 은 NaN·무한을 null 로 찍고, 그 파일은 되읽을 때 타입이 어긋나 100% 실패한다. 저장이
+        // «성공» 한 척하느니 여기서 걸러 학습이 발산한 것을 알린다.
+        if (!std::isfinite(parameters[i])) {
+            return false;
+        }
+    }
+    json document;
+    document["count"] = layout.count;
+    document["shapes"] = layout.shapes;
+    document["graph"] = graphHash(graph);
+    document["weights"] = std::vector<float>(parameters, parameters + layout.count);
+    // 처음 저장할 때 폴더가 없을 수 있다. ofstream 은 만들어 주지 않는다.
+    std::error_code error;
+    std::filesystem::path parent = std::filesystem::path(path).parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, error);
+    }
+    std::ofstream file(path, std::ios::binary);
+    if (!file) {
+        return false;
+    }
+    file << document.dump(1, ' ') << "\n";
+    return static_cast<bool>(file);
+}
+
+bool loadParameters(const Graph& graph, float* parameters, const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return false;
+    }
+    json document = json::parse(file, nullptr, false);
+    // 구문이 깨진 것은 is_discarded 로 걸리지만, 구문은 맞고 «키의 타입이 다른» 것은 value() 가 예외를
+    // 던진다. 손으로 주는 경로라 그대로 두면 크래시가 된다.
+    if (document.is_discarded() || !document.is_object()) {
+        return false;
+    }
+    ParameterLayout expected = parameterLayout(graph);
+    std::vector<float> weights;
+    try {
+        ParameterLayout stored;
+        stored.count = document.value("count", size_t{0});
+        stored.shapes = document.value("shapes", std::vector<uint32_t>{});
+        if (!(stored == expected) || document.value("graph", uint64_t{0}) != graphHash(graph)) {
+            return false;
+        }
+        weights = document.value("weights", std::vector<float>{});
+    } catch (const json::exception&) {
+        return false;
+    }
+    if (weights.size() != expected.count) {
+        return false;
+    }
+    std::copy(weights.begin(), weights.end(), parameters);
+    return true;
 }
 
 } // namespace gfx

@@ -695,4 +695,7 @@ external/
 /public/scenes/
 # --train 이 쓰는 학습 결과. 소스가 아니라 산출물이다.
 /public/policies/
+# 테스트를 저장소 뿌리에서 직접 돌렸을 때 남는 것. ctest 는 build/ 안에서 돌아 여기 쌓이지 않는다.
+/neural_parameters_*.json
+/robot_policy_test.json
 /public/prefabs/

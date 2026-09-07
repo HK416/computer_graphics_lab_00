@@ -583,6 +583,7 @@ endif()
 # 신경망의 순수 계산. 유한차분 경사 검사라 Vulkan 도 다른 것도 링크하지 않는다.
 add_executable(cg_lab_neural_tests tests/neural_test.cpp src/gfx/neural_math.cpp)
 target_include_directories(cg_lab_neural_tests PRIVATE src)
+target_link_libraries(cg_lab_neural_tests PRIVATE nlohmann_json::nlohmann_json)
 if(MSVC)
     target_compile_options(cg_lab_neural_tests PRIVATE /W4 /utf-8)
 else()

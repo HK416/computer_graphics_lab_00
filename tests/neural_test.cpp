@@ -8,6 +8,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
+#include <limits>
+#include <string>
 #include <vector>
 
 #include "gfx/neural_math.h"
@@ -265,6 +268,44 @@ double checkConcat() {
     return test.check(71, 32);
 }
 
+// Huber 손실. delta 안쪽(제곱)과 바깥쪽(눕는 기울기)을 모두 밟아야 한다 — delta 를 작게 잡으면
+// 무작위 오차 대부분이 바깥쪽이고, 크게 잡으면 안쪽이다.
+double checkHuber(float delta) {
+    GradientCheck test;
+    gfx::GraphBuilder builder(test.graph);
+    uint32_t input = builder.addInput(4, 3, 1, 1);
+    uint32_t prediction = addStem(builder, input, 2);
+    uint32_t target = builder.addInput(4, 2, 1, 1);
+    assert(builder.addHuber(prediction, target, delta) != gfx::NO_TENSOR);
+    assert(gfx::validate(test.graph));
+
+    test.inputs = {input, target};
+    test.allocate();
+    return test.check(113, 24);
+}
+
+// Huber 도 손실이 마지막이 아닌 판과 목표가 학습하는 층에서 오는 판이 있어야 한다. MSE 에만 두면
+// Huber 의 dy[0] 곱과 dTarget 갈래가 죽은 코드로 남아 부호를 뒤집어도 드러나지 않는다.
+double checkHuberBranches(float delta) {
+    GradientCheck test;
+    gfx::GraphBuilder builder(test.graph);
+    uint32_t input = builder.addInput(4, 3, 1, 1);
+    uint32_t prediction = addStem(builder, input, 2);
+    // 목표도 학습하는 층에서 온다.
+    uint32_t targetWeight = builder.addParameter(2, 3, 1, 1);
+    uint32_t targetBias = builder.addParameter(2, 1, 1, 1);
+    uint32_t target = builder.addTanh(builder.addLinear(input, targetWeight, targetBias));
+    uint32_t loss = builder.addHuber(prediction, target, delta);
+    assert(loss != gfx::NO_TENSOR);
+    // 손실 뒤에 배율을 얹어 Huber 가 받는 dy 를 1 이 아니게 만든다.
+    assert(builder.addScale(loss, 0.375F) != gfx::NO_TENSOR);
+    assert(gfx::validate(test.graph));
+
+    test.inputs = {input};
+    test.allocate();
+    return test.check(127, 24);
+}
+
 // 손실이 마지막이 아닐 때. MSE 의 역전파가 «위에서 온 경사»(dy[0])를 곱하는 자리가 여기서만 잠긴다 —
 // 손실이 늘 마지막이면 dy[0] 이 항상 1 이라 그 곱을 빼먹어도 드러나지 않는다. 쌍둥이 크리틱의 두 손실을
 // 더하거나 MAD 의 alpha 로 가중하는 순간 실제로 밟는 자리다.
@@ -514,6 +555,57 @@ void testValidate() {
     assert(viewBuilder.addReshape(parameter, 6, 1, 1, 1) == gfx::NO_TENSOR);
     assert(views.parameterTensors().size() == 1);
 
+    // 손으로 지은 표. 빌더는 잘못된 모양을 애초에 거절하므로, validate 자신의 검사는 이렇게만 볼 수 있다.
+    // 파일에서 읽은 표가 이 꼴이면 원소별 연산이 범위 밖을 읽는다.
+    {
+        gfx::Graph handmade;
+        gfx::Tensor wide;
+        wide.arena = gfx::Arena::ACTIVATION;
+        wide.offset = 0;
+        wide.dims[0] = 2;
+        wide.dims[1] = 3;
+        wide.flags = gfx::TENSOR_GRAD;
+        gfx::Tensor tall = wide;
+        tall.offset = 6;
+        tall.dims[0] = 1;
+        tall.dims[1] = 6;
+        gfx::Tensor result = wide;
+        result.offset = 12;
+        handmade.tensors = {wide, tall, result};
+        handmade.activationCount = 18;
+        gfx::Op input0;
+        input0.kind = gfx::OpKind::INPUT;
+        input0.output = 0;
+        gfx::Op input1 = input0;
+        input1.output = 1;
+        gfx::Op add;
+        add.kind = gfx::OpKind::ADD;
+        add.inputs[0] = 0;
+        add.inputs[1] = 1;
+        add.output = 2;
+        handmade.ops = {input0, input1, add};
+        // 마지막이 스칼라가 아니라서도 거절되므로, 그 조건만 만족시킨 판을 따로 본다.
+        assert(!gfx::validate(handmade));
+
+        gfx::Tensor scalar = result;
+        scalar.dims[0] = 1;
+        scalar.dims[1] = 1;
+        scalar.offset = 12;
+        handmade.tensors[2] = scalar;
+        gfx::Op mse;
+        mse.kind = gfx::OpKind::MSE;
+        mse.inputs[0] = 0;
+        mse.inputs[1] = 1;
+        mse.output = 2;
+        handmade.ops = {input0, input1, mse};
+        // 이제 마지막은 경사를 받는 스칼라다. 남은 결함은 «두 입력의 모양이 다르다» 하나뿐이다.
+        assert(!gfx::validate(handmade));
+        // 모양을 맞추면 통과한다(위 거절이 «늘 거절» 이 아니라는 확인).
+        handmade.tensors[1].dims[0] = 2;
+        handmade.tensors[1].dims[1] = 3;
+        assert(gfx::validate(handmade));
+    }
+
     // 모양은 원소 수가 아니라 네 축을 견준다.
     gfx::Graph shapes;
     gfx::GraphBuilder shapeBuilder(shapes);
@@ -545,6 +637,10 @@ void testGradients() {
         {"concat", checkConcat()},
         {"scaled loss", checkScaledLoss()},
         {"live target", checkLiveTarget()},
+        {"huber wide", checkHuber(4.0F)},
+        {"huber narrow", checkHuber(0.05F)},
+        {"huber branches", checkHuberBranches(1.0F)},
+        {"huber branches L1", checkHuberBranches(0.05F)},
     };
     std::printf("  연산별 최대 상대 오차 (해석 경사 대 중앙 유한차분)\n");
     for (const Case& item : cases) {
@@ -827,6 +923,331 @@ void testInitialization() {
     assert(other != parameters);
 }
 
+// Adam 의 첫 걸음은 경사의 «크기» 와 무관하게 학습률 근처다. m 과 v 가 0 에서 시작해 편향 보정을
+// 지나면 m / sqrt(v) 가 부호만 남기기 때문이다. 이 성질이 깨지면 학습률을 고르는 감각이 통째로 달라진다.
+void testAdamFirstStep() {
+    gfx::AdamSettings settings;
+    settings.learningRate = 0.01F;
+    constexpr size_t COUNT = 4;
+    std::vector<float> parameters(COUNT, 0.0F);
+    std::vector<float> moments(gfx::adamMomentCount(COUNT), 0.0F);
+    // 경사의 크기를 1000 배 차이로 벌려도 걸음은 같아야 한다.
+    std::vector<float> gradients{1.0F, -1.0F, 1000.0F, -0.001F};
+    gfx::adamStep(settings, 1, COUNT, gradients.data(), moments.data(), parameters.data());
+    for (size_t i = 0; i < COUNT; ++i) {
+        float expected = gradients[i] > 0.0F ? -settings.learningRate : settings.learningRate;
+        assert(std::abs(parameters[i] - expected) < 1.0e-6F);
+    }
+    // 모멘트 배열의 절반 배치를 못 박는다. 앞 절반이 1차, 뒤 절반이 2차다 — GPU 가 버퍼 하나로 받으므로
+    // 여기서 뒤집히면 CPU/GPU 가 갈린다. 첫 걸음이라 m = (1-b1)g, v = (1-b2)g^2 이다.
+    for (size_t i = 0; i < COUNT; ++i) {
+        float expectedFirst = (1.0F - settings.beta1) * gradients[i];
+        float expectedSecond = (1.0F - settings.beta2) * gradients[i] * gradients[i];
+        assert(std::abs(moments[i] - expectedFirst) <= 1.0e-4F * std::abs(expectedFirst) + 1.0e-9F);
+        assert(std::abs(moments[COUNT + i] - expectedSecond) <= 1.0e-4F * std::abs(expectedSecond) + 1.0e-9F);
+    }
+    assert(gfx::adamMomentCount(COUNT) == COUNT * 2);
+
+    // 경사가 0 이면 움직이지 않는다.
+    std::vector<float> zeroParameters(COUNT, 3.0F);
+    std::vector<float> zeroMoments(gfx::adamMomentCount(COUNT), 0.0F);
+    std::vector<float> zeroGradients(COUNT, 0.0F);
+    gfx::adamStep(settings, 1, COUNT, zeroGradients.data(), zeroMoments.data(), zeroParameters.data());
+    for (float value : zeroParameters) {
+        assert(value == 3.0F);
+    }
+    // step 0 은 편향 보정이 0 으로 나누는 자리라 아무 일도 하지 않는다.
+    std::vector<float> guarded(COUNT, 5.0F);
+    std::vector<float> guardedMoments(gfx::adamMomentCount(COUNT), 0.0F);
+    gfx::adamStep(settings, 0, COUNT, gradients.data(), guardedMoments.data(), guarded.data());
+    for (float value : guarded) {
+        assert(value == 5.0F);
+    }
+}
+
+// 이차식 최소화. 최적화가 실제로 내려가는지.
+void testAdamConvergence() {
+    gfx::AdamSettings settings;
+    settings.learningRate = 0.05F;
+    constexpr size_t COUNT = 3;
+    const std::vector<float> target{1.5F, -2.0F, 0.25F};
+    std::vector<float> parameters(COUNT, 0.0F);
+    std::vector<float> moments(gfx::adamMomentCount(COUNT), 0.0F);
+    std::vector<float> gradients(COUNT, 0.0F);
+
+    auto loss = [&]() {
+        float sum = 0.0F;
+        for (size_t i = 0; i < COUNT; ++i) {
+            float error = parameters[i] - target[i];
+            sum += error * error;
+        }
+        return sum;
+    };
+    float first = loss();
+    for (uint32_t step = 1; step <= 2000; ++step) {
+        for (size_t i = 0; i < COUNT; ++i) {
+            gradients[i] = 2.0F * (parameters[i] - target[i]);
+        }
+        gfx::adamStep(settings, step, COUNT, gradients.data(), moments.data(), parameters.data());
+    }
+    assert(loss() < first);
+    for (size_t i = 0; i < COUNT; ++i) {
+        assert(std::abs(parameters[i] - target[i]) < 1.0e-3F);
+    }
+
+    // 같은 씨앗·같은 순서면 결과가 비트로 같다.
+    std::vector<float> again(COUNT, 0.0F);
+    std::vector<float> againMoments(gfx::adamMomentCount(COUNT), 0.0F);
+    for (uint32_t step = 1; step <= 2000; ++step) {
+        for (size_t i = 0; i < COUNT; ++i) {
+            gradients[i] = 2.0F * (again[i] - target[i]);
+        }
+        gfx::adamStep(settings, step, COUNT, gradients.data(), againMoments.data(), again.data());
+    }
+    assert(again == parameters);
+}
+
+void testPolyak() {
+    constexpr size_t COUNT = 4;
+    std::vector<float> online{1.0F, 2.0F, -3.0F, 0.5F};
+    std::vector<float> target(COUNT, 0.0F);
+    // tau 0 이면 그대로다.
+    gfx::polyakStep(0.0F, COUNT, online.data(), target.data());
+    for (float value : target) {
+        assert(value == 0.0F);
+    }
+    // tau 1 이면 복사다.
+    gfx::polyakStep(1.0F, COUNT, online.data(), target.data());
+    assert(target == online);
+    // 그 사이는 선형 보간이다.
+    std::fill(target.begin(), target.end(), 0.0F);
+    gfx::polyakStep(0.25F, COUNT, online.data(), target.data());
+    for (size_t i = 0; i < COUNT; ++i) {
+        assert(std::abs(target[i] - 0.25F * online[i]) < 1.0e-6F);
+    }
+    // 범위 밖 tau 는 잘라 낸다. 음수를 그대로 쓰면 타깃이 발산하고 1 보다 크면 진동한다.
+    std::fill(target.begin(), target.end(), 1.0F);
+    gfx::polyakStep(-0.5F, COUNT, online.data(), target.data());
+    for (float value : target) {
+        assert(value == 1.0F);
+    }
+    gfx::polyakStep(2.0F, COUNT, online.data(), target.data());
+    assert(target == online);
+    // tau 가 1 이면 크기 차가 커도 정확히 복사다(a + (b - a) 는 그렇지 않다).
+    std::vector<float> huge{1.0e30F, -1.0e30F, 1.0e30F, -1.0e30F};
+    gfx::polyakStep(1.0F, COUNT, online.data(), huge.data());
+    assert(huge == online);
+
+    // 되풀이하면 지수적으로 다가간다.
+    for (uint32_t i = 0; i < 200; ++i) {
+        gfx::polyakStep(0.05F, COUNT, online.data(), target.data());
+    }
+    for (size_t i = 0; i < COUNT; ++i) {
+        assert(std::abs(target[i] - online[i]) < 1.0e-3F);
+    }
+}
+
+// Huber 의 **값**. 유한차분은 경사만 보므로 꺾이는 지점 밖의 상수항(-delta^2/2)이 빠져도 안 걸린다.
+// 그 항이 없으면 손실이 그 지점에서 끊기고, 두 크리틱의 손실을 견주는 자리에서 눈금이 어긋난다.
+void testHuberValue() {
+    gfx::Graph graph;
+    gfx::GraphBuilder builder(graph);
+    uint32_t prediction = builder.addInput(1, 3, 1, 1);
+    uint32_t target = builder.addInput(1, 3, 1, 1);
+    constexpr float DELTA = 0.5F;
+    uint32_t loss = builder.addHuber(prediction, target, DELTA);
+    assert(loss != gfx::NO_TENSOR);
+    // delta 가 0 이하면 뜻이 없다.
+    assert(builder.addHuber(prediction, target, 0.0F) == gfx::NO_TENSOR);
+    assert(builder.addHuber(prediction, target, -1.0F) == gfx::NO_TENSOR);
+
+    std::vector<float> parameters;
+    std::vector<float> activations(graph.activationCount, 0.0F);
+    // 오차를 꺾이는 지점 안쪽·정확히 그 위·바깥쪽 하나씩 둔다.
+    float errors[3] = {0.25F, DELTA, 2.0F};
+    for (uint32_t i = 0; i < 3; ++i) {
+        activations[graph.tensors[prediction].offset + i] = errors[i];
+        activations[graph.tensors[target].offset + i] = 0.0F;
+    }
+    gfx::forward(graph, parameters.data(), activations.data());
+    float expected = 0.5F * errors[0] * errors[0];
+    expected += 0.5F * DELTA * DELTA;
+    expected += DELTA * (errors[2] - 0.5F * DELTA);
+    assert(std::abs(activations[graph.tensors[loss].offset] - expected / 3.0F) < 1.0e-6F);
+
+    // 꺾이는 지점에서 이어져야 한다. 양쪽 식이 같은 값을 내는지 아주 가까운 두 점으로 본다.
+    constexpr float EDGE = 1.0e-4F;
+    for (uint32_t i = 0; i < 3; ++i) {
+        activations[graph.tensors[prediction].offset + i] = DELTA - EDGE;
+    }
+    gfx::forward(graph, parameters.data(), activations.data());
+    float inside = activations[graph.tensors[loss].offset];
+    for (uint32_t i = 0; i < 3; ++i) {
+        activations[graph.tensors[prediction].offset + i] = DELTA + EDGE;
+    }
+    gfx::forward(graph, parameters.data(), activations.data());
+    float outside = activations[graph.tensors[loss].offset];
+    assert(std::abs(outside - inside) < 1.0e-3F);
+}
+
+// 저장 -> 적재 왕복과 모양 검사.
+void testParameterFile() {
+    gfx::Graph graph;
+    gfx::GraphBuilder builder(graph);
+    uint32_t input = builder.addInput(2, 3, 5, 5);
+    uint32_t convWeight = builder.addParameter(4, 3, 3, 3);
+    uint32_t convBias = builder.addParameter(4, 1, 1, 1);
+    uint32_t conv = builder.addConv2d(input, convWeight, convBias, 2, 1);
+    const gfx::Tensor& convTensor = graph.tensors[conv];
+    uint32_t features = convTensor.dims[1] * convTensor.dims[2] * convTensor.dims[3];
+    uint32_t flat = builder.addReshape(conv, convTensor.dims[0], features, 1, 1);
+    uint32_t target = builder.addInput(2, 2, 1, 1);
+    assert(addHead(builder, graph, flat, target) != gfx::NO_TENSOR);
+
+    // 배치 요약은 파라미터 텐서마다 dims 넷이다. 뷰는 파라미터가 될 수 없으므로 중복이 없다.
+    gfx::ParameterLayout layout = gfx::parameterLayout(graph);
+    assert(layout.count == graph.parameterCount);
+    assert(layout.shapes.size() == graph.parameterTensors().size() * 4);
+
+    std::vector<float> parameters(graph.parameterCount, 0.0F);
+    gfx::initializeParameters(graph, 17, parameters.data());
+    const std::string path = "neural_parameters_test.json";
+    assert(gfx::saveParameters(graph, parameters.data(), path));
+
+    std::vector<float> loaded(graph.parameterCount, 9.0F);
+    assert(gfx::loadParameters(graph, loaded.data(), path));
+    assert(loaded == parameters);
+
+    // 파라미터 **총수가 같은데 모양만 다른** 그래프를 거절하는지. 개수만 견주면 통과해 버려 조용히
+    // 엉뚱한 자리를 채우게 되므로, 이 짝이 배치 검사의 핵심이다.
+    auto makeConvGraph = [](uint32_t channels, uint32_t kernelHeight, uint32_t kernelWidth, gfx::Graph& out) {
+        gfx::GraphBuilder convBuilder(out);
+        uint32_t convInput = convBuilder.addInput(1, channels, 6, 6);
+        uint32_t weight = convBuilder.addParameter(2, channels, kernelHeight, kernelWidth);
+        uint32_t bias = convBuilder.addParameter(2, 1, 1, 1);
+        assert(convBuilder.addConv2d(convInput, weight, bias, 1, 0) != gfx::NO_TENSOR);
+    };
+    gfx::Graph shapeA;
+    gfx::Graph shapeB;
+    makeConvGraph(3, 2, 2, shapeA);
+    makeConvGraph(2, 3, 2, shapeB);
+    // 2*3*2*2 + 2 = 26 과 2*2*3*2 + 2 = 26. 총수는 같고 모양은 다르다.
+    assert(shapeA.parameterCount == shapeB.parameterCount);
+    assert(gfx::parameterLayout(shapeA).shapes != gfx::parameterLayout(shapeB).shapes);
+    std::vector<float> shapeParameters(shapeA.parameterCount, 1.0F);
+    const std::string shapePath = "neural_parameters_shape.json";
+    assert(gfx::saveParameters(shapeA, shapeParameters.data(), shapePath));
+    std::vector<float> shapeTarget(shapeB.parameterCount, 4.0F);
+    std::vector<float> shapeUntouched = shapeTarget;
+    assert(!gfx::loadParameters(shapeB, shapeTarget.data(), shapePath));
+    assert(shapeTarget == shapeUntouched);
+    // 같은 그래프면 그대로 읽힌다(위 거절이 «늘 거절» 이 아니라는 확인).
+    std::vector<float> shapeSame(shapeA.parameterCount, 4.0F);
+    assert(gfx::loadParameters(shapeA, shapeSame.data(), shapePath));
+    assert(shapeSame == shapeParameters);
+
+    // 그래프 해시. 파라미터 배치가 **완전히 같은데** 그래프가 다른 두 경우를 가려야 한다.
+    {
+        // (가) 보폭·여백만 다르다. 9 에서 커널 3 으로 (보폭 1, 여백 0) 과 (보폭 2, 여백 3) 은 **출력이
+        //      똑같이 7** 이라 텐서 모양이 전부 같다 — 해시가 연산의 정수 인자까지 보지 않으면 못 가른다.
+        auto makeStrided = [](uint32_t stride, uint32_t pad, gfx::Graph& out) {
+            gfx::GraphBuilder strideBuilder(out);
+            uint32_t strideInput = strideBuilder.addInput(1, 3, 9, 9);
+            uint32_t weight = strideBuilder.addParameter(4, 3, 3, 3);
+            uint32_t bias = strideBuilder.addParameter(4, 1, 1, 1);
+            uint32_t conv = strideBuilder.addConv2d(strideInput, weight, bias, stride, pad);
+            assert(conv != gfx::NO_TENSOR);
+            assert(out.tensors[conv].dims[2] == 7 && out.tensors[conv].dims[3] == 7);
+        };
+        gfx::Graph slow;
+        gfx::Graph fast;
+        makeStrided(1, 0, slow);
+        makeStrided(2, 3, fast);
+        assert(gfx::parameterLayout(slow) == gfx::parameterLayout(fast));
+        // 텐서 표까지 완전히 같다. 남은 차이는 연산의 정수 인자뿐이다.
+        assert(slow.tensors.size() == fast.tensors.size());
+        for (size_t i = 0; i < slow.tensors.size(); ++i) {
+            for (uint32_t axis = 0; axis < 4; ++axis) {
+                assert(slow.tensors[i].dims[axis] == fast.tensors[i].dims[axis]);
+            }
+            assert(slow.tensors[i].offset == fast.tensors[i].offset);
+        }
+        assert(gfx::graphHash(slow) != gfx::graphHash(fast));
+
+        std::vector<float> slowParameters(slow.parameterCount, 0.0F);
+        gfx::initializeParameters(slow, 5, slowParameters.data());
+        const std::string stridePath = "neural_parameters_stride.json";
+        assert(gfx::saveParameters(slow, slowParameters.data(), stridePath));
+        std::vector<float> fastParameters(fast.parameterCount, 2.0F);
+        std::vector<float> fastUntouched = fastParameters;
+        assert(!gfx::loadParameters(fast, fastParameters.data(), stridePath));
+        assert(fastParameters == fastUntouched);
+        // 같은 그래프면 읽힌다.
+        std::vector<float> slowAgain(slow.parameterCount, 2.0F);
+        assert(gfx::loadParameters(slow, slowAgain.data(), stridePath));
+        assert(slowAgain == slowParameters);
+
+        // (나) 파라미터를 지은 순서만 바꿨다. 쌍둥이 크리틱 둘의 가중치가 뒤바뀌는 경우다.
+        auto makeSwapped = [](bool swap, gfx::Graph& out) {
+            gfx::GraphBuilder swapBuilder(out);
+            uint32_t swapInput = swapBuilder.addInput(1, 4, 1, 1);
+            uint32_t firstWeight = swapBuilder.addParameter(4, 4, 1, 1);
+            uint32_t secondWeight = swapBuilder.addParameter(4, 4, 1, 1);
+            uint32_t bias = swapBuilder.addParameter(4, 1, 1, 1);
+            uint32_t a = swapBuilder.addLinear(swapInput, swap ? secondWeight : firstWeight, bias);
+            uint32_t b = swapBuilder.addLinear(swapInput, swap ? firstWeight : secondWeight, bias);
+            assert(swapBuilder.addAdd(a, b) != gfx::NO_TENSOR);
+        };
+        gfx::Graph plain;
+        gfx::Graph swapped;
+        makeSwapped(false, plain);
+        makeSwapped(true, swapped);
+        assert(gfx::parameterLayout(plain) == gfx::parameterLayout(swapped));
+        assert(gfx::graphHash(plain) != gfx::graphHash(swapped));
+    }
+
+    // NaN 이 섞인 가중치는 저장하지 않는다. JSON 이 null 로 찍어 되읽을 수 없는 파일이 되기 때문이다.
+    {
+        std::vector<float> broken = parameters;
+        broken[3] = std::numeric_limits<float>::quiet_NaN();
+        assert(!gfx::saveParameters(graph, broken.data(), "neural_parameters_nan.json"));
+        broken[3] = std::numeric_limits<float>::infinity();
+        assert(!gfx::saveParameters(graph, broken.data(), "neural_parameters_nan.json"));
+    }
+
+    // 없는 파일과 깨진 파일.
+    assert(!gfx::loadParameters(graph, loaded.data(), "없는파일.json"));
+    {
+        std::ofstream broken("neural_parameters_broken.json", std::ios::binary);
+        broken << "{ this is not json";
+    }
+    assert(!gfx::loadParameters(graph, loaded.data(), "neural_parameters_broken.json"));
+    {
+        // 구문은 맞지만 타입이 다르다. value() 가 예외를 던지는 자리다.
+        std::ofstream typed("neural_parameters_typed.json", std::ios::binary);
+        typed << R"({"count": "many", "shapes": 3, "weights": null})";
+    }
+    assert(!gfx::loadParameters(graph, loaded.data(), "neural_parameters_typed.json"));
+    {
+        std::ofstream array("neural_parameters_array.json", std::ios::binary);
+        array << "[1, 2, 3]";
+    }
+    assert(!gfx::loadParameters(graph, loaded.data(), "neural_parameters_array.json"));
+
+    // 배치는 맞는데 가중치 배열이 짧은 파일. 여기서 거절하지 않으면 나머지가 옛 값으로 남는다.
+    {
+        gfx::ParameterLayout shortLayout = gfx::parameterLayout(graph);
+        std::ofstream truncated("neural_parameters_short.json", std::ios::binary);
+        truncated << "{\"count\": " << shortLayout.count << ", \"shapes\": [";
+        for (size_t i = 0; i < shortLayout.shapes.size(); ++i) {
+            truncated << (i > 0 ? "," : "") << shortLayout.shapes[i];
+        }
+        truncated << "], \"weights\": [1.0, 2.0, 3.0]}";
+    }
+    assert(!gfx::loadParameters(graph, loaded.data(), "neural_parameters_short.json"));
+    assert(loaded == parameters);
+}
+
 } // namespace
 
 int main() {
@@ -840,6 +1261,11 @@ int main() {
     testDetach();
     testAccumulation();
     testTieRules();
+    testAdamFirstStep();
+    testAdamConvergence();
+    testPolyak();
+    testHuberValue();
+    testParameterFile();
     testGradients();
     std::printf("신경망 순수 계산 테스트 통과\n");
     return 0;

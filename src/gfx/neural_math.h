@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace gfx {
@@ -70,6 +71,13 @@ enum class OpKind : uint32_t {
     MIN2,
     // (예측[B][1], 목표[B][1]) -> 손실[1]. 평균 제곱 오차.
     MSE,
+    // 같은 자리의 Huber 손실. fparams[0] 이 꺾이는 지점(delta)이고, 그보다 멀어지면 기울기가 상수로
+    // 눕는다. 크리틱의 시간차 오차가 이따금 크게 튀어 학습이 흔들릴 때 MSE 대신 쓴다.
+    //
+    // **눈금이 MSE 의 절반이다.** MSE 는 mean(e^2) 이고 Huber 는 안쪽에서 mean(0.5 e^2) 이라 경사가
+    // 절반이다(PyTorch 의 MSELoss / HuberLoss 와 같은 규약). 그대로 바꿔 끼우면 크리틱의 실효 학습률이
+    // 조용히 절반이 되므로 학습률을 함께 본다.
+    HUBER,
 };
 
 // 쓰지 않는 입력 자리.
@@ -120,6 +128,7 @@ public:
     uint32_t addScale(uint32_t input, float factor);
     uint32_t addMin2(uint32_t a, uint32_t b);
     uint32_t addMse(uint32_t prediction, uint32_t target);
+    uint32_t addHuber(uint32_t prediction, uint32_t target, float delta);
 
     // 같은 저장소를 다른 모양으로 보는 **뷰**를 만든다. 연산을 내지 않고 값도 옮기지 않는다 —
     // 새 텐서가 같은 오프셋을 가리킬 뿐이라 경사도 같은 자리에 쌓인다(항등 함수의 역전파).
@@ -177,5 +186,77 @@ float neuralGaussian(uint64_t seed, uint64_t index);
 // 파라미터를 초기화한다. 합성곱·선형의 가중치는 팬인에 맞춘 He 정규(ReLU 를 전제), 편향은 0,
 // layernorm 의 이득은 1 이다. 어느 텐서가 무엇인지는 연산 표를 훑어 정한다.
 void initializeParameters(const Graph& graph, uint64_t seed, float* parameters);
+
+// ---- 최적화. 전부 **평탄한 파라미터 배열 하나**를 훑는다. 텐서 모양을 보지 않으므로 GPU 에서는
+// 디스패치 하나로 끝난다.
+
+struct AdamSettings {
+    float learningRate = 1.0e-4F;
+    float beta1 = 0.9F;
+    float beta2 = 0.999F;
+    // sqrt(v) 에 **더하는** 값이다(sqrt(v + eps) 가 아니다). PyTorch 와 같은 자리다.
+    float epsilon = 1.0e-8F;
+};
+
+// Adam 모멘트가 차지하는 float 개수. 앞 절반이 1차(m), 뒤 절반이 2차(v)다. 두 벌을 한 배열에 두어
+// GPU 에서 버퍼 하나로 넘긴다.
+inline size_t adamMomentCount(size_t parameterCount) {
+    return parameterCount * 2;
+}
+
+// 한 걸음. step 은 **1부터** 센다(편향 보정이 1 - beta^step 이라 0 이면 0 으로 나눈다).
+//
+// 첫 걸음의 크기가 경사의 크기와 무관하게 learningRate 근처가 되는 것이 Adam 의 성질이다 —
+// m 과 v 가 0 에서 시작해 편향 보정을 지나면 m/sqrt(v) 가 부호만 남기기 때문이다. 다만 |경사| 가
+// epsilon 언저리까지 내려가면 그 성질이 깨진다(분모의 epsilon 이 이긴다).
+//
+// ponytail: NaN·무한 경사를 한 번 먹으면 모멘트가 오염되어 회복하지 못한다. 경사를 자르거나 그런 걸음을
+// 건너뛰는 것은 부르는 쪽 몫이다(PyTorch 도 같다).
+void adamStep(const AdamSettings& settings,
+              uint32_t step,
+              size_t count,
+              const float* gradients,
+              float* moments,
+              float* parameters);
+
+// 타깃망을 온라인 쪽으로 조금 끌어당긴다. target = tau * online + (1 - tau) * target.
+// tau 가 1 이면 복사, 0 이면 그대로이고, [0, 1] 밖은 잘라 낸다 — 음수면 타깃이 발산하고 1 보다 크면
+// 진동한다. 조용히 망가지느니 잘라 두는 편이 낫다.
+void polyakStep(float tau, size_t count, const float* online, float* target);
+
+// ---- 직렬화.
+
+// 그래프의 «모양» 을 접은 값. 연산 종류·입출력 번호·정수와 실수 인자, 텐서의 arena·모양·플래그를 모두
+// 섞는다.
+//
+// 파라미터 모양만 견주는 것으로는 모자란다 — 같은 (4,3,3,3) 합성곱을 보폭 1 로 지은 그래프와 보폭 2 로
+// 지은 그래프는 파라미터 배치가 **같고**, 쌍둥이 크리틱 둘의 가중치를 지은 순서만 바꾼 그래프도 같다.
+// 그런 파일이 조용히 읽히면 학습이 안 되는데 이유를 알 수 없다.
+uint64_t graphHash(const Graph& graph);
+
+// 파라미터 배치의 요약. **모양만** 담는다 — «같은 그래프인가» 는 graphHash 가 판정한다. 저장 파일은
+// 둘을 함께 담는다.
+struct ParameterLayout {
+    size_t count = 0;
+    // 파라미터 텐서마다 dims 넷을 이어 붙인 것. 순서는 Graph::parameterTensors() 와 같다.
+    std::vector<uint32_t> shapes;
+
+    bool operator==(const ParameterLayout&) const = default;
+};
+
+ParameterLayout parameterLayout(const Graph& graph);
+
+// 가중치를 JSON 으로 저장하고 읽는다. 배치나 그래프 해시가 맞지 않거나 파일이 깨졌으면 거짓을 돌려주고
+// parameters 를 건드리지 않는다(physics::savePolicy 와 같은 규칙).
+//
+// 저장은 값에 NaN·무한이 있으면 **쓰지 않고 거짓을 돌려준다.** JSON 은 그것을 null 로 찍는데 되읽을 때
+// 타입이 어긋나 실패하므로, 그대로 두면 «저장은 성공하고 적재는 100% 실패하는» 체크포인트가 남는다.
+// 학습이 발산한 순간을 저장 시점에 알아채는 편이 낫다.
+//
+// ponytail: 텍스트 JSON 이라 파라미터 200만 개면 43 MB 에 왕복 1 초가 넘는다(float 를 double 로 넓혀
+// 17자리로 찍기 때문이다). 정책망 규모에는 넉넉하지만 큰 망에는 이진 형식이 필요하다.
+// ponytail: 임시 파일에 쓰고 옮기는 것이 아니라 바로 덮어쓴다. 쓰다 죽으면 옛 체크포인트도 함께 잃는다.
+bool saveParameters(const Graph& graph, const float* parameters, const std::string& path);
+bool loadParameters(const Graph& graph, float* parameters, const std::string& path);
 
 } // namespace gfx
