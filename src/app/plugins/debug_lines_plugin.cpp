@@ -38,8 +38,9 @@ DebugLinesPlugin::~DebugLinesPlugin() {
 
 void DebugLinesPlugin::build(Services& services) {
     services.settings.showColliders = services.options.showColliders;
-    // 헤드리스에는 그릴 곳이 없다.
-    if (services.context == nullptr) {
+    // 그릴 곳이 없으면 아무 것도 만들지 않는다. 헤드리스는 GPU 물리 때문에 장치만 있고 렌더러가
+    // 없을 수 있으므로 렌더러로 판정한다.
+    if (services.renderer == nullptr) {
         return;
     }
     context = services.context;

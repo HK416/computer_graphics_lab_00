@@ -63,6 +63,7 @@ struct QueueFamilies {
 };
 
 struct Context {
+    // window 가 null 이면 서피스도 스왑체인도 없는 헤드리스 장치를 만든다(--headless 의 GPU 물리).
     explicit Context(SDL_Window* window);
     ~Context();
     Context(const Context&) = delete;

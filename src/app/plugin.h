@@ -20,7 +20,9 @@ struct Services {
     const Options& options;
     const gfx::HardwareProfile& profile;
     gfx::RenderSettings& settings;
-    // 아래는 헤드리스(--headless, 창·렌더러 없는 물리 전용 실행)에서 nullptr 다. 플러그인은 쓰기 전에 살핀다.
+    // 아래는 헤드리스(--headless, 창 없는 물리 전용 실행)에서 nullptr 일 수 있다. 플러그인은 쓰기 전에
+    // 살핀다. context 와 bindless 는 **장면에 GPU 백엔드 강체가 있고 재생하면 헤드리스에서도 있다**(창
+    // 없는 컴퓨트 전용 장치). 그리기에 딸린 것을 물을 때는 context 가 아니라 renderer/geometry 로 판정한다.
     gfx::Context* context;
     gfx::BindlessTextures* bindless;
     gfx::GeometryStore* geometry;

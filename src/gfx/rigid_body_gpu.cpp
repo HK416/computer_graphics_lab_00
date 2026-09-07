@@ -238,7 +238,7 @@ bool RigidBodySimulator::applyReadback(scene::Scene& scene, uint64_t completedFr
         if (readbackFrame[slot] == UINT64_MAX || readbackFrame[slot] >= completedFrames) {
             continue;
         }
-        if (readbackFrame[slot] <= appliedFrame) {
+        if (readbackFrame[slot] + 1 <= appliedFrame) {
             readbackFrame[slot] = UINT64_MAX;
             continue;
         }
@@ -278,7 +278,7 @@ bool RigidBodySimulator::applyReadback(scene::Scene& scene, uint64_t completedFr
     physics::writeBackRigidBodies(scene, bodies);
     // 한 번 읽은 슬롯은 다시 읽지 않는다.
     readbackFrame[best] = UINT64_MAX;
-    appliedFrame = bestFrame;
+    appliedFrame = bestFrame + 1;
     return true;
 }
 

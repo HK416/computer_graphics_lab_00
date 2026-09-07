@@ -195,7 +195,32 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
     if (options.motionBlur >= 0.0F) {
         scenes.active().post.motionBlur = options.motionBlur;
     }
+    if (options.headless) {
+        createHeadlessDevice();
+    }
     registerPlugins();
+}
+
+// 헤드리스에서 GPU 백엔드 «강체» 가 있고 재생까지 할 때만 창 없는 Vulkan 장치를 만든다. 장치를 만드는
+// 데 수백 ms 가 들므로 CPU 백엔드만 쓰는 장면(회귀 테스트가 그렇다)이나 재생하지 않는 실행은 지금까지처럼
+// 그냥 돈다. 유체·천·입자의 GPU 경로는 렌더러 자원에 얽혀 있어 헤드리스에서 돌지 않는다.
+void Application::createHeadlessDevice() {
+    if (!options.play) {
+        return;
+    }
+    uint32_t gpuBodies = 0;
+    for (size_t i = 0; i < scenes.count(); ++i) {
+        for (const scene::RigidBody& body : scenes.at(i).rigidBodies) {
+            gpuBodies += body.backend == scene::SimulationBackend::GPU ? 1U : 0U;
+        }
+    }
+    if (gpuBodies == 0) {
+        return;
+    }
+    context = std::make_unique<gfx::Context>(nullptr);
+    context->memoryBudgetOverride = options.gpuBudgetMegabytes * 1024ULL * 1024ULL;
+    bindless = std::make_unique<gfx::BindlessTextures>(*context);
+    spdlog::info("헤드리스 GPU 장치 준비: GPU 백엔드 강체 {} 개", gpuBodies);
 }
 
 Services Application::services() {
@@ -460,8 +485,9 @@ asset::LoadSettings Application::loadSettings() const {
 }
 
 bool Application::fitsGpuBudget(const asset::Model& model) const {
-    // 헤드리스에는 GPU 가 없다. 콜라이더 메쉬만 남으므로 예산을 볼 것이 없다.
-    if (context == nullptr) {
+    // 지오메트리를 올리지 않으면(헤드리스) 콜라이더 메쉬만 남으므로 예산을 볼 것이 없다. 헤드리스도
+    // GPU 물리 때문에 장치는 있을 수 있어 장치가 아니라 지오메트리로 판정한다.
+    if (geometry == nullptr) {
         return true;
     }
     VkDeviceSize geometryBytes = gfx::GeometryStore::estimateModelBytes(model);
@@ -523,7 +549,9 @@ uint32_t Application::registerModel(const std::filesystem::path& path, asset::Mo
     entry.builtin = builtin;
     std::vector<uint32_t> textureSlots;
     std::optional<gfx::Uploader> uploader;
-    if (context != nullptr) {
+    // 헤드리스는 GPU 물리 때문에 장치만 있고 지오메트리 저장소·텍스처 캐시는 없을 수 있다. 아래에서
+    // 만지는 것이 그 둘이므로 장치가 아니라 지오메트리로 판정한다.
+    if (geometry != nullptr) {
         uploader.emplace(*context);
         textureSlots.reserve(model.textures.size());
         for (const asset::Texture& texture : model.textures) {
@@ -1012,13 +1040,6 @@ void Application::runHeadless() {
     // 벽시계를 쓰지 않는다. 실행마다 같은 결과가 나와야 저장 파일을 기준과 바이트로 견줄 수 있다.
     float deltaSeconds = options.fixedDeltaSeconds > 0.0F ? options.fixedDeltaSeconds : HEADLESS_DELTA_SECONDS;
     scene::Scene& scene = scenes.active();
-    uint32_t gpuBodies = 0;
-    for (const scene::RigidBody& body : scene.rigidBodies) {
-        gpuBodies += body.backend == scene::SimulationBackend::GPU ? 1U : 0U;
-    }
-    if (gpuBodies > 0) {
-        spdlog::warn("GPU 백엔드 강체 {} 개는 헤드리스에서 움직이지 않는다 (CPU 솔버만 돈다)", gpuBodies);
-    }
     for (uint64_t frame = 0; frame < options.frames; ++frame) {
         scene.update(deltaSeconds, &jobs);
         Services shared = services();

@@ -13,11 +13,16 @@
 namespace app {
 
 void PhysicsPlugin::build(Services& services) {
-    // 헤드리스에는 GPU 솔버가 없다. GPU 백엔드 강체는 CPU 솔버가 건너뛰므로 그대로 멈춰 있다.
+    // 장치가 없으면 GPU 솔버도 없다. GPU 백엔드 강체는 CPU 솔버가 건너뛰므로 그대로 멈춰 있다.
     if (services.context == nullptr) {
         return;
     }
     rigid = std::make_unique<gfx::RigidBodySimulator>(*services.context, *services.bindless);
+    if (services.renderer == nullptr) {
+        // 헤드리스. 렌더 그래프가 없으므로 update 에서 직접 제출한다.
+        headless = std::make_unique<gfx::HeadlessCompute>(*services.context);
+        return;
+    }
     // GPU 솔버는 변형 정점 뒤, 유체 앞에서 돈다. 아무 것도 읽지 않으므로 순서는 자유롭지만, 되읽기 복사가
     // 프레임 앞쪽에 있어야 큐가 비는 동안 옮겨진다. prepare 는 그래프를 짤 때(그리기 명령 구성 뒤) 장면에서
     // 강체를 모으고, 노드는 스텝이 있거나 올릴 것이 있을 때만 기록한다.
@@ -45,8 +50,10 @@ void PhysicsPlugin::update(Services& services, float deltaSeconds) {
             rigid->invalidate();
             wasSimulating = scene.simulating;
         }
-        // GPU 솔버가 끝낸 결과를 먼저 장면에 되쓴다. 뒤의 scene.refresh 가 이 값으로 세계 변환을 다시 만든다.
-        rigid->applyReadback(scene, renderer->completedFrames());
+        if (renderer != nullptr) {
+            // GPU 솔버가 끝낸 결과를 먼저 장면에 되쓴다. 뒤의 scene.refresh 가 이 값으로 세계 변환을 다시 만든다.
+            rigid->applyReadback(scene, renderer->completedFrames());
+        }
     }
 
     steps = 0;
@@ -66,11 +73,28 @@ void PhysicsPlugin::update(Services& services, float deltaSeconds) {
         accumulator = 0.0F;
     }
 
+    if (headless != nullptr) {
+        stepHeadless(scene);
+    }
+
     // 인스펙터가 «지금 도는 백엔드»를 보여 주는 데 쓴다. editor 는 app 을 보지 않으므로 값으로 넘긴다.
     if (services.editor != nullptr && rigid != nullptr) {
         services.editor->rigidStatus.gpuAvailable = rigid->available();
         services.editor->rigidStatus.gpuBodies = rigid->bodyCount();
     }
+}
+
+// 렌더 그래프가 하는 일(prepare -> record)을 한 번에 하고 결과를 기다린다. 렌더러 경로와 달리 되읽기가
+// 늦지 않으므로 이 프레임 안에서 장면에 들어간다. scene.refresh 는 아직 앞이다.
+void PhysicsPlugin::stepHeadless(scene::Scene& scene) {
+    rigid->prepare(scene, steps, STEP_SECONDS);
+    if (rigid->bodyCount() == 0) {
+        return;
+    }
+    uint64_t frame = headless->submit(
+        [this](VkCommandBuffer commandBuffer, uint64_t index) { rigid->record(commandBuffer, index); });
+    // 기다렸다 돌아왔으므로 이 프레임은 끝났다. 렌더러 경로와 달리 되읽기가 미뤄지지 않는다.
+    rigid->applyReadback(scene, frame + 1);
 }
 
 void PhysicsPlugin::ui(Services& services) {

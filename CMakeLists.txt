@@ -231,6 +231,7 @@ add_executable(cg_lab
     src/gfx/particles.cpp
     src/gfx/geometry.cpp
     src/gfx/hardware_profile.cpp
+    src/gfx/headless_compute.cpp
     src/gfx/lod_network.cpp
     src/gfx/profiler.cpp
     src/gfx/profiler_math.cpp

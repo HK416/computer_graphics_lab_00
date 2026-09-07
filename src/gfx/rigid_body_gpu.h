@@ -191,8 +191,10 @@ private:
     // 슬롯마다 «어느 프레임이 채웠는지»와 «몇 개인지». 프레임이 끝난 슬롯만 읽는다.
     std::array<uint64_t, RIGID_READBACK_SLOTS> readbackFrame{};
     std::array<uint32_t, RIGID_READBACK_SLOTS> readbackCount{};
-    // 마지막으로 장면에 적용한 결과가 어느 프레임 것인지. 이보다 오래된 것은 버린다. 시뮬레이션은
-    // 앞으로만 가므로 오래된 결과를 뒤늦게 적용하면 화면에서 공이 뒤로 되감겨 덜덜거린다.
+    // 마지막으로 장면에 적용한 결과가 어느 프레임 것인지 **+ 1**. 이보다 오래된 것은 버린다.
+    // 시뮬레이션은 앞으로만 가므로 오래된 결과를 뒤늦게 적용하면 화면에서 공이 뒤로 되감겨 덜덜거린다.
+    // 0 은 «아직 아무것도 적용하지 않음» 이다 — 그냥 프레임 번호로 두면 0 번 프레임 결과가 «이미
+    // 적용한 것» 으로 걸려 버려진다(헤드리스 --frames 1 에서 한 스텝도 안 움직였다).
     uint64_t appliedFrame = 0;
 
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;

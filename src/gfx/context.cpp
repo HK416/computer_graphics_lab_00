@@ -207,8 +207,11 @@ bool selectQueueFamilies(VkPhysicalDevice device, VkSurfaceKHR surface, QueueFam
     vkGetPhysicalDeviceQueueFamilyProperties(device, &count, families.data());
 
     for (uint32_t i = 0; i < count; ++i) {
-        VkBool32 presentSupported = VK_FALSE;
-        VK_CHECK(vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupported));
+        // 서피스가 없으면(헤드리스) 표시 지원을 묻지 않는다. 그릴 곳이 없으니 볼 것도 없다.
+        VkBool32 presentSupported = surface == VK_NULL_HANDLE ? VK_TRUE : VK_FALSE;
+        if (surface != VK_NULL_HANDLE) {
+            VK_CHECK(vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupported));
+        }
         if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0 && presentSupported == VK_TRUE) {
             out.graphics = i;
             out.graphicsTimestampBits = families[i].timestampValidBits;
@@ -306,7 +309,7 @@ DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
     candidate.device = device;
 
     std::vector<VkExtensionProperties> extensions = enumerateDeviceExtensions(device);
-    if (!contains(extensions, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+    if (surface != VK_NULL_HANDLE && !contains(extensions, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
         candidate.rejectionReason = "VK_KHR_swapchain 미지원";
         return candidate;
     }
@@ -339,7 +342,8 @@ DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
         return candidate;
     }
     if (!selectQueueFamilies(device, surface, candidate.queueFamilies)) {
-        candidate.rejectionReason = "표시 가능한 그래픽스 큐 패밀리 없음";
+        candidate.rejectionReason =
+            surface != VK_NULL_HANDLE ? "표시 가능한 그래픽스 큐 패밀리 없음" : "그래픽스 큐 패밀리 없음";
         return candidate;
     }
 
@@ -349,7 +353,9 @@ DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
     candidate.caps.timestamps =
         candidate.properties.limits.timestampPeriod > 0.0F && candidate.queueFamilies.graphicsTimestampBits > 0;
 
-    candidate.enabledExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    if (surface != VK_NULL_HANDLE) {
+        candidate.enabledExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    }
     // 코어 1.3 로도 쓸 수 있지만 ImGui Vulkan 백엔드가 확장 활성화를 요구한다.
     if (contains(extensions, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)) {
         candidate.enabledExtensions.push_back(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
@@ -442,14 +448,19 @@ void logCapabilities(const VkPhysicalDeviceProperties& properties,
 Context::Context(SDL_Window* window) {
     configureLoaderPaths();
 
-    uint32_t sdlExtensionCount = 0;
-    const char* const* sdlExtensions = SDL_Vulkan_GetInstanceExtensions(&sdlExtensionCount);
-    if (sdlExtensions == nullptr) {
-        core::fatal("Vulkan 인스턴스 확장 목록을 가져오지 못했습니다: {}", SDL_GetError());
+    // 창이 없으면(--headless) 서피스를 만들지 않는다. SDL 의 인스턴스 확장은 서피스를 위한 것이고
+    // SDL 비디오가 올라와 있어야 물을 수 있으므로 그때는 아예 묻지 않는다.
+    std::vector<const char*> instanceExtensions;
+    if (window != nullptr) {
+        uint32_t sdlExtensionCount = 0;
+        const char* const* sdlExtensions = SDL_Vulkan_GetInstanceExtensions(&sdlExtensionCount);
+        if (sdlExtensions == nullptr) {
+            core::fatal("Vulkan 인스턴스 확장 목록을 가져오지 못했습니다: {}", SDL_GetError());
+        }
+        instanceExtensions.assign(sdlExtensions, sdlExtensions + sdlExtensionCount);
     }
 
     std::vector<VkExtensionProperties> availableInstanceExtensions = enumerateInstanceExtensions();
-    std::vector<const char*> instanceExtensions(sdlExtensions, sdlExtensions + sdlExtensionCount);
 
     VkInstanceCreateFlags instanceFlags = 0;
     if (contains(availableInstanceExtensions, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) {
@@ -501,7 +512,7 @@ Context::Context(SDL_Window* window) {
         VK_CHECK(createMessenger(instance, &messengerInfo, nullptr, &debugMessenger));
     }
 
-    if (!SDL_Vulkan_CreateSurface(window, instance, nullptr, &surface)) {
+    if (window != nullptr && !SDL_Vulkan_CreateSurface(window, instance, nullptr, &surface)) {
         core::fatal("Vulkan 서피스 생성에 실패했습니다: {}", SDL_GetError());
     }
 
@@ -693,7 +704,9 @@ Context::~Context() {
             vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT"));
         destroyMessenger(instance, debugMessenger, nullptr);
     }
-    vkDestroySurfaceKHR(instance, surface, nullptr);
+    if (surface != VK_NULL_HANDLE) {
+        vkDestroySurfaceKHR(instance, surface, nullptr);
+    }
     vkDestroyInstance(instance, nullptr);
 }
 
