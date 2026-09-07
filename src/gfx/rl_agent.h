@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "gfx/neural_math.h"
 
@@ -66,6 +67,9 @@ struct AgentConfig {
     uint32_t convChannels = 32;
 
     bool pixels() const { return imageSize > 0; }
+
+    // 관측 하나가 차지하는 float 개수. 픽셀이면 프레임 스택 x 변 x 변이다.
+    uint32_t observationSize() const { return pixels() ? frameStack * imageSize * imageSize : observationCount; }
 };
 
 // 파라미터 배열 안의 구간(float 첨자). [begin, end) 다.
@@ -179,5 +183,90 @@ void updateAgentTarget(const Agent& agent, float tau, float* parameters);
 // 배치를 다르게 두고 싶어지면 «파라미터에 닿는 부분만» 접는 해시가 따로 필요하다.
 bool saveAgent(const Agent& agent, const float* parameters, const std::string& path);
 bool loadAgent(const Agent& agent, float* parameters, const std::string& path);
+
+// ---- 갱신 루프.
+
+struct AgentUpdateSettings {
+    AdamSettings critic;
+    AdamSettings actor;
+    // 타깃을 온라인 쪽으로 끌어당기는 세기.
+    float tau = 0.01F;
+    // 타깃 정책 평활화 잡음의 세기와 자르는 폭. 잡음은 액터의 tanh **앞** 에 실린다.
+    float targetNoise = 0.2F;
+    float noiseClip = 0.5F;
+};
+
+// 갱신 한 번이 보는 전이 묶음. 배열은 부르는 쪽이 들고 있고 update 가 읽기만 한다.
+struct AgentBatch {
+    // batch x observationSize().
+    const float* observations = nullptr;
+    // batch x actionCount. **그때 실제로 한 행동** 이다.
+    const float* actions = nullptr;
+    // batch 개.
+    const float* rewards = nullptr;
+    // batch 개. 감가 마스크 γ(1 - 끝)이라 끝난 전이면 0 이다.
+    const float* discounts = nullptr;
+    const float* nextObservations = nullptr;
+};
+
+struct AgentUpdateStats {
+    float criticLoss = 0.0F;
+    // 액터가 본 min(Q1, Q2) 의 평균. 액터 손실은 이것의 음수다.
+    float value = 0.0F;
+};
+
+// 파라미터·모멘트·활성을 들고 갱신을 돌린다. **build 뒤에는 힙 할당이 없다** — 배열을 한 번 잡고
+// 되쓰므로 프레임 안에서 불러도 된다(편집기 안 학습이 그 경우다).
+//
+// 최적화기가 둘인 것이 요점이다. 크리틱 손실의 역전파는 액터 가중치에도 경사를 내지만 크리틱 구간만
+// 밟고, 액터 손실은 크리틱 가중치에 경사를 내지만 액터 구간만 밟는다. PyTorch 로 치면 최적화기 둘을
+// 따로 스텝하는 것과 같다.
+class AgentTrainer {
+public:
+    // 그래프를 짓고 가중치를 초기화한다. 설정이 말이 안 되면 거짓이다. 두 번 불러도 되며, 그때는
+    // 걸음 수와 모멘트가 함께 되돌아간다.
+    //
+    // **아래 것들은 build 가 참을 돌려준 뒤에만 부른다.** 그러지 않으면 빈 표를 훑는다 —
+    // gfx::forward 가 «validate 를 통과한 표» 를 전제하는 것과 같은 규약이다.
+    bool build(const AgentConfig& config, uint64_t seed);
+
+    const Agent& graphs() const { return agent; }
+    const AgentConfig& config() const { return agent.config; }
+    // 지금까지 밟은 갱신 걸음 수. Adam 의 편향 보정이 이것을 쓴다.
+    uint32_t steps() const { return step; }
+
+    // 관측 하나로 행동 하나. 탐험 잡음은 부르는 쪽이 얹는다(학습이냐 평가냐를 여기서 정하지 않는다).
+    void act(const float* observation, float* action);
+
+    // 크리틱 한 걸음, 액터 한 걸음, 그리고 polyak. 순서가 계약이다 — 액터는 **이번 걸음에 갱신된**
+    // 크리틱을 보고 오른다(DrQ-v2 와 같다).
+    AgentUpdateStats update(const AgentBatch& batch, const AgentUpdateSettings& settings);
+
+    std::vector<float>& weights() { return parameters; }
+    const std::vector<float>& weights() const { return parameters; }
+
+    bool save(const std::string& path) const;
+    // 가중치를 읽어 들이고 **최적화기 상태를 되돌린다**(모멘트 0, 걸음 수 0). 파일에 담기는 것이
+    // 가중치뿐이라 그대로 두면 읽어 들인 가중치와 상관 없는 모멘트로 첫 걸음을 밟는다.
+    //
+    // ponytail: 그래서 학습을 «이어서» 하지는 못한다. 체크포인트에서 다시 시작하면 Adam 이 처음부터
+    // 감을 잡아야 한다. 이어 하려면 모멘트와 걸음 수도 파일에 담아야 한다.
+    bool load(const std::string& path);
+
+private:
+    Agent agent;
+    std::vector<float> parameters;
+    // 역전파가 파라미터 배열 전체 크기로 쓴다. 두 손실이 번갈아 쓰므로 한 벌이면 된다.
+    std::vector<float> gradients;
+    std::vector<float> criticMoments;
+    std::vector<float> actorMoments;
+    std::vector<float> actActivations;
+    std::vector<float> criticActivations;
+    std::vector<float> criticActivationGradients;
+    std::vector<float> actorActivations;
+    std::vector<float> actorActivationGradients;
+    uint32_t step = 0;
+    uint64_t noiseStream = 0;
+};
 
 } // namespace gfx

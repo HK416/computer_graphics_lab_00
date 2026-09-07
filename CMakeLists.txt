@@ -591,10 +591,15 @@ else()
     target_compile_options(cg_lab_neural_tests PRIVATE -Wall -Wextra)
 endif()
 
-# 에이전트 그래프 명세. neural_math 위에 얹은 순수 계산이라 여기도 Vulkan 이 없다.
-add_executable(cg_lab_rl_agent_tests tests/rl_agent_test.cpp src/gfx/rl_agent.cpp src/gfx/neural_math.cpp)
+# 에이전트 그래프 명세와 갱신 루프. 그래프 자체는 Vulkan 이 없지만, «알고리즘이 실제로 학습하는가» 를
+# 저차원 진자로 확인하느라 CPU 강체 솔버와 장면을 함께 링크한다(robot 테스트와 같은 묶음).
+add_executable(cg_lab_rl_agent_tests tests/rl_agent_test.cpp src/gfx/rl_agent.cpp src/gfx/neural_math.cpp
+    src/physics/robot.cpp src/physics/policy.cpp src/physics/rigid_body.cpp src/scene/scene.cpp
+    src/asset/animation.cpp src/core/error.cpp src/core/job_system.cpp)
 target_include_directories(cg_lab_rl_agent_tests PRIVATE src)
-target_link_libraries(cg_lab_rl_agent_tests PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(cg_lab_rl_agent_tests PRIVATE SDL3::SDL3 spdlog::spdlog glm::glm nlohmann_json::nlohmann_json
+    Threads::Threads)
+target_compile_definitions(cg_lab_rl_agent_tests PRIVATE GLM_ENABLE_EXPERIMENTAL)
 if(MSVC)
     target_compile_options(cg_lab_rl_agent_tests PRIVATE /W4 /utf-8)
 else()

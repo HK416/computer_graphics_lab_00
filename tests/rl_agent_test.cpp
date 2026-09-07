@@ -20,6 +20,7 @@
 #include "gfx/neural_math.h"
 #include "gfx/rl_agent.h"
 #include "gradient_check.h"
+#include "pendulum_training.h"
 
 namespace {
 
@@ -854,6 +855,431 @@ void testCheckpoint() {
     std::remove(path.c_str());
 }
 
+// ---- 갱신 루프의 계약
+
+// 갱신 한 번이 무엇을 밟고 무엇을 안 밟는지. 학습이 붙는지는 아래 진자 검사가 보지만, 그것은 느리고
+// «왜» 를 말해 주지 않는다. 구간별 계약은 여기서 자리마다 확인한다.
+void testTrainerUpdate() {
+    gfx::AgentConfig config = smallVectorConfig();
+    gfx::AgentTrainer trainer;
+    assert(trainer.build(config, 71));
+    const gfx::AgentParameterMap& map = trainer.graphs().parameters;
+    assert(trainer.steps() == 0);
+
+    std::vector<float> observations(static_cast<size_t>(config.batch) * config.observationSize(), 0.0F);
+    std::vector<float> nextObservations(observations.size(), 0.0F);
+    std::vector<float> actions(static_cast<size_t>(config.batch) * config.actionCount, 0.0F);
+    std::vector<float> rewards(config.batch, 0.0F);
+    std::vector<float> discounts(config.batch, 0.99F);
+    for (size_t i = 0; i < observations.size(); ++i) {
+        observations[i] = gfx::neuralGaussian(101, i);
+        nextObservations[i] = gfx::neuralGaussian(103, i);
+    }
+    for (size_t i = 0; i < actions.size(); ++i) {
+        actions[i] = 0.5F * gfx::neuralGaussian(107, i);
+    }
+    for (uint32_t i = 0; i < config.batch; ++i) {
+        rewards[i] = 0.25F * static_cast<float>(i) - 0.5F;
+    }
+    gfx::AgentBatch batch;
+    batch.observations = observations.data();
+    batch.nextObservations = nextObservations.data();
+    batch.actions = actions.data();
+    batch.rewards = rewards.data();
+    batch.discounts = discounts.data();
+
+    gfx::AgentUpdateSettings settings;
+    settings.tau = 0.25F;
+    std::vector<float> before = trainer.weights();
+    gfx::AgentUpdateStats stats = trainer.update(batch, settings);
+    assert(trainer.steps() == 1);
+    assert(std::isfinite(stats.criticLoss) && stats.criticLoss > 0.0F);
+    assert(std::isfinite(stats.value));
+
+    const std::vector<float>& after = trainer.weights();
+    auto moved = [&](const gfx::ParameterRange& range) {
+        for (size_t i = range.begin; i < range.end; ++i) {
+            if (after[i] != before[i]) {
+                return true;
+            }
+        }
+        return false;
+    };
+    assert(moved(map.criticUpdate));
+    assert(moved(map.actorUpdate));
+    // 타깃은 **오직 polyak 으로만** 움직인다. 갱신된 온라인 값과의 관계가 정확히 그 식이어야 한다.
+    for (size_t i = 0; i < map.online.count(); ++i) {
+        float expected =
+            before[map.target.begin + i] + settings.tau * (after[map.online.begin + i] - before[map.target.begin + i]);
+        assert(std::abs(after[map.target.begin + i] - expected) <= 1.0e-5F * std::abs(expected) + 1.0e-7F);
+    }
+
+    // 같은 씨앗·같은 배치면 같은 결과다. 잡음을 걸음 번호에서 다시 만들므로 들고 다니는 상태가 없다.
+    gfx::AgentTrainer twin;
+    assert(twin.build(config, 71));
+    twin.update(batch, settings);
+    assert(twin.weights() == trainer.weights());
+    assert(twin.steps() == trainer.steps());
+}
+
+// 평활화 잡음을 자르는 폭이 실제로 걸리는지. 폭이 0 이면 잡음이 통째로 0 이라 «잡음 없음» 과 비트까지
+// 같아야 한다 — 자르기를 빼먹으면 여기서 갈린다.
+void testTrainerNoiseClip() {
+    gfx::AgentConfig config = smallVectorConfig();
+    std::vector<float> observations(static_cast<size_t>(config.batch) * config.observationSize(), 0.0F);
+    std::vector<float> actions(static_cast<size_t>(config.batch) * config.actionCount, 0.0F);
+    std::vector<float> rewards(config.batch, 0.1F);
+    std::vector<float> discounts(config.batch, 0.99F);
+    for (size_t i = 0; i < observations.size(); ++i) {
+        observations[i] = gfx::neuralGaussian(211, i);
+    }
+    for (size_t i = 0; i < actions.size(); ++i) {
+        actions[i] = 0.3F * gfx::neuralGaussian(223, i);
+    }
+    gfx::AgentBatch batch;
+    batch.observations = observations.data();
+    batch.nextObservations = observations.data();
+    batch.actions = actions.data();
+    batch.rewards = rewards.data();
+    batch.discounts = discounts.data();
+
+    auto run = [&](float noise, float clip) {
+        gfx::AgentTrainer trainer;
+        assert(trainer.build(config, 73));
+        gfx::AgentUpdateSettings settings;
+        settings.targetNoise = noise;
+        settings.noiseClip = clip;
+        trainer.update(batch, settings);
+        return trainer.weights();
+    };
+    std::vector<float> silent = run(0.0F, 1.0F);
+    std::vector<float> clipped = run(10.0F, 0.0F);
+    assert(silent == clipped);
+    // 자르지 않으면 달라진다(위 같음이 «늘 같음» 이 아니라는 확인).
+    std::vector<float> noisy = run(0.5F, 1.0F);
+    assert(noisy != silent);
+}
+
+// ---- 갱신 한 번을 손으로 되짚기
+//
+// 트레이너가 «크리틱 구간 Adam -> 액터 구간 Adam -> polyak» 을 그 순서로, **모멘트를 구간마다 따로 들고**
+// 밟는지. 헤더가 여섯 줄을 들여 경고하는 «모멘트 배열을 전체 길이로 하나 잡아 구간 시작만큼 밀어 쓰면
+// 크리틱의 2차와 액터의 1차가 겹친다» 가 정확히 이 검사에 걸린다.
+//
+// **픽셀 설정으로 본다.** 저차원은 인코더가 없어 두 배치가 겹치지 않으므로 그 함정이 드러나지 않는다.
+// 그리고 걸음이 둘 이상이어야 한다 — 첫 걸음에서는 모멘트가 0 에서 출발해 겹쳐도 값이 같다.
+void testTrainerMatchesHandWork() {
+    gfx::AgentConfig config = smallPixelConfig();
+    gfx::AgentTrainer trainer;
+    assert(trainer.build(config, 151));
+    const gfx::Agent& graphs = trainer.graphs();
+    const gfx::AgentParameterMap& map = graphs.parameters;
+    // 겹침이 실제로 일어날 배치인지 먼저 확인한다. 겹치지 않으면 이 검사가 헛돈다.
+    assert(gfx::adamMomentCount(map.criticUpdate.count()) > map.actorUpdate.begin);
+
+    size_t observationTotal = static_cast<size_t>(config.batch) * config.observationSize();
+    size_t actionTotal = static_cast<size_t>(config.batch) * config.actionCount;
+    std::vector<float> observations(observationTotal, 0.0F);
+    std::vector<float> nextObservations(observationTotal, 0.0F);
+    std::vector<float> actions(actionTotal, 0.0F);
+    std::vector<float> rewards(config.batch, 0.0F);
+    std::vector<float> discounts(config.batch, 0.97F);
+    for (size_t i = 0; i < observationTotal; ++i) {
+        observations[i] = gfx::neuralGaussian(1201, i);
+        nextObservations[i] = gfx::neuralGaussian(1213, i);
+    }
+    for (size_t i = 0; i < actionTotal; ++i) {
+        actions[i] = 0.4F * gfx::neuralGaussian(1217, i);
+    }
+    for (uint32_t i = 0; i < config.batch; ++i) {
+        rewards[i] = 0.3F * static_cast<float>(i) - 0.6F;
+    }
+    gfx::AgentBatch batch;
+    batch.observations = observations.data();
+    batch.nextObservations = nextObservations.data();
+    batch.actions = actions.data();
+    batch.rewards = rewards.data();
+    batch.discounts = discounts.data();
+
+    gfx::AgentUpdateSettings settings;
+    // 잡음을 끄면 손으로 되짚는 쪽이 그 흐름을 알 필요가 없다. 잡음 자체는 아래 검사가 따로 본다.
+    settings.targetNoise = 0.0F;
+    settings.tau = 0.2F;
+    // **크리틱과 액터의 학습률을 다르게 둔다.** 같으면 둘을 맞바꿔도 결과가 같다.
+    settings.critic.learningRate = 3.0e-3F;
+    settings.actor.learningRate = 7.0e-4F;
+
+    // 손으로 되짚는 쪽. 트레이너와 같은 가중치에서 출발한다.
+    std::vector<float> expected = trainer.weights();
+    std::vector<float> gradients(map.total, 0.0F);
+    std::vector<float> criticMoments(gfx::adamMomentCount(map.criticUpdate.count()), 0.0F);
+    std::vector<float> actorMoments(gfx::adamMomentCount(map.actorUpdate.count()), 0.0F);
+    std::vector<float> criticValues(graphs.critic.graph.activationCount, 0.0F);
+    std::vector<float> criticGradients(graphs.critic.graph.activationCount, 0.0F);
+    std::vector<float> actorValues(graphs.actor.graph.activationCount, 0.0F);
+    std::vector<float> actorGradients(graphs.actor.graph.activationCount, 0.0F);
+
+    for (uint32_t pass = 1; pass <= 3; ++pass) {
+        const gfx::Graph& critic = graphs.critic.graph;
+        std::copy(observations.begin(),
+                  observations.end(),
+                  gfx::tensorValues(critic, graphs.critic.observation, criticValues.data()));
+        std::copy(nextObservations.begin(),
+                  nextObservations.end(),
+                  gfx::tensorValues(critic, graphs.critic.nextObservation, criticValues.data()));
+        std::copy(actions.begin(), actions.end(), gfx::tensorValues(critic, graphs.critic.action, criticValues.data()));
+        std::copy(rewards.begin(), rewards.end(), gfx::tensorValues(critic, graphs.critic.reward, criticValues.data()));
+        std::copy(
+            discounts.begin(), discounts.end(), gfx::tensorValues(critic, graphs.critic.discount, criticValues.data()));
+        std::fill_n(gfx::tensorValues(critic, graphs.critic.noise, criticValues.data()), actionTotal, 0.0F);
+        gfx::forward(critic, expected.data(), criticValues.data());
+        float handLoss = *gfx::tensorValues(critic, graphs.critic.loss, criticValues.data());
+        assert(gfx::backward(critic, expected.data(), criticValues.data(), gradients.data(), criticGradients.data()));
+        gfx::adamStep(settings.critic,
+                      pass,
+                      map.criticUpdate.count(),
+                      gradients.data() + map.criticUpdate.begin,
+                      criticMoments.data(),
+                      expected.data() + map.criticUpdate.begin);
+
+        const gfx::Graph& actor = graphs.actor.graph;
+        std::copy(observations.begin(),
+                  observations.end(),
+                  gfx::tensorValues(actor, graphs.actor.observation, actorValues.data()));
+        gfx::forward(actor, expected.data(), actorValues.data());
+        float handValue = -*gfx::tensorValues(actor, graphs.actor.loss, actorValues.data());
+        assert(gfx::backward(actor, expected.data(), actorValues.data(), gradients.data(), actorGradients.data()));
+        gfx::adamStep(settings.actor,
+                      pass,
+                      map.actorUpdate.count(),
+                      gradients.data() + map.actorUpdate.begin,
+                      actorMoments.data(),
+                      expected.data() + map.actorUpdate.begin);
+        gfx::polyakStep(
+            settings.tau, map.online.count(), expected.data() + map.online.begin, expected.data() + map.target.begin);
+
+        gfx::AgentUpdateStats stats = trainer.update(batch, settings);
+        // 통계도 값으로 견준다. isfinite 만 보면 «늘 1 을 돌려준다» 가 지나간다.
+        assert(stats.criticLoss == handLoss);
+        assert(stats.value == handValue);
+        assert(trainer.steps() == pass);
+        assert(trainer.weights() == expected);
+    }
+}
+
+// 평활화 잡음이 **걸음마다 달라지는지.** 가중치가 안 움직이게 학습률과 tau 를 0 으로 두면, 두 걸음의
+// 크리틱 손실이 같을 이유는 «잡음이 같다» 뿐이다.
+void testTrainerNoiseVariesPerStep() {
+    gfx::AgentConfig config = smallVectorConfig();
+    gfx::AgentTrainer trainer;
+    assert(trainer.build(config, 157));
+    std::vector<float> observations(static_cast<size_t>(config.batch) * config.observationSize(), 0.0F);
+    std::vector<float> actions(static_cast<size_t>(config.batch) * config.actionCount, 0.0F);
+    std::vector<float> rewards(config.batch, 0.2F);
+    std::vector<float> discounts(config.batch, 0.99F);
+    for (size_t i = 0; i < observations.size(); ++i) {
+        observations[i] = gfx::neuralGaussian(1301, i);
+    }
+    gfx::AgentBatch batch;
+    batch.observations = observations.data();
+    batch.nextObservations = observations.data();
+    batch.actions = actions.data();
+    batch.rewards = rewards.data();
+    batch.discounts = discounts.data();
+
+    gfx::AgentUpdateSettings settings;
+    settings.critic.learningRate = 0.0F;
+    settings.actor.learningRate = 0.0F;
+    settings.tau = 0.0F;
+    settings.targetNoise = 0.5F;
+    settings.noiseClip = 2.0F;
+    std::vector<float> before = trainer.weights();
+    float first = trainer.update(batch, settings).criticLoss;
+    float second = trainer.update(batch, settings).criticLoss;
+    // 가중치가 정말 안 움직였는지 먼저 본다. 움직였다면 아래 차이가 잡음 때문이라고 말할 수 없다.
+    assert(trainer.weights() == before);
+    assert(first != second);
+
+    // 잡음을 끄면 두 걸음이 같아진다.
+    gfx::AgentTrainer silent;
+    assert(silent.build(config, 157));
+    settings.targetNoise = 0.0F;
+    assert(silent.update(batch, settings).criticLoss == silent.update(batch, settings).criticLoss);
+}
+
+void testTrainerCheckpoint() {
+    gfx::AgentConfig config = smallVectorConfig();
+    gfx::AgentTrainer trainer;
+    assert(trainer.build(config, 163));
+    std::vector<float> observations(static_cast<size_t>(config.batch) * config.observationSize(), 0.5F);
+    std::vector<float> actions(static_cast<size_t>(config.batch) * config.actionCount, 0.1F);
+    std::vector<float> rewards(config.batch, 0.3F);
+    std::vector<float> discounts(config.batch, 0.99F);
+    gfx::AgentBatch batch;
+    batch.observations = observations.data();
+    batch.nextObservations = observations.data();
+    batch.actions = actions.data();
+    batch.rewards = rewards.data();
+    batch.discounts = discounts.data();
+    gfx::AgentUpdateSettings settings;
+    for (uint32_t i = 0; i < 3; ++i) {
+        trainer.update(batch, settings);
+    }
+    const std::string path = "rl_agent_trainer.json";
+    assert(trainer.save(path));
+
+    // **이미 학습한 트레이너**에 읽어 들인다. 갓 지은 것에 읽으면 걸음 수가 원래 0 이라 «되돌아갔는가»
+    // 를 물을 수가 없다.
+    gfx::AgentTrainer restored;
+    assert(restored.build(config, 999));
+    for (uint32_t i = 0; i < 3; ++i) {
+        restored.update(batch, settings);
+    }
+    assert(restored.steps() == 3);
+    assert(restored.weights() != trainer.weights());
+    assert(restored.load(path));
+    assert(restored.weights() == trainer.weights());
+    // 최적화기 상태는 되돌아간다. 가중치만 담긴 파일이라 모멘트를 물려받을 수가 없다.
+    assert(restored.steps() == 0);
+    // 같은 관측에 같은 행동을 낸다(아래에서 한 걸음 더 밟기 전에 본다).
+    std::vector<float> saved(config.actionCount, 0.0F);
+    std::vector<float> loaded(config.actionCount, 0.0F);
+    trainer.act(observations.data(), saved.data());
+    restored.act(observations.data(), loaded.data());
+    assert(saved == loaded);
+
+    // 모멘트까지 정말 지워졌는지. 같은 가중치에서 출발한 **갓 지은** 트레이너와 다음 한 걸음이 같아야
+    // 한다 — 모멘트가 남아 있으면 여기서 갈린다.
+    gfx::AgentTrainer fresh;
+    assert(fresh.build(config, 999));
+    assert(fresh.load(path));
+    restored.update(batch, settings);
+    fresh.update(batch, settings);
+    assert(restored.weights() == fresh.weights());
+
+    // 모양이 다른 에이전트에는 읽히지 않는다.
+    gfx::AgentConfig other = config;
+    other.hidden = config.hidden + 1;
+    gfx::AgentTrainer mismatched;
+    assert(mismatched.build(other, 163));
+    std::vector<float> untouched = mismatched.weights();
+    assert(!mismatched.load(path));
+    assert(mismatched.weights() == untouched);
+    std::remove(path.c_str());
+}
+
+// build 를 다시 부르면 학습 상태가 통째로 되돌아간다. 편집기에서 설정을 바꿔 다시 지을 때가 그 경우다.
+void testTrainerRebuild() {
+    gfx::AgentConfig config = smallVectorConfig();
+    gfx::AgentTrainer trainer;
+    assert(trainer.build(config, 181));
+    std::vector<float> observations(static_cast<size_t>(config.batch) * config.observationSize(), 0.4F);
+    std::vector<float> actions(static_cast<size_t>(config.batch) * config.actionCount, 0.2F);
+    std::vector<float> rewards(config.batch, 0.1F);
+    std::vector<float> discounts(config.batch, 0.99F);
+    gfx::AgentBatch batch;
+    batch.observations = observations.data();
+    batch.nextObservations = observations.data();
+    batch.actions = actions.data();
+    batch.rewards = rewards.data();
+    batch.discounts = discounts.data();
+    gfx::AgentUpdateSettings settings;
+    for (uint32_t i = 0; i < 3; ++i) {
+        trainer.update(batch, settings);
+    }
+    assert(trainer.steps() == 3);
+
+    assert(trainer.build(config, 181));
+    assert(trainer.steps() == 0);
+    // 걸음 수뿐 아니라 모멘트도 되돌아가야 한다. 처음부터 지은 것과 첫 걸음이 같은지로 본다.
+    gfx::AgentTrainer fresh;
+    assert(fresh.build(config, 181));
+    assert(trainer.weights() == fresh.weights());
+    trainer.update(batch, settings);
+    fresh.update(batch, settings);
+    assert(trainer.weights() == fresh.weights());
+}
+
+// 평활화 잡음의 흐름이 **씨앗을 보는지.** 걸음 번호만 보면 씨앗이 다른 두 학습이 같은 잡음을 먹어,
+// 씨앗을 여럿 돌려 본다는 말이 반쯤 거짓이 된다. 가중치를 억지로 같게 맞춰 두면 남는 차이는 잡음뿐이다.
+void testTrainerNoiseFollowsSeed() {
+    gfx::AgentConfig config = smallVectorConfig();
+    gfx::AgentTrainer first;
+    gfx::AgentTrainer second;
+    assert(first.build(config, 191));
+    assert(second.build(config, 193));
+    second.weights() = first.weights();
+    assert(second.weights() == first.weights());
+
+    std::vector<float> observations(static_cast<size_t>(config.batch) * config.observationSize(), 0.0F);
+    std::vector<float> actions(static_cast<size_t>(config.batch) * config.actionCount, 0.0F);
+    std::vector<float> rewards(config.batch, 0.2F);
+    std::vector<float> discounts(config.batch, 0.99F);
+    for (size_t i = 0; i < observations.size(); ++i) {
+        observations[i] = gfx::neuralGaussian(1409, i);
+    }
+    gfx::AgentBatch batch;
+    batch.observations = observations.data();
+    batch.nextObservations = observations.data();
+    batch.actions = actions.data();
+    batch.rewards = rewards.data();
+    batch.discounts = discounts.data();
+    gfx::AgentUpdateSettings settings;
+    settings.critic.learningRate = 0.0F;
+    settings.actor.learningRate = 0.0F;
+    settings.tau = 0.0F;
+    settings.targetNoise = 0.5F;
+    settings.noiseClip = 2.0F;
+    assert(first.update(batch, settings).criticLoss != second.update(batch, settings).criticLoss);
+}
+
+// ---- 알고리즘이 실제로 학습하는가
+//
+// 여기까지는 «경사가 맞다» 만 봤다. 경사가 전부 맞아도 알고리즘이 안 붙을 수 있고, 그때 픽셀까지 올라간
+// 뒤에 발견하면 «GPU 커널이 틀렸나 / 알고리즘이 틀렸나 / 관측 그림이 나쁜가» 를 가릴 수가 없다. 그래서
+// 픽셀 이전에 저차원으로 한 번 붙여 둔다.
+//
+// **씨앗 하나의 학습 전후를 견주면 안 된다.** 초기 가중치가 이미 진자를 세우는 경우가 드물지 않아
+// (여덟 씨앗 중 셋이 학습 전에 이미 양수다), 어느 씨앗을 고르냐에 따라 «크게 좋아졌다» 도 «거의
+// 그대로다» 도 만들 수 있다. 학습이 한 일은 **초기값이 어디였든 같은 자리로 모아 놓는 것**이므로
+// 그 «폭» 을 본다.
+void testPendulumLearns() {
+    // 시작이 나쁜 것, 좋은 것, 어중간한 것 하나씩.
+    constexpr uint64_t SEEDS[] = {1, 4, 7};
+    float worstTrained = 1.0F;
+    float bestTrained = -1.0F;
+    float worstBaseline = 1.0F;
+    float bestBaseline = -1.0F;
+    for (uint64_t seed : SEEDS) {
+        PendulumSettings settings;
+        settings.seed = seed;
+        settings.totalFrames = 4000;
+        settings.update.critic.learningRate = 1.0e-3F;
+        settings.update.actor.learningRate = 1.0e-3F;
+        PendulumResult result = trainPendulum(settings);
+        std::printf("  진자 씨앗 %llu: 학습 전 %+.3f -> 학습 뒤 %+.3f  (갱신 %u 회)\n",
+                    static_cast<unsigned long long>(seed),
+                    static_cast<double>(result.baseline),
+                    static_cast<double>(result.trained),
+                    result.updates);
+        std::fflush(stdout);
+        assert(result.updates > 0);
+        assert(std::isfinite(result.criticLoss) && std::isfinite(result.value));
+        worstTrained = std::min(worstTrained, result.trained);
+        bestTrained = std::max(bestTrained, result.trained);
+        worstBaseline = std::min(worstBaseline, result.baseline);
+        bestBaseline = std::max(bestBaseline, result.baseline);
+    }
+    // 초기값은 실제로 크게 갈린다. 이것이 아니면 아래 «모인다» 가 뜻이 없다.
+    assert(bestBaseline - worstBaseline > 0.5F);
+    // 학습 뒤에는 어디서 출발했든 좁은 띠 안에 든다. 진화 전략이 같은 눈금(300 프레임)에서 0.768 이다.
+    assert(worstTrained > 0.60F);
+    assert(bestTrained - worstTrained < 0.10F);
+    // 가장 나쁜 학습 결과가 가장 좋은 초기값보다 낫다. 실측 여유가 0.03 정도라 넉넉하지 않다 — 여기가
+    // 깨지면 학습이 나빠진 것인지 초기값 운이 바뀐 것인지 위 두 줄로 갈라 본다.
+    assert(worstTrained > bestBaseline);
+}
+
 } // namespace
 
 int main() {
@@ -871,6 +1297,14 @@ int main() {
     testActorRaisesValue();
     testCheckpoint();
     testGradients();
+    testTrainerUpdate();
+    testTrainerNoiseClip();
+    testTrainerNoiseVariesPerStep();
+    testTrainerMatchesHandWork();
+    testTrainerCheckpoint();
+    testTrainerRebuild();
+    testTrainerNoiseFollowsSeed();
+    testPendulumLearns();
     std::printf("에이전트 그래프 테스트 통과\n");
     return 0;
 }

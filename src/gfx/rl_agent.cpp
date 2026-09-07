@@ -1,5 +1,7 @@
 #include "gfx/rl_agent.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <utility>
@@ -346,6 +348,118 @@ bool saveAgent(const Agent& agent, const float* parameters, const std::string& p
 
 bool loadAgent(const Agent& agent, float* parameters, const std::string& path) {
     return loadParameters(agent.critic.graph, parameters, path);
+}
+
+bool AgentTrainer::build(const AgentConfig& config, uint64_t seed) {
+    if (!buildAgent(config, agent)) {
+        return false;
+    }
+    parameters.assign(agent.parameters.total, 0.0F);
+    gradients.assign(agent.parameters.total, 0.0F);
+    criticMoments.assign(adamMomentCount(agent.parameters.criticUpdate.count()), 0.0F);
+    actorMoments.assign(adamMomentCount(agent.parameters.actorUpdate.count()), 0.0F);
+    actActivations.assign(agent.act.graph.activationCount, 0.0F);
+    criticActivations.assign(agent.critic.graph.activationCount, 0.0F);
+    criticActivationGradients.assign(agent.critic.graph.activationCount, 0.0F);
+    actorActivations.assign(agent.actor.graph.activationCount, 0.0F);
+    actorActivationGradients.assign(agent.actor.graph.activationCount, 0.0F);
+    initializeAgent(agent, seed, parameters.data());
+    // 평활화 잡음의 흐름도 씨앗에서 갈라 둔다. 걸음 번호만 쓰면 씨앗이 다른 두 학습이 **같은 잡음**을
+    // 먹어, 씨앗을 여럿 돌려 본다는 말이 반쯤 거짓이 된다.
+    noiseStream = seed * 0x9E3779B97F4A7C15ULL + 0x2545F4914F6CDD1DULL;
+    step = 0;
+    return true;
+}
+
+void AgentTrainer::act(const float* observation, float* action) {
+    const Graph& graph = agent.act.graph;
+    std::copy(observation,
+              observation + agent.config.observationSize(),
+              tensorValues(graph, agent.act.observation, actActivations.data()));
+    forward(graph, parameters.data(), actActivations.data());
+    const float* result = tensorValues(graph, agent.act.action, actActivations.data());
+    std::copy(result, result + agent.config.actionCount, action);
+}
+
+AgentUpdateStats AgentTrainer::update(const AgentBatch& batch, const AgentUpdateSettings& settings) {
+    AgentUpdateStats stats;
+    const AgentConfig& config = agent.config;
+    uint32_t observationSize = config.observationSize();
+    size_t observationTotal = static_cast<size_t>(config.batch) * observationSize;
+    size_t actionTotal = static_cast<size_t>(config.batch) * config.actionCount;
+
+    // ---- 크리틱 한 걸음.
+    const Graph& critic = agent.critic.graph;
+    float* criticValues = criticActivations.data();
+    std::copy(batch.observations,
+              batch.observations + observationTotal,
+              tensorValues(critic, agent.critic.observation, criticValues));
+    std::copy(batch.nextObservations,
+              batch.nextObservations + observationTotal,
+              tensorValues(critic, agent.critic.nextObservation, criticValues));
+    std::copy(batch.actions, batch.actions + actionTotal, tensorValues(critic, agent.critic.action, criticValues));
+    std::copy(batch.rewards, batch.rewards + config.batch, tensorValues(critic, agent.critic.reward, criticValues));
+    std::copy(
+        batch.discounts, batch.discounts + config.batch, tensorValues(critic, agent.critic.discount, criticValues));
+
+    // 타깃 정책 평활화 잡음. 걸음 번호에서 다시 만들 수 있으므로 따로 들고 다니지 않는다.
+    float* noise = tensorValues(critic, agent.critic.noise, criticValues);
+    float clip = std::abs(settings.noiseClip);
+    for (size_t i = 0; i < actionTotal; ++i) {
+        float sample = settings.targetNoise * neuralGaussian(noiseStream + step + 1, i);
+        noise[i] = std::clamp(sample, -clip, clip);
+    }
+
+    forward(critic, parameters.data(), criticValues);
+    stats.criticLoss = *tensorValues(critic, agent.critic.loss, criticValues);
+    // buildAgent 가 validate 를 지났으므로 여기서 거짓이 나올 수 없다.
+    // ponytail: 그래도 돌려주는 값을 버리고 있다. 표를 밖에서 갈아 끼울 수 있게 되면 살펴야 한다.
+    backward(critic, parameters.data(), criticValues, gradients.data(), criticActivationGradients.data());
+    const ParameterRange& criticRange = agent.parameters.criticUpdate;
+    adamStep(settings.critic,
+             step + 1,
+             criticRange.count(),
+             gradients.data() + criticRange.begin,
+             criticMoments.data(),
+             parameters.data() + criticRange.begin);
+
+    // ---- 액터 한 걸음. 방금 갱신한 크리틱을 본다.
+    const Graph& actor = agent.actor.graph;
+    float* actorValues = actorActivations.data();
+    std::copy(batch.observations,
+              batch.observations + observationTotal,
+              tensorValues(actor, agent.actor.observation, actorValues));
+    forward(actor, parameters.data(), actorValues);
+    // 손실이 가치의 음수 평균이므로 되돌려 담는다.
+    stats.value = -*tensorValues(actor, agent.actor.loss, actorValues);
+    backward(actor, parameters.data(), actorValues, gradients.data(), actorActivationGradients.data());
+    const ParameterRange& actorRange = agent.parameters.actorUpdate;
+    adamStep(settings.actor,
+             step + 1,
+             actorRange.count(),
+             gradients.data() + actorRange.begin,
+             actorMoments.data(),
+             parameters.data() + actorRange.begin);
+
+    updateAgentTarget(agent, settings.tau, parameters.data());
+    ++step;
+    return stats;
+}
+
+bool AgentTrainer::save(const std::string& path) const {
+    return saveAgent(agent, parameters.data(), path);
+}
+
+bool AgentTrainer::load(const std::string& path) {
+    if (!loadAgent(agent, parameters.data(), path)) {
+        return false;
+    }
+    // 최적화기 상태를 되돌린다. 파일에 담기는 것은 가중치뿐이라, 그대로 두면 **읽어 들인 가중치와 아무
+    // 상관 없는 모멘트**로 첫 걸음을 밟는다. 편향 보정도 마찬가지라 걸음 수를 0 으로 되돌린다.
+    std::fill(criticMoments.begin(), criticMoments.end(), 0.0F);
+    std::fill(actorMoments.begin(), actorMoments.end(), 0.0F);
+    step = 0;
+    return true;
 }
 
 } // namespace gfx
