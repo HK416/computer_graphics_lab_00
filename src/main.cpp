@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 
 #include "app/application.h"
+#include "gfx/neural.h"
 
 int main(int argc, char* argv[]) {
 #if defined(_WIN32)
@@ -20,6 +21,14 @@ int main(int argc, char* argv[]) {
 #ifndef NDEBUG
     spdlog::set_level(spdlog::level::debug);
 #endif
+
+    // 자기 검사는 장면도 창도 필요 없다. 창 없는 컴퓨트 장치 하나만 만들어 CPU 기준과 GPU 를 견주고
+    // 끝난다. Application 을 세우지 않는 이유가 그것이다.
+    for (int i = 1; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--neural-selfcheck") {
+            return gfx::runNeuralSelfCheck() ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
+    }
 
     app::Options options;
     for (int i = 1; i < argc; ++i) {

@@ -56,7 +56,8 @@ ctest --test-dir build/debug --output-on-failure
 
 테스트 이름: `lod_network` `animation` `camera` `scene` `scene_io` `profiler` `shadow` `upscaler`
 `concurrency` `vertex_pack` `physics` `policy` `robot` `neural` `rl_agent` `primitives` `debug_lines` `hardware_profile` `fluid`
-`marching_cubes` `cloth` `headless_physics`(cg_lab 을 `--headless` 로 돌려 저장 결과를 `tests/scenes/expected/` 와 cmp).
+`marching_cubes` `cloth` `headless_physics`(cg_lab 을 `--headless` 로 돌려 저장 결과를 `tests/scenes/expected/` 와 cmp)
+`neural_selfcheck`(cg_lab 을 `--neural-selfcheck` 로 돌려 신경망 컴퓨트 커널을 CPU 기준과 견준다 — GPU 가 있어야 돈다).
 
 선택 기능:
 
@@ -77,6 +78,7 @@ cmake --preset debug -DCG_LAB_DLSS_SDK=<NVIDIA/DLSS 경로>   # 주지 않으면
 ./build/release/cg_lab --open public/scenes/<저장한장면>.json --play --screenshot out.png --screenshot-frame 120
 ./build/release/cg_lab --model public/assets/DamagedHelmet.glb --profile   # 종료할 때 구간 계측을 로그로 남긴다
 ./build/release/cg_lab --headless --open tests/scenes/rigid_cpu.json --play --frames 120 --save out.json   # 창 없이 물리만
+./build/release/cg_lab --neural-selfcheck   # 창·장면 없이 신경망 커널만 CPU 기준과 견준다
 ```
 
 강체 솔버를 바꾸면 `headless_physics` 기준 파일이 갈린다. 의도한 변화면 위 명령으로 다시 만들어
@@ -166,7 +168,7 @@ CPU 백엔드를 부르느라 `physics` 를 본다.
 | `src/app` | 수명 주기, SDL 창, 이벤트 루프, 모델/장면 적재. `plugin.h` 의 `Plugin`/`Services` 와 `plugins/` 의 기능 플러그인(물리 등) |
 | `src/asset` | glTF 적재, meshlet/LOD DAG 구축, 애니메이션 샘플링. CPU 측 표현 |
 | `src/scene` | 장면 그래프, 카메라, 커스텀 JSON 직렬화 |
-| `src/gfx` | Vulkan 컨텍스트, 리소스, 렌더 경로 전부. 신경망의 순수 계산도 여기다(`neural_math.h` — 텐서·연산 표, CPU 기준 순/역전파, Adam·polyak, 가중치 직렬화; `rl_agent.h` — 그 연산으로 지은 DDPG/TD3 에이전트 그래프 셋과 파라미터 배치). 둘 다 Vulkan 을 끌어오지 않아 테스트가 그대로 링크한다. `Renderer` 는 클래스 하나지만 정의가 `renderer_*.cpp` 에 기능별로 나뉜다(`renderer_internal.h` 가 공유 푸시 상수·포맷). `render_graph.h` 가 프레임 패스 목록. GPU SPH(`fluid.cpp`)도 여기 |
+| `src/gfx` | Vulkan 컨텍스트, 리소스, 렌더 경로 전부. 신경망의 순수 계산도 여기다(`neural_math.h` — 텐서·연산 표, CPU 기준 순/역전파, Adam·polyak, 가중치 직렬화; `rl_agent.h` — 그 연산으로 지은 DDPG/TD3 에이전트 그래프 셋·파라미터 배치·CPU 갱신 루프). 둘 다 Vulkan 을 끌어오지 않아 테스트가 그대로 링크한다. 같은 표를 컴퓨트로 도는 GPU 실행기는 `neural.h` 이고, `--neural-selfcheck` 가 두 엔진의 답을 견준다. `Renderer` 는 클래스 하나지만 정의가 `renderer_*.cpp` 에 기능별로 나뉜다(`renderer_internal.h` 가 공유 푸시 상수·포맷). `render_graph.h` 가 프레임 패스 목록. GPU SPH(`fluid.cpp`)도 여기 |
 | `src/physics` | 강체 솔버와 CPU SPH, 정책 망·진화 전략(`policy.h`)과 로봇 관측·행동·롤아웃(`robot.h`). `scene` 과 `core` 에만 의존한다. 강체는 재생 중 `Application::run` 이 고정 간격으로 부르고, 유체 CPU 백엔드는 `gfx::FluidSimulator` 가 부른다(그래서 `gfx` → `physics` 의존이 하나 있다) |
 | `src/editor` | ImGui 도킹 편집기. `Editor` 는 클래스 하나지만 정의가 `editor_*.cpp` 에 기능별로 나뉜다(`editor_internal.h` 가 공용 include·창 이름) |
 | `src/core` | `fatal`, 잠금 없는 작업 큐 |
@@ -254,6 +256,8 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 
 | `Options::debugMode`, `RenderSettings::debugMode` (`src/gfx/render_settings.h`) | `DEBUG_MODE_*` (`scene_types.glsl`) |
 | `DebugLineVertex` (`src/gfx/debug_lines.h`), `DebugLinePushConstants` (`src/app/plugins/debug_lines_plugin.cpp`) | 동명 구조체 (`shaders/debug_line_common.glsl`) |
+| `Tensor` `Op` `Arena` `TENSOR_GRAD` (`src/gfx/neural_math.h`), `NeuralPushConstants` `NEURAL_FLAG_BACKWARD` (`src/gfx/neural.h`) | 동명 구조체·`NEURAL_ARENA_*` `NEURAL_TENSOR_GRAD` (`shaders/neural_common.glsl`) — `OpKind` 와 `Arena` 는 **번호**가 `NEURAL_OP_*` `NEURAL_ARENA_*` 와 같아야 하고, GLSL 의 `Op::result` 는 C++ 의 `output` 이다(예약어) |
+| 원소별 연산의 순·역전파 (`forwardImpl`·`backwardFrom`, `src/gfx/neural_math.cpp`) | 같은 갈래 (`shaders/neural_elementwise.comp`) — 알고리즘이 두 벌이라 한쪽을 고치면 다른 쪽도 같은 순서로 고친다. `--neural-selfcheck` 가 두 답을 견준다 |
 
 전부 `scalar` 레이아웃이다.
 

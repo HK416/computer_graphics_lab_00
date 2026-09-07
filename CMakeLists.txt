@@ -126,6 +126,7 @@ set(shader_sources
     shaders/cloth_constraint.comp
     shaders/cloth_finish.comp
     shaders/cloth_write.comp
+    shaders/neural_elementwise.comp
     shaders/rigid_integrate.comp
     shaders/rigid_solve.comp
     shaders/rigid_finish.comp
@@ -234,7 +235,9 @@ add_executable(cg_lab
     src/gfx/hardware_profile.cpp
     src/gfx/headless_compute.cpp
     src/gfx/lod_network.cpp
+    src/gfx/neural.cpp
     src/gfx/neural_math.cpp
+    src/gfx/neural_selfcheck.cpp
     src/gfx/profiler.cpp
     src/gfx/profiler_math.cpp
     src/gfx/raytracing.cpp
@@ -681,6 +684,11 @@ add_test(NAME headless_physics
     COMMAND ${CMAKE_COMMAND} -DCG_LAB=$<TARGET_FILE:cg_lab> -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}
             -DOUT=${CMAKE_CURRENT_BINARY_DIR}/headless_rigid_cpu.json
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/headless_physics.cmake)
+
+# 신경망 GPU 자기 검사: CPU 기준과 컴퓨트 커널이 같은 답을 내는지 본다.
+add_test(NAME neural_selfcheck
+    COMMAND ${CMAKE_COMMAND} -DCG_LAB=$<TARGET_FILE:cg_lab> -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/neural_selfcheck.cmake)
 
 # cmake --build --preset debug --target run 으로 빌드한 뒤 바로 실행한다.
 add_custom_target(run

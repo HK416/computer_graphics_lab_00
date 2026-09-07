@@ -1,0 +1,100 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// 원소별 연산. 출력 원소 하나에 스레드 하나이고, 순전파와 역전파를 flags 로 가른다. 종류마다 파이프라인을
+// 따로 두지 않는 이유는 갈래가 짧고(한 줄짜리가 대부분) 디스패치 사이의 배리어가 훨씬 비싸서다.
+//
+// src/gfx/neural_math.cpp 의 같은 갈래와 **결과가 비트까지 같아야 한다.** 곱셈과 덧셈 순서를 바꾸지 않고
+// 그대로 옮긴 것이 그 때문이다. tanh 만은 예외라 자기 검사가 허용 오차를 따로 둔다(GLSL 의 tanh 와
+// std::tanh 는 다른 근사다).
+// 작업 그룹 크기는 특수화 상수다. gfx::NEURAL_GROUP_SIZE 하나가 파이프라인을 만들 때 실려 와, C++ 과
+// GLSL 에 같은 수를 두 벌 적어 두고 어긋나기를 기다리는 자리를 없앤다.
+layout(local_size_x_id = 0) in;
+
+void main() {
+    Op op = push.ops.items[push.op];
+    // INPUT 은 밖에서 값을 채우는 자리라 도는 것이 없다. **여기서 먼저 막아야 한다** — 아래 inputs[0] 은
+    // INPUT 에서 NO_TENSOR(0xFFFFFFFF)라, 부르는 쪽만 믿으면 표를 120 GB 너머에서 읽는다.
+    if (op.kind == NEURAL_OP_INPUT) {
+        return;
+    }
+    Tensor target = push.tensors.items[op.result];
+    uint count = neuralCount(target);
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= count) {
+        return;
+    }
+    Tensor first = push.tensors.items[op.inputs[0]];
+    bool backward = (push.flags & NEURAL_FLAG_BACKWARD) != 0u;
+
+    if (!backward) {
+        float x = neuralRead(first, i);
+        float y = 0.0;
+        switch (op.kind) {
+        case NEURAL_OP_RELU:
+            y = max(x, 0.0);
+            break;
+        case NEURAL_OP_TANH:
+            y = tanh(x);
+            break;
+        case NEURAL_OP_SCALE:
+            y = x * op.fparams[0];
+            break;
+        case NEURAL_OP_ADD:
+            y = x + neuralRead(push.tensors.items[op.inputs[1]], i);
+            break;
+        case NEURAL_OP_MUL:
+            y = x * neuralRead(push.tensors.items[op.inputs[1]], i);
+            break;
+        case NEURAL_OP_MIN2:
+            y = min(x, neuralRead(push.tensors.items[op.inputs[1]], i));
+            break;
+        }
+        neuralWrite(target, i, y);
+        return;
+    }
+
+    // 역전파. 출력이 경사를 받지 않으면 그 위쪽은 통째로 끊긴 것이라 아무 것도 하지 않는다(CPU 기준이
+    // dy == nullptr 일 때 연산을 건너뛰는 것과 같다).
+    if (!neuralHasGrad(target)) {
+        return;
+    }
+    float dy = neuralReadGrad(target, i);
+    switch (op.kind) {
+    case NEURAL_OP_RELU:
+        // **전활성값의 부호**로 마스킹한다. y = max(x, 0) 이라 출력으로 판정해도 같지만, 정의를 그대로
+        // 읽는 쪽이 CPU 기준과 어긋날 자리가 없다.
+        neuralAddGrad(first, i, neuralRead(first, i) > 0.0 ? dy : 0.0);
+        break;
+    case NEURAL_OP_TANH: {
+        float y = neuralRead(target, i);
+        neuralAddGrad(first, i, dy * (1.0 - y * y));
+        break;
+    }
+    case NEURAL_OP_SCALE:
+        neuralAddGrad(first, i, dy * op.fparams[0]);
+        break;
+    case NEURAL_OP_ADD:
+        neuralAddGrad(first, i, dy);
+        neuralAddGrad(push.tensors.items[op.inputs[1]], i, dy);
+        break;
+    case NEURAL_OP_MUL: {
+        Tensor second = push.tensors.items[op.inputs[1]];
+        // 짝의 **값** 을 곱한다. 한쪽이 경사를 받지 않아도 다른 쪽 경사에는 그 값이 든다.
+        neuralAddGrad(first, i, dy * neuralRead(second, i));
+        neuralAddGrad(second, i, dy * neuralRead(first, i));
+        break;
+    }
+    case NEURAL_OP_MIN2: {
+        Tensor second = push.tensors.items[op.inputs[1]];
+        // 같은 값이면 첫째가 이긴다. CPU 기준과 같은 규칙이라 두 엔진의 결과가 갈리지 않는다.
+        if (neuralRead(first, i) <= neuralRead(second, i)) {
+            neuralAddGrad(first, i, dy);
+        } else {
+            neuralAddGrad(second, i, dy);
+        }
+        break;
+    }
+    }
+}

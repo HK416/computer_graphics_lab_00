@@ -30,13 +30,15 @@ enum class Arena : uint32_t {
 // 갱신하지 않는 것과 타깃망이 경사를 받지 않는 것이 이 비트 하나로 끝난다.
 inline constexpr uint32_t TENSOR_GRAD = 1U << 0;
 
-// layernorm 이 분산에 더하는 값. 분산이 0 인 행에서 나눗셈이 터지지 않게 한다. **GLSL 짝과 같은
-// 값이어야 한다** — 다르면 순전파가 조용히 갈리고 유한차분으로는 잡을 수 없다(순·역이 같은 값을
-// 쓰기 때문이다).
+// layernorm 이 분산에 더하는 값. 분산이 0 인 행에서 나눗셈이 터지지 않게 한다. **GLSL 커널이 생기면
+// 같은 값이어야 한다** — 다르면 순전파가 조용히 갈리고 유한차분으로는 잡을 수 없다(순·역이 같은 값을
+// 쓰기 때문이다). 아직 layernorm 커널은 없다(8단계).
 inline constexpr float LAYERNORM_EPSILON = 1.0e-5F;
 
-// 텐서 하나. GPU 쪽(shaders/neural_common.glsl 의 Tensor)은 arena·offset 대신 buffer device address
-// 두 개를 담지만, 나머지 필드와 뜻은 같다. 배치가 묶인 자리라 한쪽을 고치면 다른 쪽도 고친다.
+// 텐서 하나. **shaders/neural_common.glsl 의 Tensor 와 배치가 같다** — GPU 도 arena 와 offset 을 그대로
+// 읽고, arena 넷의 시작 주소만 푸시 상수로 받는다. 텐서마다 주소를 담지 않는 이유는 그러면 버퍼를 다시
+// 잡을 때마다 표를 새로 지어야 하고, 그러면 «두 엔진이 같은 표를 읽는다» 가 거짓이 되기 때문이다.
+// 배치가 묶인 자리라 한쪽을 고치면 다른 쪽도 고친다.
 struct Tensor {
     Arena arena = Arena::ACTIVATION;
     // arena 안의 **float 첨자**(바이트가 아니다).
@@ -203,10 +205,22 @@ bool backward(const Graph& graph,
               float* parameterGradients,
               float* activationGradients);
 
+// 같은 역전파지만 **지우지도 심지도 않는다.** 부르는 쪽이 경사 배열을 미리 채워 두고, 표를 거꾸로 훑기만
+// 한다. backward 는 «0 으로 지우고 마지막에 1 을 심는» 특수한 경우다.
+//
+// GPU 실행기가 이 꼴을 쓴다. 손실 커널이 아직 없는 동안에도 씨앗을 호스트가 올려 주면 역전파를 견줄 수
+// 있어야 하기 때문이다.
+void backwardFrom(const Graph& graph,
+                  const float* parameters,
+                  const float* activations,
+                  float* parameterGradients,
+                  float* activationGradients);
+
 // 표본 번호만으로 정해지는 표준 가우시안. physics::gaussianNoise 와 같은 splitmix64 + Box-Muller 다.
 //
-// ponytail: 같은 수식이 두 벌이 된다. 여기 것은 GLSL 짝(neural_common.glsl 의 neuralGaussian)이 있어야
-// 해서 신경망 쪽에 두었고, physics 쪽은 진화 전략이 쓴다. 한쪽을 고치면 다른 쪽도 고친다.
+// ponytail: 같은 수식이 두 벌이 된다. 여기 것과 physics::gaussianNoise 다. 이쪽에 따로 둔 것은 GPU 가
+// 잡음을 스스로 만들어야 할 때(무작위 이동 증강, 11단계) GLSL 짝이 생길 자리이기 때문이다. 한쪽을
+// 고치면 다른 쪽도 고친다.
 float neuralGaussian(uint64_t seed, uint64_t index);
 
 // 파라미터를 초기화한다. 합성곱·선형의 가중치는 팬인에 맞춘 He 정규(ReLU 를 전제), 편향은 0,

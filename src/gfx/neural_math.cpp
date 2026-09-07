@@ -773,7 +773,15 @@ bool backward(const Graph& graph,
     }
     float* seed = tensorGradient(lastTensor, parameterGradients, activationGradients);
     seed[0] = 1.0F;
+    backwardFrom(graph, parameters, activations, parameterGradients, activationGradients);
+    return true;
+}
 
+void backwardFrom(const Graph& graph,
+                  const float* parameters,
+                  const float* activations,
+                  float* parameterGradients,
+                  float* activationGradients) {
     for (size_t index = graph.ops.size(); index-- > 0;) {
         const Op& op = graph.ops[index];
         if (op.kind == OpKind::INPUT) {
@@ -1005,7 +1013,6 @@ bool backward(const Graph& graph,
         }
         }
     }
-    return true;
 }
 
 float neuralGaussian(uint64_t seed, uint64_t index) {
