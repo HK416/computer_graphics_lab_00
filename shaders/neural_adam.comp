@@ -1,0 +1,33 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// Adam 한 걸음. 파라미터 배열의 [rangeBegin, rangeBegin + rangeCount) 구간만 밟는다.
+//
+// 모멘트는 한 배열의 앞 절반이 1차, 뒤 절반이 2차다(gfx::adamMomentCount 의 규약). 원소마다 스레드
+// 하나라 순서 문제가 없다.
+//
+// **편향 보정은 호스트가 계산해 넘긴다.** GLSL 의 pow 와 std::pow 는 근사가 달라, GPU 에서 계산하면
+// 두 엔진이 첫 걸음부터 갈린다. 걸음마다 한 번 하는 계산이라 호스트가 하는 편이 맞기도 하다.
+layout(local_size_x_id = 0) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.rangeCount) {
+        return;
+    }
+    uint slot = push.rangeBegin + i;
+    float gradient = push.parameterGradients.items[slot];
+
+    precise float first = push.moments.items[i];
+    precise float second = push.moments.items[push.rangeCount + i];
+    first = push.beta1 * first + (1.0 - push.beta1) * gradient;
+    second = push.beta2 * second + (1.0 - push.beta2) * gradient * gradient;
+    push.moments.items[i] = first;
+    push.moments.items[push.rangeCount + i] = second;
+
+    precise float correctedFirst = first / push.firstCorrection;
+    precise float correctedSecond = second / push.secondCorrection;
+    push.parameters.items[slot] -=
+        push.learningRate * correctedFirst / (sqrt(correctedSecond) + push.epsilon);
+}

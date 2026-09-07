@@ -24,10 +24,28 @@ struct NeuralPushConstants {
     VkDeviceAddress activations = 0;
     VkDeviceAddress parameterGradients = 0;
     VkDeviceAddress activationGradients = 0;
+    VkDeviceAddress moments = 0;
     uint32_t op = 0;
     uint32_t flags = 0;
+    // 아래는 최적화기 커널만 쓴다.
+    uint32_t rangeBegin = 0;
+    uint32_t rangeCount = 0;
+    uint32_t targetBegin = 0;
+    float learningRate = 0.0F;
+    float beta1 = 0.0F;
+    float beta2 = 0.0F;
+    float epsilon = 0.0F;
+    // 편향 보정. 호스트가 계산해 넘긴다 — GLSL 의 pow 는 std::pow 와 근사가 다르다.
+    float firstCorrection = 1.0F;
+    float secondCorrection = 1.0F;
+    float tau = 0.0F;
+    // layernorm 이 분산에 더하는 값. 상수를 GLSL 에 두 벌로 두지 않으려고 실어 보낸다.
+    float layerNormEpsilon = LAYERNORM_EPSILON;
 };
-static_assert(sizeof(NeuralPushConstants) == 56, "신경망 푸시 상수 배치가 셰이더와 어긋난다");
+// 실제 내용은 108 바이트지만 주소 정렬(8) 때문에 뒤가 채워져 112 다. 뒤쪽 채움은 GLSL 이 읽지
+// 않으므로 오프셋은 그대로 맞는다.
+static_assert(sizeof(NeuralPushConstants) == 112, "신경망 푸시 상수 배치가 셰이더와 어긋난다");
+static_assert(sizeof(NeuralPushConstants) <= 128, "푸시 상수는 128 바이트를 넘을 수 없다");
 
 // 역전파를 도는 중. shaders/neural_common.glsl 의 NEURAL_FLAG_BACKWARD 와 같아야 한다.
 inline constexpr uint32_t NEURAL_FLAG_BACKWARD = 1U << 0;
@@ -73,6 +91,28 @@ public:
     const float* activationResult() const { return readbackFloats; }
     const float* parameterGradientResult() const { return readbackFloats + activationCount; }
     const float* activationGradientResult() const { return readbackFloats + activationCount + parameterCount; }
+    // 학습이 지나간 뒤의 가중치. 열 걸음 등가 검사가 이것을 견준다.
+    const float* parameterResult() const { return readbackFloats + activationCount * 2 + parameterCount; }
+
+    // Adam 의 모멘트 버퍼를 잡는다. 최적화기마다 하나씩(에이전트는 크리틱·액터 둘)이고, 크기는
+    // adamMomentCount(구간 길이) 다. build 뒤에 부른다(build 가 이전 것을 버린다).
+    bool reserveMoments(uint32_t slot, size_t floats);
+    // 모멘트를 채운다. 기본은 0 이고, **첫 걸음 전에 반드시 부른다** — 갓 잡은 장치 메모리의 내용은
+    // 정해져 있지 않은데 Adam 이 첫 걸음에서 그것을 읽는다.
+    //
+    // 값을 받는 이유는 자기 검사가 «지우기가 실제로 일하는가» 를 볼 수 있어야 하기 때문이다. 드라이버가
+    // 새 페이지를 0 으로 주면 지우기를 빼도 티가 나지 않으므로, 검사가 일부러 더럽힌 뒤 지운다.
+    void recordClearMoments(VkCommandBuffer commandBuffer, uint32_t slot, float value = 0.0F);
+    // 파라미터 배열의 [begin, begin+count) 를 Adam 한 걸음 밟는다. step 은 1부터 센다.
+    void recordAdam(VkCommandBuffer commandBuffer,
+                    uint32_t momentSlot,
+                    uint32_t begin,
+                    uint32_t count,
+                    const AdamSettings& settings,
+                    uint32_t step);
+    // [onlineBegin, +count) 를 [targetBegin, +count) 로 tau 만큼 끌어당긴다.
+    void
+    recordPolyak(VkCommandBuffer commandBuffer, uint32_t onlineBegin, uint32_t targetBegin, uint32_t count, float tau);
 
     // 아래는 모두 명령 버퍼 하나에 이어 기록한다. 사이의 배리어는 각자 안에서 건다.
     void recordUpload(VkCommandBuffer commandBuffer);
@@ -91,11 +131,14 @@ public:
 private:
     void createPipelines();
     void uploadBarrier(VkCommandBuffer commandBuffer);
+    // 버퍼 주소만 채운 푸시 상수. 연산 커널과 최적화기 커널이 함께 쓴다.
+    NeuralPushConstants basePush() const;
     void dispatch(VkCommandBuffer commandBuffer, uint32_t opIndex, uint32_t flags);
     // 파이프라인 하나를 threads 개 스레드로 돈다. 푸시 상수는 연산 번호와 방향만 다르다.
     void dispatchKernel(
         VkCommandBuffer commandBuffer, VkPipeline pipeline, uint32_t opIndex, uint32_t flags, uint32_t threads);
     void barrier(VkCommandBuffer commandBuffer);
+    void clearBarrier(VkCommandBuffer commandBuffer);
 
     Context& context;
     bool ready = false;
@@ -118,6 +161,13 @@ private:
     VkPipeline convDxPipeline = VK_NULL_HANDLE;
     VkPipeline convDwPipeline = VK_NULL_HANDLE;
     VkPipeline convDbPipeline = VK_NULL_HANDLE;
+    VkPipeline layerNormPipeline = VK_NULL_HANDLE;
+    VkPipeline layerNormDxPipeline = VK_NULL_HANDLE;
+    VkPipeline layerNormDparamPipeline = VK_NULL_HANDLE;
+    VkPipeline reducePipeline = VK_NULL_HANDLE;
+    VkPipeline reduceDxPipeline = VK_NULL_HANDLE;
+    VkPipeline adamPipeline = VK_NULL_HANDLE;
+    VkPipeline polyakPipeline = VK_NULL_HANDLE;
 
     Buffer tensorBuffer;
     Buffer opBuffer;
@@ -127,8 +177,12 @@ private:
     Buffer activationGradientBuffer;
     // 호스트가 쓰는 자리: [파라미터 | 활성 | 활성 경사 씨앗].
     Buffer staging;
-    // 호스트가 읽는 자리: [활성 | 파라미터 경사 | 활성 경사].
+    // 호스트가 읽는 자리: [활성 | 파라미터 경사 | 활성 경사 | 파라미터].
     Buffer readback;
+    // 최적화기 모멘트. 에이전트가 크리틱·액터 둘을 쓴다.
+    Buffer moments[2];
+    // 슬롯마다 잡아 둔 float 수. recordAdam 이 «구간 둘이 버퍼 안에 들어가는가» 를 확인하는 데 쓴다.
+    size_t momentFloats[2] = {0, 0};
     float* stagingFloats = nullptr;
     float* readbackFloats = nullptr;
 };

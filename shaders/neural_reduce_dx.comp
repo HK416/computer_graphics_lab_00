@@ -1,0 +1,51 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// 접는 연산의 역전파. 여기서는 원소마다 스레드 하나다 - 서로 더할 것이 없어 순서 문제가 없다.
+layout(local_size_x_id = 0) in;
+
+void main() {
+    Op op = push.ops.items[push.op];
+    if (op.kind != NEURAL_OP_MEAN && op.kind != NEURAL_OP_MSE && op.kind != NEURAL_OP_HUBER) {
+        return;
+    }
+    Tensor first = push.tensors.items[op.inputs[0]];
+    Tensor target = push.tensors.items[op.result];
+    if (!neuralHasGrad(target)) {
+        return;
+    }
+    uint count = neuralCount(first);
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= count || count == 0u) {
+        return;
+    }
+    float dy = neuralGradAt(target, 0);
+
+    if (op.kind == NEURAL_OP_MEAN) {
+        neuralAddGrad(first, i, dy / float(count));
+        return;
+    }
+
+    Tensor second = push.tensors.items[op.inputs[1]];
+    precise float error = neuralRead(first, i) - neuralRead(second, i);
+    precise float contribution;
+    if (op.kind == NEURAL_OP_MSE) {
+        precise float scale = 2.0 * dy / float(count);
+        contribution = scale * error;
+    } else {
+        // CPU 기준과 **글자 그대로** 같은 꼴로 쓴다. 꺾이는 지점 밖에서 기울기가 delta 로 눕는다.
+        //
+        // 정확히 그 지점에서 <= 냐 < 냐는 값으로는 뜻이 없다 — Huber 는 거기서 C1 이라 안쪽 식이 내는
+        // error 와 바깥쪽 식이 내는 delta 가 같은 수다(순전파도 0.5*d*d 와 d*(d - 0.5*d) 가 정확히 같다.
+        // 반으로 나누는 것은 정확 연산이다). MIN2 의 동점 규칙과는 다르다 — 그쪽은 어느 입력이 경사를
+        // 받는지가 갈린다. 그래도 두 엔진의 글이 같아야 나중에 읽는 사람이 헷갈리지 않으므로 맞춰 둔다.
+        float delta = op.fparams[0];
+        precise float scale = dy / float(count);
+        precise float slope = abs(error) <= delta ? error : (error > 0.0 ? delta : -delta);
+        contribution = scale * slope;
+    }
+    neuralAddGrad(first, i, contribution);
+    // 목표도 학습하는 층에서 올 수 있다. 부호만 반대다.
+    neuralAddGrad(second, i, -contribution);
+}

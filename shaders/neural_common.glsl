@@ -72,9 +72,26 @@ layout(push_constant, scalar) uniform NeuralPushConstants {
     NeuralFloatBuffer activations;
     NeuralFloatBuffer parameterGradients;
     NeuralFloatBuffer activationGradients;
+    // Adam 의 모멘트. 앞 절반이 1차, 뒤 절반이 2차다. 연산 커널은 쓰지 않는다.
+    NeuralFloatBuffer moments;
     // 이번 디스패치가 도는 연산 번호.
     uint op;
     uint flags;
+    // 아래는 최적화기 커널(adam, polyak)만 쓴다. 이들은 연산 표가 아니라 파라미터 배열의 구간을 밟는다.
+    uint rangeBegin;
+    uint rangeCount;
+    uint targetBegin;
+    float learningRate;
+    float beta1;
+    float beta2;
+    float epsilon;
+    // 편향 보정 1 - beta^step. **호스트가 계산해 넘긴다** - GLSL 의 pow 는 std::pow 와 근사가 다르다.
+    float firstCorrection;
+    float secondCorrection;
+    float tau;
+    // layernorm 이 분산에 더하는 값. **상수를 두 벌로 두지 않으려고** 실어 보낸다 — gfx::LAYERNORM_EPSILON
+    // 하나가 출처다(강체 솔버 상수와 같은 규약).
+    float layerNormEpsilon;
 }
 push;
 

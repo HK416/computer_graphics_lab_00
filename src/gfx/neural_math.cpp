@@ -530,8 +530,8 @@ template <typename T> void forwardImpl(const Graph& graph, const T* parameters, 
             break;
         case OpKind::MEAN: {
             uint32_t count = in.count();
-            // 순서대로 더한다. GLSL 짝은 트리 리덕션이라 반올림이 갈리지만, 유한한 배치에서 그 차이는
-            // 자기 검사의 허용치 안이다.
+            // 순서대로 더한다. GLSL 짝(neural_reduce.comp)도 스레드 하나가 같은 순서로 훑는다 —
+            // 트리 리덕션이면 반올림이 갈리기 때문이다.
             T sum = T{0};
             for (uint32_t i = 0; i < count; ++i) {
                 sum += x[i];
@@ -649,7 +649,9 @@ bool validateForward(const Graph& graph) {
         if (op.kind == OpKind::CONCAT && overlaps(graph.tensors[op.inputs[0]], graph.tensors[op.inputs[1]])) {
             return false;
         }
-        if (op.kind == OpKind::CONV2D || op.kind == OpKind::LINEAR) {
+        // layernorm 도 같다. dx 는 행마다, 이득·편향은 특징마다 배리어 없이 나란히 도므로 셋이 겹치면
+        // 두 커널이 같은 자리를 동시에 고친다. addLayerNorm 은 활성 텐서를 이득으로 받는 것을 막지 않는다.
+        if (op.kind == OpKind::CONV2D || op.kind == OpKind::LINEAR || op.kind == OpKind::LAYERNORM) {
             const Tensor& source = graph.tensors[op.inputs[0]];
             const Tensor& weight = graph.tensors[op.inputs[1]];
             const Tensor& bias = graph.tensors[op.inputs[2]];
@@ -1104,20 +1106,25 @@ void initializeParameters(const Graph& graph, uint64_t seed, float* parameters) 
     }
 }
 
+bool adamCorrections(const AdamSettings& settings, uint32_t step, float& first, float& second) {
+    // step 은 1부터 센다. 0 이면 아래 보정이 0 이 되어 어차피 걸리지만, 뜻을 여기서 밝혀 둔다.
+    if (step == 0) {
+        return false;
+    }
+    first = 1.0F - std::pow(settings.beta1, static_cast<float>(step));
+    second = 1.0F - std::pow(settings.beta2, static_cast<float>(step));
+    return first > 0.0F && second > 0.0F;
+}
+
 void adamStep(const AdamSettings& settings,
               uint32_t step,
               size_t count,
               const float* gradients,
               float* moments,
               float* parameters) {
-    // step 은 1부터 센다. 0 이면 아래 편향 보정이 0 이 되어 어차피 걸리지만, 뜻을 여기서 밝혀 둔다.
-    if (step == 0) {
-        return;
-    }
-    // 편향 보정. m 과 v 가 0 에서 시작하므로 초반 몇 걸음은 실제보다 작게 잡힌다. 그만큼 되돌린다.
-    float firstCorrection = 1.0F - std::pow(settings.beta1, static_cast<float>(step));
-    float secondCorrection = 1.0F - std::pow(settings.beta2, static_cast<float>(step));
-    if (firstCorrection <= 0.0F || secondCorrection <= 0.0F) {
+    float firstCorrection = 0.0F;
+    float secondCorrection = 0.0F;
+    if (!adamCorrections(settings, step, firstCorrection, secondCorrection)) {
         return;
     }
     float* first = moments;

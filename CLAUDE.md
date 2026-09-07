@@ -57,7 +57,8 @@ ctest --test-dir build/debug --output-on-failure
 테스트 이름: `lod_network` `animation` `camera` `scene` `scene_io` `profiler` `shadow` `upscaler`
 `concurrency` `vertex_pack` `physics` `policy` `robot` `neural` `rl_agent` `primitives` `debug_lines` `hardware_profile` `fluid`
 `marching_cubes` `cloth` `headless_physics`(cg_lab 을 `--headless` 로 돌려 저장 결과를 `tests/scenes/expected/` 와 cmp)
-`neural_selfcheck`(cg_lab 을 `--neural-selfcheck` 로 돌려 신경망 컴퓨트 커널을 CPU 기준과 견준다 — GPU 가 있어야 돈다).
+`neural_selfcheck`(cg_lab 을 `--neural-selfcheck` 로 돌려 신경망 컴퓨트 커널을 CPU 기준과 견준다 — GPU 가 있어야 돈다.
+연산마다 최대 오차를 찍고, 마지막에 **두 엔진이 열 걸음 학습한 뒤 가중치가 같은지**를 본다).
 
 선택 기능:
 
@@ -96,6 +97,24 @@ cmake --preset debug -DCG_LAB_DLSS_SDK=<NVIDIA/DLSS 경로>   # 주지 않으면
 
 시간축 업스케일(TAAU/FSR/DLSS)은 히스토리를 쌓아야 하므로 `--screenshot-frame` 을 뒤쪽(100 이상)으로
 준다. 기본 8 로는 수렴 전 화면을 본다.
+
+#### 동기화 위험
+
+컴퓨트 패스를 더하거나 배리어를 고쳤으면 **검증 레이어의 동기화 검사**를 돌린다. 배리어가 빠져도 이
+드라이버에서는 결과가 맞게 나오는 일이 흔해서, 눈으로도 자기 검사로도 잡히지 않는다.
+
+```sh
+printf 'khronos_validation.validate_sync = true
+' > /tmp/vk_layer_settings.txt
+VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VK_LAYER_SETTINGS_PATH=/tmp/vk_layer_settings.txt   ./build/release/cg_lab.exe --neural-selfcheck
+```
+
+`SYNC-HAZARD-*` 가 하나라도 뜨면 결함이다. 릴리스 빌드는 `NDEBUG` 라 스스로 레이어를 올리지 않으므로
+로더 환경 변수로 끼워 넣는다. **잡히는 것이 없으면 레이어가 정말 올라왔는지 한 번 확인한다** — 배리어를
+일부러 하나 빼고 돌려 건수가 늘면 살아 있는 것이다.
+
+`vkCmdFillBuffer` 는 컴퓨트가 아니라 **전송 단계**(`CLEAR`)라, 컴퓨트끼리 거는 배리어가 줄 세우지 못한다.
+명령 버퍼 하나에 여러 걸음을 담는 자리(신경망의 열 걸음 자기 검사)에서 정확히 여기가 어긋난다.
 
 ### 도구
 
@@ -257,7 +276,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `Options::debugMode`, `RenderSettings::debugMode` (`src/gfx/render_settings.h`) | `DEBUG_MODE_*` (`scene_types.glsl`) |
 | `DebugLineVertex` (`src/gfx/debug_lines.h`), `DebugLinePushConstants` (`src/app/plugins/debug_lines_plugin.cpp`) | 동명 구조체 (`shaders/debug_line_common.glsl`) |
 | `Tensor` `Op` `Arena` `TENSOR_GRAD` (`src/gfx/neural_math.h`), `NeuralPushConstants` `NEURAL_FLAG_BACKWARD` (`src/gfx/neural.h`) | 동명 구조체·`NEURAL_ARENA_*` `NEURAL_TENSOR_GRAD` (`shaders/neural_common.glsl`) — `OpKind` 와 `Arena` 는 **번호**가 `NEURAL_OP_*` `NEURAL_ARENA_*` 와 같아야 하고, GLSL 의 `Op::result` 는 C++ 의 `output` 이다(예약어) |
-| 연산의 순·역전파 (`forwardImpl`·`backwardFrom`, `src/gfx/neural_math.cpp`) | 같은 갈래 (`shaders/neural_elementwise.comp`, `neural_linear*.comp`, `neural_bias_grad.comp`) — 알고리즘이 두 벌이라 한쪽을 고치면 다른 쪽도 **같은 순서로** 고친다. 누산 순서까지 같아야 두 엔진이 비트로 같고, 그래서 GLSL 쪽 누산기에는 `precise` 를 붙여 FMA 축약을 막는다. `--neural-selfcheck` 가 견준다 |
+| 연산의 순·역전파 (`forwardImpl`·`backwardFrom`, `src/gfx/neural_math.cpp`) | 같은 갈래 (`shaders/neural_*.comp`) — 알고리즘이 두 벌이라 한쪽을 고치면 다른 쪽도 **같은 순서로** 고친다. 누산 순서까지 같아야 두 엔진이 비트로 같고, 그래서 GLSL 쪽 누산기에는 `precise` 를 붙여 FMA 축약을 막는다(CPU 쪽은 CMake 가 `-ffp-contract=off`). **나눗셈과 `sqrt` 가 있는 연산만은 비트로 같을 수 없다** — Vulkan 이 정확 반올림을 요구하는 것은 덧셈·뺄셈·곱셈·FMA 뿐이고 `OpFDiv` 2.5 ULP, `Sqrt` 3.0 ULP 까지 허용한다. layernorm 이 그 경우다. `--neural-selfcheck` 가 연산마다 견주고, 마지막에 «열 걸음 학습 뒤 가중치» 까지 본다 |
 
 전부 `scalar` 레이아웃이다.
 

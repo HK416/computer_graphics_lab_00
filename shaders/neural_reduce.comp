@@ -1,0 +1,54 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// 접는 연산 - MEAN, MSE, HUBER. 순전파는 원소를 모두 훑어 스칼라 하나를 낸다.
+//
+// **스레드 하나가 통째로 훑는다.** 트리 리덕션은 덧셈 순서가 CPU 기준과 갈린다. 우리 그래프에서 접히는
+// 것은 배치 크기(32 안팎)뿐이라 한 스레드로도 짧고, 그 대신 «정확히 같다» 를 얻는다.
+//
+// ponytail: 배치가 커지면 이 커널 하나가 직렬 구간이 된다. 그때는 트리 리덕션과 허용 오차를 함께 들여야
+// 한다(9단계의 협력 행렬과 같은 판단이다).
+layout(local_size_x_id = 0) in;
+
+void main() {
+    Op op = push.ops.items[push.op];
+    if (op.kind != NEURAL_OP_MEAN && op.kind != NEURAL_OP_MSE && op.kind != NEURAL_OP_HUBER) {
+        return;
+    }
+    if (gl_GlobalInvocationID.x != 0u) {
+        return;
+    }
+    Tensor first = push.tensors.items[op.inputs[0]];
+    Tensor target = push.tensors.items[op.result];
+    uint count = neuralCount(first);
+    if (count == 0u) {
+        return;
+    }
+
+    if (op.kind == NEURAL_OP_MEAN) {
+        precise float sum = 0.0;
+        for (uint i = 0; i < count; ++i) {
+            sum += neuralRead(first, i);
+        }
+        neuralWrite(target, 0, sum / float(count));
+        return;
+    }
+
+    Tensor second = push.tensors.items[op.inputs[1]];
+    precise float sum = 0.0;
+    if (op.kind == NEURAL_OP_MSE) {
+        for (uint i = 0; i < count; ++i) {
+            precise float error = neuralRead(first, i) - neuralRead(second, i);
+            sum += error * error;
+        }
+    } else {
+        float delta = op.fparams[0];
+        for (uint i = 0; i < count; ++i) {
+            precise float error = abs(neuralRead(first, i) - neuralRead(second, i));
+            // 꺾이는 지점에서 값과 기울기가 모두 이어지도록 뒤쪽 식에 delta/2 를 뺀다.
+            sum += error <= delta ? 0.5 * error * error : delta * (error - 0.5 * delta);
+        }
+    }
+    neuralWrite(target, 0, sum / float(count));
+}

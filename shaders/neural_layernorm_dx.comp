@@ -1,0 +1,59 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// layernorm 의 입력 경사. 행마다 리덕션 둘(sum dx̂, sum dx̂·x̂)로 행 전체를 되민다.
+//
+// 행 하나에 스레드 하나다. 같은 행의 모든 특징이 서로에게 영향을 주므로 행을 쪼갤 수 없기도 하다.
+layout(local_size_x_id = 0) in;
+
+void main() {
+    Op op = push.ops.items[push.op];
+    if (op.kind != NEURAL_OP_LAYERNORM) {
+        return;
+    }
+    Tensor source = push.tensors.items[op.inputs[0]];
+    Tensor gain = push.tensors.items[op.inputs[1]];
+    Tensor target = push.tensors.items[op.result];
+    if (!neuralHasGrad(target) || !neuralHasGrad(source)) {
+        return;
+    }
+
+    uint features = source.dims[1];
+    uint n = gl_GlobalInvocationID.x;
+    if (n >= source.dims[0]) {
+        return;
+    }
+    uint row = n * features;
+
+    precise float sum = 0.0;
+    for (uint f = 0; f < features; ++f) {
+        sum += neuralRead(source, row + f);
+    }
+    precise float mean = sum / float(features);
+    precise float variance = 0.0;
+    for (uint f = 0; f < features; ++f) {
+        precise float centered = neuralRead(source, row + f) - mean;
+        variance += centered * centered;
+    }
+    variance /= float(features);
+    precise float inverseDeviation = 1.0 / sqrt(variance + push.layerNormEpsilon);
+
+    precise float sumGrad = 0.0;
+    precise float sumGradNormalized = 0.0;
+    for (uint f = 0; f < features; ++f) {
+        precise float normalized = (neuralRead(source, row + f) - mean) * inverseDeviation;
+        precise float gradNormalized = neuralGradAt(target, row + f) * neuralRead(gain, f);
+        sumGrad += gradNormalized;
+        sumGradNormalized += gradNormalized * normalized;
+    }
+
+    precise float inverseFeatures = 1.0 / float(features);
+    for (uint f = 0; f < features; ++f) {
+        precise float normalized = (neuralRead(source, row + f) - mean) * inverseDeviation;
+        precise float gradNormalized = neuralGradAt(target, row + f) * neuralRead(gain, f);
+        precise float value =
+            inverseDeviation * (gradNormalized - inverseFeatures * sumGrad - inverseFeatures * normalized * sumGradNormalized);
+        neuralSetGrad(source, row + f, neuralGradAt(source, row + f) + value);
+    }
+}

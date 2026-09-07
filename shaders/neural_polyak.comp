@@ -1,0 +1,32 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// 타깃망을 온라인 쪽으로 끌어당긴다. target = tau*online + (1-tau)*target.
+//
+// 둘 다 파라미터 배열 안의 구간이라 버퍼가 하나다(rl_agent 의 배치가 그렇게 잡는다). tau 를 [0,1] 로
+// 자르고 1 이면 대입으로 처리하는 것까지 CPU 기준과 같다 - a + (b-a) 는 두 값의 크기 차가 크면 b 가
+// 되지 않는다.
+//
+// tau == 0 의 이른 반환만은 값으로 뜻이 없다(t + 0*(o-t) 는 t 다). 남는 뜻은 online 이 NaN 일 때 0 을
+// 곱하지 않는다는 것뿐이라 자기 검사가 잡지 못한다 - 동치 돌연변이다.
+layout(local_size_x_id = 0) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.rangeCount) {
+        return;
+    }
+    float tau = clamp(push.tau, 0.0, 1.0);
+    if (tau == 0.0) {
+        return;
+    }
+    uint from = push.rangeBegin + i;
+    uint to = push.targetBegin + i;
+    if (tau == 1.0) {
+        push.parameters.items[to] = push.parameters.items[from];
+        return;
+    }
+    precise float moved = push.parameters.items[to] + tau * (push.parameters.items[from] - push.parameters.items[to]);
+    push.parameters.items[to] = moved;
+}

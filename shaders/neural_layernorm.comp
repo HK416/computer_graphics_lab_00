@@ -1,0 +1,51 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// layernorm 의 순전파. 행마다 평균과 분산을 내어 정규화하고 이득·편향을 얹는다.
+//
+// **행 하나에 스레드 하나**다. 행 안의 합을 여러 스레드로 나눠 트리로 모으면 덧셈 순서가 CPU 기준과
+// 갈린다. 특징 수가 50 안팎(trunk)이라 한 스레드가 훑어도 짧고, 행 수(배치)만큼은 병렬이다.
+//
+// **1.0 / sqrt 를 쓴다.** GLSL 의 inversesqrt 는 규격이 2 ULP 까지 허용하는 근사다. 이 드라이버에서는
+// 마침 결과가 같아 자기 검사가 두 꼴을 가르지 못하지만(동치 돌연변이), 다른 기기에서 갈릴 자리라 보수적인
+// 쪽을 쓴다. sqrt 와 나눗셈도 정확 반올림은 아니어서(각각 3.0, 2.5 ULP) layernorm 은 어차피 CPU 기준과
+// 비트로 같을 수 없다 - 그래서 자기 검사가 이 연산에만 허용치를 둔다.
+layout(local_size_x_id = 0) in;
+
+void main() {
+    Op op = push.ops.items[push.op];
+    if (op.kind != NEURAL_OP_LAYERNORM) {
+        return;
+    }
+    Tensor source = push.tensors.items[op.inputs[0]];
+    Tensor gain = push.tensors.items[op.inputs[1]];
+    Tensor shift = push.tensors.items[op.inputs[2]];
+    Tensor target = push.tensors.items[op.result];
+
+    uint features = source.dims[1];
+    uint n = gl_GlobalInvocationID.x;
+    if (n >= source.dims[0]) {
+        return;
+    }
+    uint row = n * features;
+
+    precise float sum = 0.0;
+    for (uint f = 0; f < features; ++f) {
+        sum += neuralRead(source, row + f);
+    }
+    precise float mean = sum / float(features);
+    precise float variance = 0.0;
+    for (uint f = 0; f < features; ++f) {
+        precise float centered = neuralRead(source, row + f) - mean;
+        variance += centered * centered;
+    }
+    variance /= float(features);
+    precise float inverseDeviation = 1.0 / sqrt(variance + push.layerNormEpsilon);
+
+    for (uint f = 0; f < features; ++f) {
+        precise float value =
+            (neuralRead(source, row + f) - mean) * inverseDeviation * neuralRead(gain, f) + neuralRead(shift, f);
+        neuralWrite(target, row + f, value);
+    }
+}

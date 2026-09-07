@@ -1,0 +1,61 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// layernorm 의 이득·편향 경사. dGain[f] += dy[n][f]*x̂[n][f], dBias[f] += dy[n][f].
+//
+// **특징 하나에 스레드 하나**다. CPU 기준은 행(n)이 바깥 루프라 고정된 f 에 대해 n 오름차순으로 쌓이고,
+// 여기서도 그렇게 훑는다.
+//
+// ponytail: 행 통계를 행마다 다시 낸다(특징 수만큼). 특징이 50 안팎이라 값싸지만, 넓은 layernorm 을
+// 쓰게 되면 통계를 한 번 내어 임시 버퍼에 두는 편이 낫다.
+layout(local_size_x_id = 0) in;
+
+void main() {
+    Op op = push.ops.items[push.op];
+    if (op.kind != NEURAL_OP_LAYERNORM) {
+        return;
+    }
+    Tensor source = push.tensors.items[op.inputs[0]];
+    Tensor gain = push.tensors.items[op.inputs[1]];
+    Tensor shift = push.tensors.items[op.inputs[2]];
+    Tensor target = push.tensors.items[op.result];
+    if (!neuralHasGrad(target)) {
+        return;
+    }
+
+    uint features = source.dims[1];
+    uint batch = source.dims[0];
+    uint f = gl_GlobalInvocationID.x;
+    if (f >= features) {
+        return;
+    }
+
+    precise float gainAcc = neuralGradAt(gain, f);
+    precise float shiftAcc = neuralGradAt(shift, f);
+    for (uint n = 0; n < batch; ++n) {
+        uint row = n * features;
+        precise float sum = 0.0;
+        for (uint k = 0; k < features; ++k) {
+            sum += neuralRead(source, row + k);
+        }
+        precise float mean = sum / float(features);
+        precise float variance = 0.0;
+        for (uint k = 0; k < features; ++k) {
+            precise float centered = neuralRead(source, row + k) - mean;
+            variance += centered * centered;
+        }
+        variance /= float(features);
+        precise float inverseDeviation = 1.0 / sqrt(variance + push.layerNormEpsilon);
+        precise float normalized = (neuralRead(source, row + f) - mean) * inverseDeviation;
+        precise float grad = neuralGradAt(target, row + f);
+        gainAcc += grad * normalized;
+        shiftAcc += grad;
+    }
+    if (neuralHasGrad(gain)) {
+        neuralSetGrad(gain, f, gainAcc);
+    }
+    if (neuralHasGrad(shift)) {
+        neuralSetGrad(shift, f, shiftAcc);
+    }
+}

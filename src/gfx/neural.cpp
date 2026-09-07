@@ -1,10 +1,12 @@
 #include "gfx/neural.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include <spdlog/spdlog.h>
 
+#include "core/error.h"
 #include "gfx/context.h"
 #include "gfx/headless_compute.h"
 #include "gfx/vk_check.h"
@@ -90,7 +92,9 @@ NeuralExecutor::~NeuralExecutor() {
                            &activationBuffer,
                            &activationGradientBuffer,
                            &staging,
-                           &readback}) {
+                           &readback,
+                           &moments[0],
+                           &moments[1]}) {
         destroyBuffer(context, *buffer);
     }
     for (VkPipeline pipeline : {elementwisePipeline,
@@ -101,7 +105,14 @@ NeuralExecutor::~NeuralExecutor() {
                                 convPipeline,
                                 convDxPipeline,
                                 convDwPipeline,
-                                convDbPipeline}) {
+                                convDbPipeline,
+                                layerNormPipeline,
+                                layerNormDxPipeline,
+                                layerNormDparamPipeline,
+                                reducePipeline,
+                                reduceDxPipeline,
+                                adamPipeline,
+                                polyakPipeline}) {
         vkDestroyPipeline(context.device, pipeline, nullptr);
     }
     vkDestroyPipelineLayout(context.device, pipelineLayout, nullptr);
@@ -130,10 +141,20 @@ void NeuralExecutor::createPipelines() {
     convDxPipeline = createComputePipeline(context, pipelineLayout, "neural_conv_dx.comp.spv");
     convDwPipeline = createComputePipeline(context, pipelineLayout, "neural_conv_dw.comp.spv");
     convDbPipeline = createComputePipeline(context, pipelineLayout, "neural_conv_db.comp.spv");
+    layerNormPipeline = createComputePipeline(context, pipelineLayout, "neural_layernorm.comp.spv");
+    layerNormDxPipeline = createComputePipeline(context, pipelineLayout, "neural_layernorm_dx.comp.spv");
+    layerNormDparamPipeline = createComputePipeline(context, pipelineLayout, "neural_layernorm_dparam.comp.spv");
+    reducePipeline = createComputePipeline(context, pipelineLayout, "neural_reduce.comp.spv");
+    reduceDxPipeline = createComputePipeline(context, pipelineLayout, "neural_reduce_dx.comp.spv");
+    adamPipeline = createComputePipeline(context, pipelineLayout, "neural_adam.comp.spv");
+    polyakPipeline = createComputePipeline(context, pipelineLayout, "neural_polyak.comp.spv");
     ready = elementwisePipeline != VK_NULL_HANDLE && linearPipeline != VK_NULL_HANDLE &&
             linearDxPipeline != VK_NULL_HANDLE && linearDwPipeline != VK_NULL_HANDLE &&
             biasGradPipeline != VK_NULL_HANDLE && convPipeline != VK_NULL_HANDLE && convDxPipeline != VK_NULL_HANDLE &&
-            convDwPipeline != VK_NULL_HANDLE && convDbPipeline != VK_NULL_HANDLE;
+            convDwPipeline != VK_NULL_HANDLE && convDbPipeline != VK_NULL_HANDLE &&
+            layerNormPipeline != VK_NULL_HANDLE && layerNormDxPipeline != VK_NULL_HANDLE &&
+            layerNormDparamPipeline != VK_NULL_HANDLE && reducePipeline != VK_NULL_HANDLE &&
+            reduceDxPipeline != VK_NULL_HANDLE && adamPipeline != VK_NULL_HANDLE && polyakPipeline != VK_NULL_HANDLE;
     if (!ready) {
         spdlog::warn("신경망 GPU 실행기를 만들지 못했습니다. CPU 기준만 돕니다");
     }
@@ -152,6 +173,10 @@ bool NeuralExecutor::supported(OpKind kind) {
     case OpKind::CONCAT:
     case OpKind::LINEAR:
     case OpKind::CONV2D:
+    case OpKind::LAYERNORM:
+    case OpKind::MEAN:
+    case OpKind::MSE:
+    case OpKind::HUBER:
         return true;
     default:
         return false;
@@ -172,6 +197,8 @@ bool NeuralExecutor::build(const Graph& source) {
         missing += supported(op.kind) ? 0U : 1U;
     }
 
+    momentFloats[0] = 0;
+    momentFloats[1] = 0;
     for (Buffer* buffer : {&tensorBuffer,
                            &opBuffer,
                            &parameterBuffer,
@@ -179,7 +206,11 @@ bool NeuralExecutor::build(const Graph& source) {
                            &activationBuffer,
                            &activationGradientBuffer,
                            &staging,
-                           &readback}) {
+                           &readback,
+                           &moments[0],
+                           &moments[1]}) {
+        // 모멘트도 함께 버린다. 그러지 않으면 다른 표로 다시 지었을 때 옛 크기의 버퍼가 남아
+        // recordAdam 이 그것을 넘겨 읽는다.
         context.retireBuffer(*buffer);
     }
 
@@ -205,7 +236,7 @@ bool NeuralExecutor::build(const Graph& source) {
     activationGradientBuffer = createDataBuffer(context, activationCount, "신경망 활성 경사");
 
     size_t stagingFloatCount = parameterCount + activationCount * 2;
-    size_t readbackFloatCount = activationCount * 2 + parameterCount;
+    size_t readbackFloatCount = activationCount * 2 + parameterCount * 2;
     staging = createBuffer(context,
                            static_cast<VkDeviceSize>(std::max<size_t>(stagingFloatCount, 1)) * sizeof(float),
                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -228,6 +259,24 @@ void NeuralExecutor::barrier(VkCommandBuffer commandBuffer) {
     memory.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
     memory.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     memory.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &memory;
+    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+}
+
+// 버퍼를 vkCmdFillBuffer 로 지우기 **앞**에 놓는 배리어. 지우기는 전송 단계(CLEAR)라 컴퓨트끼리 거는
+// barrier() 가 줄 세우지 못한다 — 그것 없이는 걸음 k 의 «경사를 0 으로» 가 걸음 k-1 의 역전파 쓰기나
+// 씨앗 복사를 앞질러, 명령 버퍼 하나에 여러 걸음을 담는 순간(자기 검사의 열 걸음이 그렇다) 결과가
+// 비결정적으로 갈린다. 검증 레이어의 동기화 검사가 이것을 WRITE_AFTER_WRITE 로 짚는다.
+void NeuralExecutor::clearBarrier(VkCommandBuffer commandBuffer) {
+    VkMemoryBarrier2 memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    memory.srcStageMask =
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT;
+    memory.srcAccessMask =
+        VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    memory.dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+    memory.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
     VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     dependency.memoryBarrierCount = 1;
     dependency.pMemoryBarriers = &memory;
@@ -263,6 +312,7 @@ void NeuralExecutor::uploadBarrier(VkCommandBuffer commandBuffer) {
 }
 
 void NeuralExecutor::recordClearGradients(VkCommandBuffer commandBuffer) {
+    clearBarrier(commandBuffer);
     vkCmdFillBuffer(commandBuffer, parameterGradientBuffer.handle, 0, VK_WHOLE_SIZE, 0);
     // ponytail: 활성 경사 쪽은 **지금은 지워도 티가 안 난다.** 유일한 부르는 쪽(자기 검사)이 바로 뒤에
     // recordUploadGradientSeed 로 배열 전체를 덮어쓰기 때문이다. 손실 커널이 생겨(8단계) 씨앗을 GPU 가
@@ -280,11 +330,7 @@ void NeuralExecutor::recordClearGradients(VkCommandBuffer commandBuffer) {
     vkCmdPipelineBarrier2(commandBuffer, &dependency);
 }
 
-void NeuralExecutor::dispatchKernel(
-    VkCommandBuffer commandBuffer, VkPipeline pipeline, uint32_t opIndex, uint32_t flags, uint32_t threads) {
-    if (threads == 0) {
-        return;
-    }
+NeuralPushConstants NeuralExecutor::basePush() const {
     NeuralPushConstants push;
     push.tensors = tensorBuffer.address;
     push.ops = opBuffer.address;
@@ -292,6 +338,15 @@ void NeuralExecutor::dispatchKernel(
     push.activations = activationBuffer.address;
     push.parameterGradients = parameterGradientBuffer.address;
     push.activationGradients = activationGradientBuffer.address;
+    return push;
+}
+
+void NeuralExecutor::dispatchKernel(
+    VkCommandBuffer commandBuffer, VkPipeline pipeline, uint32_t opIndex, uint32_t flags, uint32_t threads) {
+    if (threads == 0) {
+        return;
+    }
+    NeuralPushConstants push = basePush();
     push.op = opIndex;
     push.flags = flags;
 
@@ -340,6 +395,22 @@ void NeuralExecutor::dispatch(VkCommandBuffer commandBuffer, uint32_t opIndex, u
             dispatchKernel(commandBuffer, convDwPipeline, opIndex, flags, weight.count());
             dispatchKernel(commandBuffer, convDbPipeline, opIndex, flags, graph.tensors[op.output].dims[1]);
         }
+    } else if (op.kind == OpKind::LAYERNORM) {
+        const Tensor& source = graph.tensors[op.inputs[0]];
+        if (!backward) {
+            dispatchKernel(commandBuffer, layerNormPipeline, opIndex, flags, source.dims[0]);
+        } else {
+            // dx 는 행마다, 이득·편향은 특징마다다. 쓰는 자리가 갈라져 사이에 배리어가 필요 없다.
+            dispatchKernel(commandBuffer, layerNormDxPipeline, opIndex, flags, source.dims[0]);
+            dispatchKernel(commandBuffer, layerNormDparamPipeline, opIndex, flags, source.dims[1]);
+        }
+    } else if (op.kind == OpKind::MEAN || op.kind == OpKind::MSE || op.kind == OpKind::HUBER) {
+        if (!backward) {
+            // 스레드 하나가 통째로 접는다. 덧셈 순서를 CPU 기준과 맞추려는 것이다.
+            dispatchKernel(commandBuffer, reducePipeline, opIndex, flags, 1);
+        } else {
+            dispatchKernel(commandBuffer, reduceDxPipeline, opIndex, flags, graph.tensors[op.inputs[0]].count());
+        }
     } else {
         dispatchKernel(commandBuffer, elementwisePipeline, opIndex, flags, outputCount);
     }
@@ -360,6 +431,117 @@ void NeuralExecutor::recordBackward(VkCommandBuffer commandBuffer) {
     }
 }
 
+bool NeuralExecutor::reserveMoments(uint32_t slot, size_t floats) {
+    if (slot >= 2) {
+        return false;
+    }
+    context.retireBuffer(moments[slot]);
+    moments[slot] = createBuffer(context,
+                                 static_cast<VkDeviceSize>(std::max<size_t>(floats, 1)) * sizeof(float),
+                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                                     VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                 MemoryLocation::DEVICE,
+                                 "신경망 Adam 모멘트");
+    momentFloats[slot] = floats;
+    return true;
+}
+
+void NeuralExecutor::recordClearMoments(VkCommandBuffer commandBuffer, uint32_t slot, float value) {
+    if (slot >= 2 || moments[slot].handle == VK_NULL_HANDLE) {
+        return;
+    }
+    uint32_t pattern = 0;
+    std::memcpy(&pattern, &value, sizeof(pattern));
+    // 앞의 Adam 이 이 버퍼를 읽고 썼을 수도 있고, 자기 검사처럼 **같은 버퍼를 두 번 채우기**도 한다.
+    clearBarrier(commandBuffer);
+    vkCmdFillBuffer(commandBuffer, moments[slot].handle, 0, VK_WHOLE_SIZE, pattern);
+    VkMemoryBarrier2 memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    memory.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+    memory.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    memory.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    memory.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &memory;
+    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+}
+
+void NeuralExecutor::recordAdam(VkCommandBuffer commandBuffer,
+                                uint32_t momentSlot,
+                                uint32_t begin,
+                                uint32_t count,
+                                const AdamSettings& settings,
+                                uint32_t step) {
+    if (momentSlot >= 2 || count == 0 || step == 0) {
+        return;
+    }
+    // **구간이 버퍼 안에 드는지 여기서 본다.** 셰이더는 자기 몫이 어디까지인지 모르고 rangeBegin + i 를
+    // 그대로 쓰므로, 어긋난 구간을 주면 가중치 배열 밖을 조용히 덮어쓴다. 12단계에서 에이전트의 크리틱·
+    // 액터 구간을 따로 밟을 때 정확히 여기가 틀릴 자리다. 걸리면 치명 오류로 세운다 — 조용히 넘기면
+    // «학습이 안 되는데 이유를 모르는» 자리가 된다.
+    if (moments[momentSlot].handle == VK_NULL_HANDLE) {
+        core::fatal("신경망 Adam: 모멘트 슬롯 {} 을 잡지 않았습니다 (reserveMoments 를 먼저 부릅니다)", momentSlot);
+    }
+    if (static_cast<size_t>(begin) + count > parameterCount) {
+        core::fatal("신경망 Adam: 구간 [{}, {}) 이 가중치 {} 개를 넘습니다", begin, begin + count, parameterCount);
+    }
+    if (adamMomentCount(count) > momentFloats[momentSlot]) {
+        core::fatal("신경망 Adam: 모멘트 슬롯 {} 이 float {} 개인데 {} 개가 필요합니다",
+                    momentSlot,
+                    momentFloats[momentSlot],
+                    adamMomentCount(count));
+    }
+    // 편향 보정을 호스트에서 낸다. GLSL 의 pow 는 std::pow 와 근사가 달라, GPU 에서 계산하면 첫 걸음부터
+    // 두 엔진이 갈린다. **CPU 기준과 같은 함수를 부른다** — 두 벌로 두면 한쪽만 고쳐진다.
+    float firstCorrection = 0.0F;
+    float secondCorrection = 0.0F;
+    if (!adamCorrections(settings, step, firstCorrection, secondCorrection)) {
+        return;
+    }
+    NeuralPushConstants push = basePush();
+    push.moments = moments[momentSlot].address;
+    push.rangeBegin = begin;
+    push.rangeCount = count;
+    push.learningRate = settings.learningRate;
+    push.beta1 = settings.beta1;
+    push.beta2 = settings.beta2;
+    push.epsilon = settings.epsilon;
+    push.firstCorrection = firstCorrection;
+    push.secondCorrection = secondCorrection;
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, adamPipeline);
+    vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+    vkCmdDispatch(commandBuffer, (count + NEURAL_GROUP_SIZE - 1) / NEURAL_GROUP_SIZE, 1, 1);
+    barrier(commandBuffer);
+}
+
+void NeuralExecutor::recordPolyak(
+    VkCommandBuffer commandBuffer, uint32_t onlineBegin, uint32_t targetBegin, uint32_t count, float tau) {
+    if (count == 0) {
+        return;
+    }
+    // recordAdam 과 같은 이유로 구간을 확인한다. 이쪽은 구간이 둘이다.
+    if (static_cast<size_t>(onlineBegin) + count > parameterCount ||
+        static_cast<size_t>(targetBegin) + count > parameterCount) {
+        core::fatal("신경망 polyak: 구간 [{}, {}) 또는 [{}, {}) 이 가중치 {} 개를 넘습니다",
+                    onlineBegin,
+                    onlineBegin + count,
+                    targetBegin,
+                    targetBegin + count,
+                    parameterCount);
+    }
+    NeuralPushConstants push = basePush();
+    push.rangeBegin = onlineBegin;
+    push.targetBegin = targetBegin;
+    push.rangeCount = count;
+    push.tau = tau;
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, polyakPipeline);
+    vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+    vkCmdDispatch(commandBuffer, (count + NEURAL_GROUP_SIZE - 1) / NEURAL_GROUP_SIZE, 1, 1);
+    barrier(commandBuffer);
+}
+
 void NeuralExecutor::recordDownload(VkCommandBuffer commandBuffer) {
     VkMemoryBarrier2 memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
     // 컴퓨트가 쓴 것뿐 아니라 **업로드가 쓴 것도** 덮어야 한다. 입력 텐서의 활성은 어느 디스패치도 건드리지
@@ -378,6 +560,7 @@ void NeuralExecutor::recordDownload(VkCommandBuffer commandBuffer) {
     copyRegion(commandBuffer, activationBuffer, 0, readback, 0, activationBytes);
     copyRegion(commandBuffer, parameterGradientBuffer, 0, readback, activationBytes, parameterBytes);
     copyRegion(commandBuffer, activationGradientBuffer, 0, readback, activationBytes + parameterBytes, activationBytes);
+    copyRegion(commandBuffer, parameterBuffer, 0, readback, activationBytes * 2 + parameterBytes, parameterBytes);
 }
 
 void NeuralExecutor::invalidateReadback() {

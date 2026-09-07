@@ -30,9 +30,10 @@ enum class Arena : uint32_t {
 // 갱신하지 않는 것과 타깃망이 경사를 받지 않는 것이 이 비트 하나로 끝난다.
 inline constexpr uint32_t TENSOR_GRAD = 1U << 0;
 
-// layernorm 이 분산에 더하는 값. 분산이 0 인 행에서 나눗셈이 터지지 않게 한다. **GLSL 커널이 생기면
-// 같은 값이어야 한다** — 다르면 순전파가 조용히 갈리고 유한차분으로는 잡을 수 없다(순·역이 같은 값을
-// 쓰기 때문이다). 아직 layernorm 커널은 없다(8단계).
+// layernorm 이 분산에 더하는 값. 분산이 0 인 행에서 나눗셈이 터지지 않게 한다. **GPU 커널도 같은 값을
+// 써야 한다** — 다르면 순전파가 조용히 갈리고 유한차분으로는 잡을 수 없다(순·역이 같은 값을 쓰기
+// 때문이다). 두 벌로 두지 않으려고 GLSL 에는 상수를 두지 않고 푸시 상수로 실어 보낸다
+// (gfx::NeuralPushConstants::layerNormEpsilon).
 inline constexpr float LAYERNORM_EPSILON = 1.0e-5F;
 
 // 텐서 하나. **shaders/neural_common.glsl 의 Tensor 와 배치가 같다** — GPU 도 arena 와 offset 을 그대로
@@ -245,6 +246,13 @@ struct AdamSettings {
 inline size_t adamMomentCount(size_t parameterCount) {
     return parameterCount * 2;
 }
+
+// Adam 의 편향 보정 1 - beta^step. m 과 v 가 0 에서 시작해 초반 몇 걸음이 실제보다 작게 잡히는 것을
+// 되돌린다. **GPU 실행기도 이것을 불러 푸시 상수로 실어 보낸다** — GLSL 의 pow 는 std::pow 와 근사가
+// 달라 GPU 에서 계산하면 첫 걸음부터 두 엔진이 갈린다. 두 벌로 두지 않으려고 여기 하나만 둔다.
+//
+// step 이 0 이거나 보정이 0 이하로 나오면 거짓이다(그 걸음은 밟지 않는다).
+bool adamCorrections(const AdamSettings& settings, uint32_t step, float& first, float& second);
 
 // 한 걸음. step 은 **1부터** 센다(편향 보정이 1 - beta^step 이라 0 이면 0 으로 나눈다).
 //
