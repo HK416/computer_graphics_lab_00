@@ -257,7 +257,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `Options::debugMode`, `RenderSettings::debugMode` (`src/gfx/render_settings.h`) | `DEBUG_MODE_*` (`scene_types.glsl`) |
 | `DebugLineVertex` (`src/gfx/debug_lines.h`), `DebugLinePushConstants` (`src/app/plugins/debug_lines_plugin.cpp`) | 동명 구조체 (`shaders/debug_line_common.glsl`) |
 | `Tensor` `Op` `Arena` `TENSOR_GRAD` (`src/gfx/neural_math.h`), `NeuralPushConstants` `NEURAL_FLAG_BACKWARD` (`src/gfx/neural.h`) | 동명 구조체·`NEURAL_ARENA_*` `NEURAL_TENSOR_GRAD` (`shaders/neural_common.glsl`) — `OpKind` 와 `Arena` 는 **번호**가 `NEURAL_OP_*` `NEURAL_ARENA_*` 와 같아야 하고, GLSL 의 `Op::result` 는 C++ 의 `output` 이다(예약어) |
-| 원소별 연산의 순·역전파 (`forwardImpl`·`backwardFrom`, `src/gfx/neural_math.cpp`) | 같은 갈래 (`shaders/neural_elementwise.comp`) — 알고리즘이 두 벌이라 한쪽을 고치면 다른 쪽도 같은 순서로 고친다. `--neural-selfcheck` 가 두 답을 견준다 |
+| 연산의 순·역전파 (`forwardImpl`·`backwardFrom`, `src/gfx/neural_math.cpp`) | 같은 갈래 (`shaders/neural_elementwise.comp`, `neural_linear*.comp`, `neural_bias_grad.comp`) — 알고리즘이 두 벌이라 한쪽을 고치면 다른 쪽도 **같은 순서로** 고친다. 누산 순서까지 같아야 두 엔진이 비트로 같고, 그래서 GLSL 쪽 누산기에는 `precise` 를 붙여 FMA 축약을 막는다. `--neural-selfcheck` 가 견준다 |
 
 전부 `scalar` 레이아웃이다.
 

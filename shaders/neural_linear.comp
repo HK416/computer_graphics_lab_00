@@ -1,0 +1,40 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// 선형 층의 순전파. y[n][m] = b[m] + sum_k w[m][k] * x[n][k].
+//
+// **출력 원소 하나에 스레드 하나**이고 k 를 CPU 기준과 같은 순서로 훑는다. 타일링으로 k 를 쪼개 부분합을
+// 모으면 대역폭은 아끼지만 덧셈 순서가 바뀌어 두 엔진이 비트로 갈린다. 지금 단계에서 더 값진 것은
+// «정확히 같다» 는 검증이라 순서를 지키는 쪽을 골랐다.
+//
+// ponytail: 그래서 x 와 w 를 shared 로 모아 두지 않는다. 39,200 -> 50 인 trunk 에서는 이것이 그대로
+// 대역폭 병목이 된다. 9단계의 협력 행렬 변종이 그 자리를 맡고, 그쪽은 순서가 달라 허용 오차를 따로 둔다.
+layout(local_size_x_id = 0) in;
+
+void main() {
+    Op op = push.ops.items[push.op];
+    if (op.kind != NEURAL_OP_LINEAR) {
+        return;
+    }
+    Tensor source = push.tensors.items[op.inputs[0]];
+    Tensor weight = push.tensors.items[op.inputs[1]];
+    Tensor bias = push.tensors.items[op.inputs[2]];
+    Tensor target = push.tensors.items[op.result];
+
+    uint batch = source.dims[0];
+    uint inputs = source.dims[1];
+    uint outputs = target.dims[1];
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= batch * outputs) {
+        return;
+    }
+    uint n = i / outputs;
+    uint m = i - n * outputs;
+
+    precise float sum = neuralRead(bias, m);
+    for (uint k = 0; k < inputs; ++k) {
+        sum += neuralRead(weight, m * inputs + k) * neuralRead(source, n * inputs + k);
+    }
+    neuralWrite(target, i, sum);
+}

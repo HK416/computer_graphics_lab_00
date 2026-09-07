@@ -93,7 +93,10 @@ NeuralExecutor::~NeuralExecutor() {
                            &readback}) {
         destroyBuffer(context, *buffer);
     }
-    vkDestroyPipeline(context.device, elementwisePipeline, nullptr);
+    for (VkPipeline pipeline :
+         {elementwisePipeline, linearPipeline, linearDxPipeline, linearDwPipeline, biasGradPipeline}) {
+        vkDestroyPipeline(context.device, pipeline, nullptr);
+    }
     vkDestroyPipelineLayout(context.device, pipelineLayout, nullptr);
 }
 
@@ -112,7 +115,13 @@ void NeuralExecutor::createPipelines() {
     VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &pipelineLayout));
 
     elementwisePipeline = createComputePipeline(context, pipelineLayout, "neural_elementwise.comp.spv");
-    ready = elementwisePipeline != VK_NULL_HANDLE;
+    linearPipeline = createComputePipeline(context, pipelineLayout, "neural_linear.comp.spv");
+    linearDxPipeline = createComputePipeline(context, pipelineLayout, "neural_linear_dx.comp.spv");
+    linearDwPipeline = createComputePipeline(context, pipelineLayout, "neural_linear_dw.comp.spv");
+    biasGradPipeline = createComputePipeline(context, pipelineLayout, "neural_bias_grad.comp.spv");
+    ready = elementwisePipeline != VK_NULL_HANDLE && linearPipeline != VK_NULL_HANDLE &&
+            linearDxPipeline != VK_NULL_HANDLE && linearDwPipeline != VK_NULL_HANDLE &&
+            biasGradPipeline != VK_NULL_HANDLE;
     if (!ready) {
         spdlog::warn("신경망 GPU 실행기를 만들지 못했습니다. CPU 기준만 돕니다");
     }
@@ -128,6 +137,8 @@ bool NeuralExecutor::supported(OpKind kind) {
     case OpKind::MUL:
     case OpKind::SCALE:
     case OpKind::MIN2:
+    case OpKind::CONCAT:
+    case OpKind::LINEAR:
         return true;
     default:
         return false;
@@ -256,9 +267,9 @@ void NeuralExecutor::recordClearGradients(VkCommandBuffer commandBuffer) {
     vkCmdPipelineBarrier2(commandBuffer, &dependency);
 }
 
-void NeuralExecutor::dispatch(VkCommandBuffer commandBuffer, uint32_t opIndex, uint32_t flags) {
-    const Op& op = graph.ops[opIndex];
-    if (op.kind == OpKind::INPUT || !supported(op.kind)) {
+void NeuralExecutor::dispatchKernel(
+    VkCommandBuffer commandBuffer, VkPipeline pipeline, uint32_t opIndex, uint32_t flags, uint32_t threads) {
+    if (threads == 0) {
         return;
     }
     NeuralPushConstants push;
@@ -271,10 +282,39 @@ void NeuralExecutor::dispatch(VkCommandBuffer commandBuffer, uint32_t opIndex, u
     push.op = opIndex;
     push.flags = flags;
 
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, elementwisePipeline);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-    uint32_t count = graph.tensors[op.output].count();
-    vkCmdDispatch(commandBuffer, (count + NEURAL_GROUP_SIZE - 1) / NEURAL_GROUP_SIZE, 1, 1);
+    vkCmdDispatch(commandBuffer, (threads + NEURAL_GROUP_SIZE - 1) / NEURAL_GROUP_SIZE, 1, 1);
+}
+
+void NeuralExecutor::dispatch(VkCommandBuffer commandBuffer, uint32_t opIndex, uint32_t flags) {
+    const Op& op = graph.ops[opIndex];
+    if (op.kind == OpKind::INPUT || !supported(op.kind)) {
+        return;
+    }
+    bool backward = (flags & NEURAL_FLAG_BACKWARD) != 0;
+    uint32_t outputCount = graph.tensors[op.output].count();
+
+    if (op.kind == OpKind::LINEAR) {
+        const Tensor& input = graph.tensors[op.inputs[0]];
+        uint32_t batch = input.dims[0];
+        uint32_t inputs = input.dims[1];
+        uint32_t outputs = graph.tensors[op.output].dims[1];
+        if (!backward) {
+            dispatchKernel(commandBuffer, linearPipeline, opIndex, flags, batch * outputs);
+        } else {
+            // 셋이 서로 다른 자리에 쓰므로 사이에 배리어를 두지 않는다 — 다음 연산으로 넘어가기
+            // 전에 아래에서 한 번만 건다. 겹치지 않는 근거는 **입력·가중치·편향이 서로 다른 텐서**이고
+            // 연산의 출력은 입력보다 뒤에 잡히기 때문이다. 같은 텐서를 두 자리에 준 표(addLinear(t, t, b))
+            // 는 그 근거를 깨지만 빌더가 낼 수 있는 모양이 아니고, 우리 그래프에도 없다.
+            // ponytail: validateForward 가 그것을 거절하지는 않는다. 표를 파일에서 읽게 되면 막아야 한다.
+            dispatchKernel(commandBuffer, linearDxPipeline, opIndex, flags, batch * inputs);
+            dispatchKernel(commandBuffer, linearDwPipeline, opIndex, flags, outputs * inputs);
+            dispatchKernel(commandBuffer, biasGradPipeline, opIndex, flags, outputs);
+        }
+    } else {
+        dispatchKernel(commandBuffer, elementwisePipeline, opIndex, flags, outputCount);
+    }
     // ponytail: 연산마다 배리어를 하나씩 건다. 서로 닿지 않는 연산끼리도 줄을 세우는 셈이라(갈래가 갈린
     // 구간이 그렇다) 손해지만, 표만 보고 «겹쳐도 되는 구간» 을 가리려면 의존 그래프를 따로 세워야 한다.
     barrier(commandBuffer);

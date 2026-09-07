@@ -34,6 +34,11 @@ bool sameShape(const Tensor& a, const Tensor& b) {
     return a.dims[0] == b.dims[0] && a.dims[1] == b.dims[1] && a.dims[2] == b.dims[2] && a.dims[3] == b.dims[3];
 }
 
+// 두 텐서가 같은 저장소를 나눠 쓰는가. addReshape 로 만든 뷰가 그렇고, 같은 텐서를 두 번 준 경우도 그렇다.
+bool overlaps(const Tensor& a, const Tensor& b) {
+    return a.arena == b.arena && a.offset < b.offset + b.count() && b.offset < a.offset + a.count();
+}
+
 // 텐서의 값이 사는 배열과 첫 첨자. 경사는 같은 배치의 다른 배열이라 오프셋이 같다.
 template <typename T> const T* readTensor(const Tensor& tensor, const T* parameters, const T* activations) {
     return (tensor.arena == Arena::PARAMETER ? parameters : activations) + tensor.offset;
@@ -302,6 +307,12 @@ uint32_t GraphBuilder::addConcat(uint32_t a, uint32_t b) {
     // (배치, 특징) 끼리만 잇는다. 배치가 같아야 한다.
     if (first.dims[0] != second.dims[0] || first.dims[2] != 1 || first.dims[3] != 1 || second.dims[2] != 1 ||
         second.dims[3] != 1) {
+        return NO_TENSOR;
+    }
+    // **두 조각이 같은 저장소를 나눠 쓰면 안 된다.** 이음은 스레드가 «자기 첨자가 아닌 자리» 에 쓰는
+    // 유일한 연산이라(f 가 경계를 넘으면 둘째 조각의 다른 첨자가 된다), 겹쳐 있으면 GPU 에서 두 스레드가
+    // 같은 칸을 동시에 읽고 써 경사 하나를 잃는다. CPU 는 순서대로 돌아 둘 다 더하므로 답이 갈린다.
+    if (overlaps(first, second)) {
         return NO_TENSOR;
     }
     uint32_t output = allocate(Arena::ACTIVATION, first.dims[0], first.dims[1] + second.dims[1], 1, 1, TENSOR_GRAD);
@@ -622,6 +633,11 @@ bool validateForward(const Graph& graph) {
             break;
         default:
             break;
+        }
+        // 이음의 두 조각이 겹치면 GPU 에서 경사 하나를 잃는다(addConcat 의 주석 참고). 빌더는 이미
+        // 막지만 손으로 짓거나 파일에서 읽은 표는 여기서 건다.
+        if (op.kind == OpKind::CONCAT && overlaps(graph.tensors[op.inputs[0]], graph.tensors[op.inputs[1]])) {
+            return false;
         }
         // 접는 연산은 출력이 스칼라다. 아니면 순전파가 y[0] 에만 쓰고 나머지는 지난 프레임의 값으로
         // 남아, 다음 연산이 쓰레기를 읽는다.

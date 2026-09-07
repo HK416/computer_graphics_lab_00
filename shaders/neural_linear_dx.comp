@@ -1,0 +1,39 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// 선형 층의 입력 경사. dx[n][k] += sum_m dy[n][m] * w[m][k].
+//
+// 출력 원소 하나에 스레드 하나이고 **이미 들어 있던 값에서 출발해** m 을 CPU 기준과 같은 순서로 더한다.
+// 한 번에 모아 마지막에 한 번 더하면 ((v+c0)+c1)+... 이 v+(c0+c1+...) 가 되어 반올림이 갈린다.
+layout(local_size_x_id = 0) in;
+
+void main() {
+    Op op = push.ops.items[push.op];
+    if (op.kind != NEURAL_OP_LINEAR) {
+        return;
+    }
+    Tensor source = push.tensors.items[op.inputs[0]];
+    Tensor weight = push.tensors.items[op.inputs[1]];
+    Tensor target = push.tensors.items[op.result];
+    // 출력이 경사를 받지 않으면 그 위쪽은 통째로 끊긴 것이다.
+    if (!neuralHasGrad(target) || !neuralHasGrad(source)) {
+        return;
+    }
+
+    uint batch = source.dims[0];
+    uint inputs = source.dims[1];
+    uint outputs = target.dims[1];
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= batch * inputs) {
+        return;
+    }
+    uint n = i / inputs;
+    uint k = i - n * inputs;
+
+    precise float acc = neuralGradAt(source, i);
+    for (uint m = 0; m < outputs; ++m) {
+        acc += neuralGradAt(target, n * outputs + m) * neuralRead(weight, m * inputs + k);
+    }
+    neuralSetGrad(source, i, acc);
+}

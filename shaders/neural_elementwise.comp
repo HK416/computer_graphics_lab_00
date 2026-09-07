@@ -29,27 +29,38 @@ void main() {
     bool backward = (push.flags & NEURAL_FLAG_BACKWARD) != 0u;
 
     if (!backward) {
-        float x = neuralRead(first, i);
+        // 값 읽기를 갈래 안에 둔다. 이음은 i 가 **출력** 원소를 세므로 first 의 범위를 넘는다 — 밖에서
+        // 미리 읽으면 첫째 조각이 파라미터인 이음에서 파라미터 버퍼 밖을 읽는다.
         float y = 0.0;
         switch (op.kind) {
         case NEURAL_OP_RELU:
-            y = max(x, 0.0);
+            y = max(neuralRead(first, i), 0.0);
             break;
         case NEURAL_OP_TANH:
-            y = tanh(x);
+            y = tanh(neuralRead(first, i));
             break;
         case NEURAL_OP_SCALE:
-            y = x * op.fparams[0];
+            y = neuralRead(first, i) * op.fparams[0];
             break;
         case NEURAL_OP_ADD:
-            y = x + neuralRead(push.tensors.items[op.inputs[1]], i);
+            y = neuralRead(first, i) + neuralRead(push.tensors.items[op.inputs[1]], i);
             break;
         case NEURAL_OP_MUL:
-            y = x * neuralRead(push.tensors.items[op.inputs[1]], i);
+            y = neuralRead(first, i) * neuralRead(push.tensors.items[op.inputs[1]], i);
             break;
         case NEURAL_OP_MIN2:
-            y = min(x, neuralRead(push.tensors.items[op.inputs[1]], i));
+            y = min(neuralRead(first, i), neuralRead(push.tensors.items[op.inputs[1]], i));
             break;
+        case NEURAL_OP_CONCAT: {
+            // 출력 원소 하나가 두 조각 중 한 자리에서만 온다. 그래서 원소별과 같은 꼴로 돈다.
+            Tensor second = push.tensors.items[op.inputs[1]];
+            uint width = first.dims[1] + second.dims[1];
+            uint n = i / width;
+            uint f = i - n * width;
+            y = f < first.dims[1] ? neuralRead(first, n * first.dims[1] + f)
+                                  : neuralRead(second, n * second.dims[1] + (f - first.dims[1]));
+            break;
+        }
         }
         neuralWrite(target, i, y);
         return;
@@ -60,7 +71,7 @@ void main() {
     if (!neuralHasGrad(target)) {
         return;
     }
-    float dy = neuralReadGrad(target, i);
+    float dy = neuralGradAt(target, i);
     switch (op.kind) {
     case NEURAL_OP_RELU:
         // **전활성값의 부호**로 마스킹한다. y = max(x, 0) 이라 출력으로 판정해도 같지만, 정의를 그대로
@@ -69,7 +80,10 @@ void main() {
         break;
     case NEURAL_OP_TANH: {
         float y = neuralRead(target, i);
-        neuralAddGrad(first, i, dy * (1.0 - y * y));
+        // 1 - y*y 도 precise 여야 한다. 여기만 남겨 두면 컴파일러가 FMA 로 합쳐, tanh 의 오차에 «근사가
+        // 다르다» 말고 «축약이 다르다» 라는 변수가 하나 더 섞인다.
+        precise float slope = 1.0 - y * y;
+        neuralAddGrad(first, i, dy * slope);
         break;
     }
     case NEURAL_OP_SCALE:
@@ -93,6 +107,18 @@ void main() {
             neuralAddGrad(first, i, dy);
         } else {
             neuralAddGrad(second, i, dy);
+        }
+        break;
+    }
+    case NEURAL_OP_CONCAT: {
+        Tensor second = push.tensors.items[op.inputs[1]];
+        uint width = first.dims[1] + second.dims[1];
+        uint n = i / width;
+        uint f = i - n * width;
+        if (f < first.dims[1]) {
+            neuralAddGrad(first, n * first.dims[1] + f, dy);
+        } else {
+            neuralAddGrad(second, n * second.dims[1] + (f - first.dims[1]), dy);
         }
         break;
     }

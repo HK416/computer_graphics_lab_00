@@ -92,6 +92,9 @@ private:
     void createPipelines();
     void uploadBarrier(VkCommandBuffer commandBuffer);
     void dispatch(VkCommandBuffer commandBuffer, uint32_t opIndex, uint32_t flags);
+    // 파이프라인 하나를 threads 개 스레드로 돈다. 푸시 상수는 연산 번호와 방향만 다르다.
+    void dispatchKernel(
+        VkCommandBuffer commandBuffer, VkPipeline pipeline, uint32_t opIndex, uint32_t flags, uint32_t threads);
     void barrier(VkCommandBuffer commandBuffer);
 
     Context& context;
@@ -104,6 +107,12 @@ private:
 
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipeline elementwisePipeline = VK_NULL_HANDLE;
+    // 선형 층은 방향마다 커널이 다르다. 순전파는 출력 원소마다, 역전파는 dx·dw·db 셋이 각자의 출력
+    // 원소마다 스레드 하나씩이라 디스패치 크기가 전부 다르기 때문이다.
+    VkPipeline linearPipeline = VK_NULL_HANDLE;
+    VkPipeline linearDxPipeline = VK_NULL_HANDLE;
+    VkPipeline linearDwPipeline = VK_NULL_HANDLE;
+    VkPipeline biasGradPipeline = VK_NULL_HANDLE;
 
     Buffer tensorBuffer;
     Buffer opBuffer;

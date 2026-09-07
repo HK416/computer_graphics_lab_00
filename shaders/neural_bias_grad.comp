@@ -1,0 +1,37 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// 선형 층의 편향 경사. db[m] += sum_n dy[n][m].
+//
+// 편향 원소 하나에 스레드 하나다. 출력 폭이 좁으면(크리틱의 마지막 층은 1 이다) 스레드가 하나뿐이지만,
+// 배치도 짧아 그 자리가 병목이 되지는 않는다.
+layout(local_size_x_id = 0) in;
+
+void main() {
+    Op op = push.ops.items[push.op];
+    if (op.kind != NEURAL_OP_LINEAR) {
+        return;
+    }
+    Tensor source = push.tensors.items[op.inputs[0]];
+    Tensor bias = push.tensors.items[op.inputs[2]];
+    Tensor target = push.tensors.items[op.result];
+    if (!neuralHasGrad(target) || !neuralHasGrad(bias)) {
+        return;
+    }
+
+    // 배치는 **입력**에서 읽는다. 나머지 세 커널과 CPU 기준이 그렇게 하므로, 손으로 지은 표에서 두 값이
+    // 갈릴 때 여기만 다르게 도는 일이 없어야 한다.
+    uint batch = source.dims[0];
+    uint outputs = target.dims[1];
+    uint m = gl_GlobalInvocationID.x;
+    if (m >= outputs) {
+        return;
+    }
+
+    precise float acc = neuralGradAt(bias, m);
+    for (uint n = 0; n < batch; ++n) {
+        acc += neuralGradAt(target, n * outputs + m);
+    }
+    neuralSetGrad(bias, m, acc);
+}

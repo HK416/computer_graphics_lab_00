@@ -142,6 +142,8 @@ public:
     uint32_t addLayerNorm(uint32_t input, uint32_t gain, uint32_t bias);
     uint32_t addAdd(uint32_t a, uint32_t b);
     uint32_t addMul(uint32_t a, uint32_t b);
+    // 특징 축으로 잇는다. **두 조각이 같은 저장소를 나눠 쓰면 거절한다** — GPU 이음은 스레드가 자기
+    // 첨자가 아닌 자리에 쓰는 유일한 연산이라, 겹쳐 있으면 두 스레드가 같은 칸을 동시에 고쳐 경사를 잃는다.
     uint32_t addConcat(uint32_t a, uint32_t b);
     uint32_t addScale(uint32_t input, float factor);
     uint32_t addMean(uint32_t input);

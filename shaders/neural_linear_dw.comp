@@ -1,0 +1,37 @@
+#version 460
+
+#include "neural_common.glsl"
+
+// 선형 층의 가중치 경사. dw[m][k] += sum_n dy[n][m] * x[n][k].
+//
+// 가중치 원소 하나에 스레드 하나다. 배치를 훑는 순서가 CPU 기준과 같아야 반올림까지 같다.
+layout(local_size_x_id = 0) in;
+
+void main() {
+    Op op = push.ops.items[push.op];
+    if (op.kind != NEURAL_OP_LINEAR) {
+        return;
+    }
+    Tensor source = push.tensors.items[op.inputs[0]];
+    Tensor weight = push.tensors.items[op.inputs[1]];
+    Tensor target = push.tensors.items[op.result];
+    if (!neuralHasGrad(target) || !neuralHasGrad(weight)) {
+        return;
+    }
+
+    uint batch = source.dims[0];
+    uint inputs = source.dims[1];
+    uint outputs = target.dims[1];
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= outputs * inputs) {
+        return;
+    }
+    uint m = i / inputs;
+    uint k = i - m * inputs;
+
+    precise float acc = neuralGradAt(weight, i);
+    for (uint n = 0; n < batch; ++n) {
+        acc += neuralGradAt(target, n * outputs + m) * neuralRead(source, n * inputs + k);
+    }
+    neuralSetGrad(weight, i, acc);
+}

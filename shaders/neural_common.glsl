@@ -93,14 +93,26 @@ float neuralRead(Tensor tensor, uint index) {
     return push.activations.items[tensor.offset + index];
 }
 
-// 연산의 **출력은 늘 활성**이다(validateForward 가 파라미터에 쓰는 표를 거절한다). 그래서 아래 둘은
+// 연산의 **출력은 늘 활성**이다(validateForward 가 파라미터에 쓰는 표를 거절한다). 그래서 값 쓰기는
 // 활성만 본다 — 파라미터 갈래를 두면 한 번도 밟지 않는 죽은 코드가 된다.
 void neuralWrite(Tensor tensor, uint index, float value) {
     push.activations.items[tensor.offset + index] = value;
 }
 
-float neuralReadGrad(Tensor tensor, uint index) {
+// 경사는 두 arena 를 다 본다. 가중치·편향의 경사가 파라미터 쪽에 쌓이기 때문이다.
+float neuralGradAt(Tensor tensor, uint index) {
+    if (tensor.arena == NEURAL_ARENA_PARAMETER) {
+        return push.parameterGradients.items[tensor.offset + index];
+    }
     return push.activationGradients.items[tensor.offset + index];
+}
+
+void neuralSetGrad(Tensor tensor, uint index, float value) {
+    if (tensor.arena == NEURAL_ARENA_PARAMETER) {
+        push.parameterGradients.items[tensor.offset + index] = value;
+        return;
+    }
+    push.activationGradients.items[tensor.offset + index] = value;
 }
 
 // 경사를 **더한다.** 갈래가 여럿이어도 되도록 누적이다.
@@ -108,17 +120,20 @@ float neuralReadGrad(Tensor tensor, uint index) {
 // 원자 연산이 필요 없는 근거는 «갈래가 연산 사이에서만 갈린다» 가 아니라 **별칭이 오프셋을 공유한다**
 // 는 것이다. addReshape 가 offset 을 그대로 물려주므로 같은 저장소를 가리키는 텐서들은 첨자까지 같고,
 // 스레드 i 는 어느 별칭으로 보든 offset+i 만 만진다. 두 입력이 같은 텐서인 연산(add(t, t))도 한 스레드
-// 안에서 두 번 더하므로 2*dy 가 되어 CPU 기준과 같다. addReshape 가 오프셋을 옮기게 바뀌면 이 근거가
-// 무너진다 — validateForward 는 텐서 저장소가 겹치는지 보지 않는다.
+// 안에서 두 번 더하므로 2*dy 가 되어 CPU 기준과 같다.
+//
+// **이음만 예외다.** 첨자를 옮겨 쓰는 유일한 연산이라 두 조각이 겹치면 서로 다른 스레드가 같은 칸을
+// 고친다. 그래서 addConcat 과 validateForward 가 겹치는 조각을 아예 거절한다. addReshape 가 오프셋을
+// 옮기게 바뀌거나 첨자를 옮기는 연산이 더 생기면 이 근거를 다시 세워야 한다.
 void neuralAddGrad(Tensor tensor, uint index, float value) {
     if (!neuralHasGrad(tensor)) {
         return;
     }
-    if (tensor.arena == NEURAL_ARENA_PARAMETER) {
-        push.parameterGradients.items[tensor.offset + index] += value;
-        return;
-    }
-    push.activationGradients.items[tensor.offset + index] += value;
+    // **precise 가 없으면 컴파일러가 a + b*c 를 FMA 하나로 합친다.** 그러면 곱의 중간 반올림이 사라져
+    // CPU 기준과 1 ULP 씩 갈리고, «원소별은 정확히 0» 이라는 자기 검사의 근거가 무너진다. 성능을 조금
+    // 내주고 두 엔진이 같은 답을 내는 쪽을 골랐다.
+    precise float sum = neuralGradAt(tensor, index) + value;
+    neuralSetGrad(tensor, index, sum);
 }
 
 #endif

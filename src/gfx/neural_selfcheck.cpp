@@ -182,6 +182,122 @@ Case makeSharedParameter() {
     return item;
 }
 
+// 선형 층. **세 축을 모두 다르게** 잡는다(배치 5, 입력 7, 출력 3). 전치나 첨자 밀림은 두 축이 같으면
+// 우연히 같은 자리를 가리켜 드러나지 않는다.
+//
+// 뒤에 층을 하나 더 얹어 dx 가 실제로 쓰이게 한다. 마지막 층의 dx 는 아무 파라미터에도 닿지 않아, 층이
+// 하나뿐이면 «입력에 대한 경사» 가 통째로 검사되지 않는다.
+Case makeLinear() {
+    Case item;
+    item.name = "linear";
+    GraphBuilder builder(item.graph);
+    uint32_t input = builder.addInput(5, 7, 1, 1);
+    uint32_t weight = builder.addParameter(3, 7, 1, 1);
+    uint32_t bias = builder.addParameter(3, 1, 1, 1);
+    uint32_t hidden = builder.addLinear(input, weight, bias);
+    uint32_t secondWeight = builder.addParameter(2, 3, 1, 1);
+    uint32_t secondBias = builder.addParameter(2, 1, 1, 1);
+    builder.addLinear(hidden, secondWeight, secondBias);
+    item.inputs = {input};
+    return item;
+}
+
+// 크리틱이 (특징, 행동) 을 잇는 자리. 두 조각의 폭이 달라야 경계가 드러나고, **둘 다 학습하는 층에서
+// 와야** 두 조각의 경사가 모두 검사된다.
+Case makeConcat() {
+    Case item;
+    item.name = "concat";
+    GraphBuilder builder(item.graph);
+    uint32_t input = builder.addInput(4, 6, 1, 1);
+    uint32_t leftWeight = builder.addParameter(5, 6, 1, 1);
+    uint32_t leftBias = builder.addParameter(5, 1, 1, 1);
+    uint32_t left = builder.addLinear(input, leftWeight, leftBias);
+    uint32_t rightWeight = builder.addParameter(2, 6, 1, 1);
+    uint32_t rightBias = builder.addParameter(2, 1, 1, 1);
+    // 근사가 갈리는 tanh 대신 ReLU 를 쓴다. 이음도 «정확히 0» 계약 안에 두려는 것이다.
+    uint32_t right = builder.addRelu(builder.addLinear(input, rightWeight, rightBias));
+    uint32_t joined = builder.addConcat(left, right);
+    uint32_t headWeight = builder.addParameter(3, 7, 1, 1);
+    uint32_t headBias = builder.addParameter(3, 1, 1, 1);
+    builder.addLinear(joined, headWeight, headBias);
+    item.inputs = {input};
+    return item;
+}
+
+// **작업 그룹 하나보다 큰 층.** 지금까지의 선형 경우는 가중치가 300 개보다 작아 전부 한 그룹에 들어가고,
+// 그러면 디스패치 수를 줄여도 남는 스레드가 어차피 범위 밖이라 티가 나지 않는다. 세 커널의 스레드 수
+// (배치x출력, 배치x입력, 출력x입력)가 모두 그룹 크기(128)를 넘게 잡는다.
+Case makeWideLinear() {
+    Case item;
+    item.name = "wide linear";
+    GraphBuilder builder(item.graph);
+    uint32_t input = builder.addInput(9, 20, 1, 1);
+    uint32_t weight = builder.addParameter(15, 20, 1, 1);
+    uint32_t bias = builder.addParameter(15, 1, 1, 1);
+    uint32_t hidden = builder.addRelu(builder.addLinear(input, weight, bias));
+    uint32_t headWeight = builder.addParameter(2, 15, 1, 1);
+    uint32_t headBias = builder.addParameter(2, 1, 1, 1);
+    builder.addLinear(hidden, headWeight, headBias);
+    item.inputs = {input};
+    return item;
+}
+
+// **가중치 하나를 두 선형 층이 나눠 쓴다.** 그러지 않으면 dW·dB 의 «이미 들어 있던 값에서 출발한다» 가
+// 검사되지 않는다 — 경사가 0 에서 시작해 한 번만 쓰이면 0 + s 와 s + 0 이 비트까지 같기 때문이다.
+// 연산 표를 쓰는 이유 자체가 «같은 가중치에 여러 갈래의 경사를 누적» 이므로 그 자리를 밟아 둔다.
+Case makeSharedLinear() {
+    Case item;
+    item.name = "shared layer";
+    GraphBuilder builder(item.graph);
+    uint32_t input = builder.addInput(4, 5, 1, 1);
+    uint32_t weight = builder.addParameter(3, 5, 1, 1);
+    uint32_t bias = builder.addParameter(3, 1, 1, 1);
+    uint32_t left = builder.addLinear(input, weight, bias);
+    uint32_t shiftWeight = builder.addParameter(5, 5, 1, 1);
+    uint32_t shiftBias = builder.addParameter(5, 1, 1, 1);
+    uint32_t shifted = builder.addRelu(builder.addLinear(input, shiftWeight, shiftBias));
+    // 같은 (weight, bias) 를 다른 입력에 한 번 더 태운다.
+    uint32_t right = builder.addLinear(shifted, weight, bias);
+    builder.addAdd(left, right);
+    item.inputs = {input};
+    return item;
+}
+
+// **얼려 둔 가중치와 편향.** 층은 살아 있어 경사가 지나가지만 그 파라미터는 갱신하지 않는 경우다. GPU
+// 커널의 neuralHasGrad(weight) / neuralHasGrad(bias) 가드가 여기서만 일한다 — 없으면 GPU 는 얼린 자리에
+// 쓰고 CPU 는 0 으로 두어 갈린다. 파라미터를 입력으로 받는 층도 함께 둔다(경사가 파라미터 arena 로
+// 흘러야 하는 유일한 자리다).
+Case makeFrozenLinear() {
+    Case item;
+    item.name = "frozen w";
+    GraphBuilder builder(item.graph);
+    uint32_t input = builder.addInput(4, 5, 1, 1);
+    uint32_t frozenWeight = builder.addParameter(3, 5, 1, 1);
+    uint32_t liveBias = builder.addParameter(3, 1, 1, 1);
+    builder.detach(frozenWeight);
+    uint32_t first = builder.addLinear(input, frozenWeight, liveBias);
+
+    uint32_t liveWeight = builder.addParameter(2, 3, 1, 1);
+    uint32_t frozenBias = builder.addParameter(2, 1, 1, 1);
+    builder.detach(frozenBias);
+    uint32_t second = builder.addLinear(first, liveWeight, frozenBias);
+
+    // 학습하는 상수 벡터를 입력으로 받는 층. dx 가 파라미터 경사 쪽에 쌓인다.
+    uint32_t constant = builder.addParameter(1, 4, 1, 1);
+    uint32_t constantWeight = builder.addParameter(2, 4, 1, 1);
+    uint32_t constantBias = builder.addParameter(2, 1, 1, 1);
+    uint32_t fromConstant = builder.addLinear(constant, constantWeight, constantBias);
+    uint32_t view = builder.addReshape(fromConstant, 1, 2, 1, 1);
+    uint32_t narrowed = builder.addReshape(second, 4, 2, 1, 1);
+    uint32_t headWeight = builder.addParameter(1, 2, 1, 1);
+    uint32_t headBias = builder.addParameter(1, 1, 1, 1);
+    uint32_t left = builder.addLinear(narrowed, headWeight, headBias);
+    uint32_t right = builder.addLinear(view, headWeight, headBias);
+    builder.addAdd(left, builder.addReshape(builder.addScale(right, 1.0F), 1, 1, 1, 1));
+    item.inputs = {input};
+    return item;
+}
+
 // 값과 씨앗을 씨앗 번호에서 만든다. 0 근처만 보면 ReLU 와 min 의 갈림을 못 밟는다.
 void fill(std::vector<float>& values, uint64_t seed) {
     for (size_t i = 0; i < values.size(); ++i) {
@@ -220,6 +336,11 @@ bool runNeuralSelfCheck() {
     cases.push_back(makeFourDimensional());
     cases.push_back(makeAliased());
     cases.push_back(makeSharedParameter());
+    cases.push_back(makeLinear());
+    cases.push_back(makeConcat());
+    cases.push_back(makeWideLinear());
+    cases.push_back(makeSharedLinear());
+    cases.push_back(makeFrozenLinear());
 
     std::printf("신경망 자기 검사 (CPU 기준 대 GPU)\n");
     std::printf("  %-12s %10s %10s %10s\n", "연산", "활성", "파라미터 경사", "활성 경사");

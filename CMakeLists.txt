@@ -127,6 +127,10 @@ set(shader_sources
     shaders/cloth_finish.comp
     shaders/cloth_write.comp
     shaders/neural_elementwise.comp
+    shaders/neural_linear.comp
+    shaders/neural_linear_dx.comp
+    shaders/neural_linear_dw.comp
+    shaders/neural_bias_grad.comp
     shaders/rigid_integrate.comp
     shaders/rigid_solve.comp
     shaders/rigid_finish.comp
@@ -200,6 +204,14 @@ if(MSVC)
     add_compile_options($<$<CONFIG:Debug>:/Od> $<$<CONFIG:Debug>:/RTC1>
                         $<$<NOT:$<CONFIG:Debug>>:/O2> $<$<NOT:$<CONFIG:Debug>>:/Ob2>)
     add_compile_definitions($<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+endif()
+
+# 신경망의 CPU 기준은 GPU 커널과 **비트까지 같아야** 한다(--neural-selfcheck 가 그것을 본다). GCC 와
+# Clang 은 기본이 -ffp-contract=fast 라 a + b*c 를 FMA 로 합치는데, 그러면 곱의 중간 반올림이 사라져
+# 기준 쪽이 갈린다(GLSL 커널은 precise 로 막아 두었다). MSVC 는 /fp:precise 기본이라 합치지 않는다.
+set(neural_reference_sources src/gfx/neural_math.cpp src/gfx/rl_agent.cpp)
+if(NOT MSVC)
+    set_source_files_properties(${neural_reference_sources} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 endif()
 
 add_executable(cg_lab
