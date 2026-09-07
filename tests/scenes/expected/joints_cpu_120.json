@@ -78,8 +78,16 @@
         0.0
       ],
       "length": 0.5,
+      "lowerAngle": -90.0,
+      "maxTorque": 10.0,
+      "motor": "none",
+      "motorStiffness": 10.0,
       "other": -1,
-      "type": "ball"
+      "targetAngle": 0.0,
+      "targetSpeed": 90.0,
+      "type": "ball",
+      "upperAngle": 90.0,
+      "useLimit": false
     },
     {
       "anchorA": [
@@ -98,8 +106,16 @@
         0.0
       ],
       "length": 0.5,
+      "lowerAngle": -90.0,
+      "maxTorque": 10.0,
+      "motor": "none",
+      "motorStiffness": 10.0,
       "other": 2,
-      "type": "ball"
+      "targetAngle": 0.0,
+      "targetSpeed": 90.0,
+      "type": "ball",
+      "upperAngle": 90.0,
+      "useLimit": false
     },
     {
       "anchorA": [
@@ -118,8 +134,16 @@
         0.0
       ],
       "length": 0.5,
+      "lowerAngle": -90.0,
+      "maxTorque": 10.0,
+      "motor": "none",
+      "motorStiffness": 10.0,
       "other": 3,
-      "type": "ball"
+      "targetAngle": 0.0,
+      "targetSpeed": 90.0,
+      "type": "ball",
+      "upperAngle": 90.0,
+      "useLimit": false
     },
     {
       "anchorA": [
@@ -138,8 +162,16 @@
         0.0
       ],
       "length": 0.5,
+      "lowerAngle": -90.0,
+      "maxTorque": 10.0,
+      "motor": "none",
+      "motorStiffness": 10.0,
       "other": 4,
-      "type": "ball"
+      "targetAngle": 0.0,
+      "targetSpeed": 90.0,
+      "type": "ball",
+      "upperAngle": 90.0,
+      "useLimit": false
     },
     {
       "anchorA": [
@@ -158,8 +190,16 @@
         0.0
       ],
       "length": 0.6000000238418579,
+      "lowerAngle": -90.0,
+      "maxTorque": 10.0,
+      "motor": "none",
+      "motorStiffness": 10.0,
       "other": 7,
-      "type": "distance"
+      "targetAngle": 0.0,
+      "targetSpeed": 90.0,
+      "type": "distance",
+      "upperAngle": 90.0,
+      "useLimit": false
     },
     {
       "anchorA": [
@@ -178,8 +218,16 @@
         1.0
       ],
       "length": 1.0,
+      "lowerAngle": -90.0,
+      "maxTorque": 10.0,
+      "motor": "none",
+      "motorStiffness": 10.0,
       "other": -1,
-      "type": "hinge"
+      "targetAngle": 0.0,
+      "targetSpeed": 90.0,
+      "type": "hinge",
+      "upperAngle": 90.0,
+      "useLimit": false
     }
   ],
   "lights": [
@@ -574,5 +622,5 @@
       "useGravity": true
     }
   ],
-  "version": 7
+  "version": 8
 }

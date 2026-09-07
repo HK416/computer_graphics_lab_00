@@ -356,6 +356,15 @@ enum class JointType : uint32_t {
 // 관절 부품. 이 오브젝트(A, 강체 필요)와 other 오브젝트(B)를 잇는다. other 가 -1 이거나 같은 백엔드의 강체가
 // 아니면 B 는 고정점이고 anchorB 는 세계 좌표다. anchorA·anchorB 는 각 오브젝트의 지역 좌표(B 가 강체일 때).
 // CPU(순차 임펄스)와 GPU(Jacobi) 솔버가 같은 행을 푼다(physics/rigid_body.cpp ↔ shaders/rigid_common.glsl).
+// 경첩 모터의 구동 방식.
+enum class JointMotor : uint32_t {
+    NONE = 0,
+    // 목표 각속도를 따라간다.
+    VELOCITY = 1,
+    // 목표 각도로 서보한다. 목표 각속도는 그때의 상한이 된다.
+    POSITION = 2,
+};
+
 struct Joint {
     JointType type = JointType::BALL;
     int32_t other = -1;
@@ -364,6 +373,21 @@ struct Joint {
     glm::vec3 axis{0.0F, 1.0F, 0.0F};
     // DISTANCE 의 목표 거리(m).
     float length = 1.0F;
+
+    // 아래는 HINGE 전용이다. 각도는 B 를 기준으로 이 오브젝트(A)가 축 둘레로 돈 각(도)이라 두 물체의
+    // 자세가 같을 때가 0 도이고, 축의 오른손 방향이 양이다.
+    bool useLimit = false;
+    float lowerAngle = -90.0F;
+    float upperAngle = 90.0F;
+    JointMotor motor = JointMotor::NONE;
+    // POSITION 의 목표 각도(도).
+    float targetAngle = 0.0F;
+    // VELOCITY 의 목표 각속도(도/초). POSITION 에서는 각속도 상한이다.
+    float targetSpeed = 90.0F;
+    // POSITION 의 비례 이득(1/초). 각도 오차를 목표 각속도로 바꾼다.
+    float motorStiffness = 10.0F;
+    // 모터가 낼 수 있는 토크 상한(N·m). 0 이면 모터가 없는 것과 같다.
+    float maxTorque = 10.0F;
 
     bool operator==(const Joint&) const = default;
 };

@@ -9,20 +9,20 @@
   },
   "animators": [],
   "camera": {
-    "distance": 5.0,
-    "fovY": 60.0,
+    "distance": 6.0,
+    "fovY": 50.0,
     "mode": "orbit",
     "moveSpeed": 2.0,
     "near": 0.05000000074505806,
-    "pitch": -15.0,
+    "pitch": -8.0,
     "position": [
       0.0,
-      2.0,
-      5.0
+      2.5,
+      6.0
     ],
     "target": [
       0.0,
-      0.699999988079071,
+      2.0,
       0.0
     ],
     "yaw": -90.0
@@ -60,7 +60,92 @@
   },
   "fluids": [],
   "forceFields": [],
-  "joints": [],
+  "joints": [
+    {
+      "anchorA": [
+        -0.5,
+        0.0,
+        0.0
+      ],
+      "anchorB": [
+        -2.0,
+        2.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "length": 1.0,
+      "lowerAngle": -90.0,
+      "maxTorque": 20.0,
+      "motor": "position",
+      "motorStiffness": 10.0,
+      "other": -1,
+      "targetAngle": 60.0,
+      "targetSpeed": 180.0,
+      "type": "hinge",
+      "upperAngle": 90.0,
+      "useLimit": false
+    },
+    {
+      "anchorA": [
+        -0.5,
+        0.0,
+        0.0
+      ],
+      "anchorB": [
+        -0.5,
+        2.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "length": 1.0,
+      "lowerAngle": -90.0,
+      "maxTorque": 20.0,
+      "motor": "velocity",
+      "motorStiffness": 10.0,
+      "other": -1,
+      "targetAngle": 0.0,
+      "targetSpeed": 120.0,
+      "type": "hinge",
+      "upperAngle": 90.0,
+      "useLimit": false
+    },
+    {
+      "anchorA": [
+        -0.5,
+        0.0,
+        0.0
+      ],
+      "anchorB": [
+        1.0,
+        2.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "length": 1.0,
+      "lowerAngle": -45.0,
+      "maxTorque": 10.0,
+      "motor": "none",
+      "motorStiffness": 10.0,
+      "other": -1,
+      "targetAngle": 0.0,
+      "targetSpeed": 90.0,
+      "type": "hinge",
+      "upperAngle": 45.0,
+      "useLimit": true
+    }
+  ],
   "lights": [
     {
       "castsShadow": true,
@@ -82,10 +167,9 @@
   ],
   "models": [
     "<builtin:plane>",
-    "<builtin:box>",
-    "<builtin:icosphere>"
+    "<builtin:box>"
   ],
-  "name": "강체 점검 (cpu)",
+  "name": "관절 모터 cpu",
   "objects": [
     {
       "light": 0,
@@ -134,122 +218,77 @@
       "visible": true
     },
     {
+      "joint": 0,
       "mesh": 0,
       "model": 1,
-      "name": "상자0",
+      "name": "각도 모터",
       "parent": -1,
       "position": [
-        -0.807918131351471,
-        0.24618440866470337,
-        0.00037137733306735754
+        -1.7499929666519165,
+        2.4328715801239014,
+        0.0
       ],
       "rigidBody": 1,
       "rotation": [
-        0.0017166284378618002,
-        0.0014118112158030272,
-        -0.009368205443024635,
-        0.9999536275863647
+        0.0,
+        0.0,
+        0.49999919533729553,
+        0.8660258650779724
       ],
       "scale": [
-        0.25,
-        0.25,
-        0.25
+        0.5,
+        0.07999999821186066,
+        0.07999999821186066
       ],
       "visible": true
     },
     {
+      "joint": 1,
       "mesh": 0,
       "model": 1,
-      "name": "상자1",
+      "name": "속도 모터",
       "parent": -1,
       "position": [
-        -0.7857047915458679,
-        0.7333695888519287,
-        0.005989317782223225
+        -0.774658203125,
+        1.5820368528366089,
+        0.0
       ],
       "rigidBody": 2,
       "rotation": [
-        0.0008921523112803698,
-        -0.006755301728844643,
-        -0.009543417021632195,
-        0.9999312162399292
+        0.0,
+        0.0,
+        0.8801456093788147,
+        -0.4747038185596466
       ],
       "scale": [
-        0.25,
-        0.25,
-        0.25
+        0.5,
+        0.07999999821186066,
+        0.07999999821186066
       ],
       "visible": true
     },
     {
+      "joint": 2,
       "mesh": 0,
       "model": 1,
-      "name": "상자2",
+      "name": "한계 막대",
       "parent": -1,
       "position": [
-        -0.7781466245651245,
-        1.2262510061264038,
-        0.010703862644731998
+        1.3535460233688354,
+        1.6463018655776978,
+        0.0
       ],
       "rigidBody": 3,
       "rotation": [
-        0.0037873247638344765,
-        -0.006007228512316942,
-        -0.008326847106218338,
-        0.9999400973320007
+        0.0,
+        0.0,
+        -0.3826836943626404,
+        0.9238794445991516
       ],
       "scale": [
-        0.25,
-        0.25,
-        0.25
-      ],
-      "visible": true
-    },
-    {
-      "mesh": 0,
-      "model": 2,
-      "name": "공0",
-      "parent": -1,
-      "position": [
-        0.18322360515594482,
-        0.2948627173900604,
-        0.0
-      ],
-      "rigidBody": 4,
-      "rotation": [
-        0.0,
-        0.0,
-        0.6124405860900879,
-        0.7905166745185852
-      ],
-      "scale": [
-        0.30000001192092896,
-        0.30000001192092896,
-        0.30000001192092896
-      ],
-      "visible": true
-    },
-    {
-      "mesh": 0,
-      "model": 2,
-      "name": "공1",
-      "parent": -1,
-      "position": [
-        3.4256179332733154,
-        0.2948627173900604,
-        0.0
-      ],
-      "rigidBody": 5,
-      "rotation": [
-        0.0,
-        0.0,
-        -0.5265454649925232,
-        0.850147008895874
-      ],
-      "scale": [
-        0.30000001192092896,
-        0.30000001192092896,
-        0.30000001192092896
+        0.5,
+        0.07999999821186066,
+        0.07999999821186066
       ],
       "visible": true
     }
@@ -295,7 +334,7 @@
     },
     {
       "backend": "cpu",
-      "friction": 0.6000000238418579,
+      "friction": 0.5,
       "halfExtents": [
         1.0,
         1.0,
@@ -304,13 +343,13 @@
       "kinematic": false,
       "mass": 1.0,
       "radius": 0.5,
-      "restitution": 0.05000000074505806,
+      "restitution": 0.10000000149011612,
       "shape": "box",
       "useGravity": true
     },
     {
       "backend": "cpu",
-      "friction": 0.6000000238418579,
+      "friction": 0.5,
       "halfExtents": [
         1.0,
         1.0,
@@ -319,13 +358,13 @@
       "kinematic": false,
       "mass": 1.0,
       "radius": 0.5,
-      "restitution": 0.05000000074505806,
+      "restitution": 0.10000000149011612,
       "shape": "box",
       "useGravity": true
     },
     {
       "backend": "cpu",
-      "friction": 0.6000000238418579,
+      "friction": 0.5,
       "halfExtents": [
         1.0,
         1.0,
@@ -334,38 +373,8 @@
       "kinematic": false,
       "mass": 1.0,
       "radius": 0.5,
-      "restitution": 0.05000000074505806,
+      "restitution": 0.10000000149011612,
       "shape": "box",
-      "useGravity": true
-    },
-    {
-      "backend": "cpu",
-      "friction": 0.4000000059604645,
-      "halfExtents": [
-        0.5,
-        0.5,
-        0.5
-      ],
-      "kinematic": false,
-      "mass": 1.0,
-      "radius": 1.0,
-      "restitution": 0.550000011920929,
-      "shape": "sphere",
-      "useGravity": true
-    },
-    {
-      "backend": "cpu",
-      "friction": 0.4000000059604645,
-      "halfExtents": [
-        0.5,
-        0.5,
-        0.5
-      ],
-      "kinematic": false,
-      "mass": 1.0,
-      "radius": 1.0,
-      "restitution": 0.550000011920929,
-      "shape": "sphere",
       "useGravity": true
     }
   ],

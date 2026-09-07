@@ -21,6 +21,8 @@ namespace {
 // GPU 솔버는 접촉을 Jacobi 로 풀어 수렴이 느리므로 더 많이 돈다(gfx::RIGID_SOLVER_ITERATIONS).
 // 나머지 상수는 rigid_body.h 에서 두 백엔드가 함께 쓴다.
 constexpr uint32_t SOLVER_ITERATIONS = 8;
+// 경첩 각을 한 바퀴로 접을 때 쓴다.
+constexpr float TWO_PI = 6.283185307179586F;
 constexpr uint32_t GRANULARITY = 16;
 
 // 솔버 안에서 쓰는 짧은 이름.
@@ -626,9 +628,33 @@ JointSide jointStaticSide(const glm::vec3& worldAnchor) {
     return side;
 }
 
+// B 를 기준으로 A 가 경첩 축 둘레로 돈 각(라디안). 부품이 A 에 붙어 있으니 «이 오브젝트가 얼마나
+// 돌았는가» 가 편집기에서 자연스러운 뜻이고, 축의 오른손 방향이 양이다. 두 자세가 같을 때 0 이고
+// (-pi, pi] 에 든다. 상대 회전에서 축 성분만 남긴 «비틀림» 사원수의 각을 뒤집은 것이다(경첩은 두
+// 물체의 축이 나란하므로 뒤집기만 하면 기준이 바뀐다). GLSL 의 rigidHingeAngle 과 같은 식이다.
+float hingeAngle(const glm::quat& rotationA, const glm::quat& rotationB, const glm::vec3& localAxis) {
+    glm::quat relative = glm::conjugate(rotationA) * rotationB;
+    float twist = glm::dot(glm::vec3{relative.x, relative.y, relative.z}, localAxis);
+    float real = relative.w;
+    // 사원수는 q 와 -q 가 같은 회전이다. 한쪽으로 모아야 각이 (-pi, pi] 에 들어온다.
+    if (real < 0.0F) {
+        real = -real;
+        twist = -twist;
+    }
+    return -2.0F * std::atan2(twist, real);
+}
+
+// 관절 하나가 이번 스텝에서 축 둘레로 쌓은 임펄스. 순차 임펄스는 누적값을 클램프해야 모터의 토크
+// 상한과 한계각의 «한쪽으로만 민다» 는 성질이 반복 횟수와 무관해진다.
+struct JointAccumulator {
+    float motor = 0.0F;
+    float limit = 0.0F;
+};
+
 // 관절의 속도 행. 거리는 앵커 사이 방향 하나, 볼·경첩은 앵커를 한 점으로 묶는 3×3 유효 질량이고 경첩은 축에
-// 수직한 각속도 차를 두 행으로 없앤다. GPU(rigid_common.glsl 의 rigidJointImpulse)와 같은 식이다.
-void solveJoint(std::vector<Body>& bodies, const JointState& joint) {
+// 수직한 각속도 차를 두 행으로 없앤다. 경첩은 그 뒤에 축 둘레의 모터 행과 한계각 행을 더 푼다.
+// GPU(rigid_common.glsl 의 rigidJointImpulse)와 같은 식이다.
+void solveJoint(std::vector<Body>& bodies, const JointState& joint, JointAccumulator& accumulator, float dt) {
     Body& a = bodies[joint.bodyA];
     Body* b = joint.bodyB >= 0 ? &bodies[static_cast<size_t>(joint.bodyB)] : nullptr;
     JointSide sideA = jointSideOf(a, joint.localA);
@@ -685,6 +711,67 @@ void solveJoint(std::vector<Body>& bodies, const JointState& joint) {
             a.angularVelocity -= sideA.inverseInertia * (t * lambda);
             if (b != nullptr) {
                 b->angularVelocity += sideB.inverseInertia * (t * lambda);
+            }
+        }
+
+        // 모터와 한계각은 축 둘레 한 행씩이다. 각과 마찬가지로 양의 임펄스가 «A 가 B 보다 축 방향으로
+        // 빨라지는» 쪽이라 hingeAngle 을 늘린다.
+        float axisMass = glm::dot(axis, (sideA.inverseInertia + sideB.inverseInertia) * axis);
+        if (axisMass <= 1.0e-9F) {
+            return;
+        }
+        glm::quat rotationB = b != nullptr ? b->rotation : glm::quat{1.0F, 0.0F, 0.0F, 0.0F};
+        float angle = hingeAngle(a.rotation, rotationB, joint.localAxis / axisLength);
+        float rate = glm::dot(a.angularVelocity - (b != nullptr ? b->angularVelocity : glm::vec3{0.0F}), axis);
+        auto applyAxis = [&](float lambda) {
+            a.angularVelocity += sideA.inverseInertia * (axis * lambda);
+            if (b != nullptr) {
+                b->angularVelocity -= sideB.inverseInertia * (axis * lambda);
+            }
+            // 다음 행이 방금 고친 속도를 보게 한다. 임펄스 하나가 각속도 차를 axisMass 배만큼 바꾼다.
+            rate += axisMass * lambda;
+        };
+
+        if (joint.motor != scene::JointMotor::NONE && joint.maxTorque > 0.0F) {
+            float target = joint.targetSpeed;
+            if (joint.motor == scene::JointMotor::POSITION) {
+                float error = joint.targetAngle - angle;
+                if (!joint.useLimit) {
+                    // 각이 (-pi, pi] 로 접혀 나오므로 오차도 접어야 짧은 쪽으로 돈다. 접지 않으면 목표가
+                    // 경계 건너에 있을 때 한 바퀴 가까이 먼 길로 간다. 한계각이 켜져 있으면 그 짧은 길이
+                    // 막혀 있을 수 있으므로 접지 않고 허용 범위 안을 그대로 지난다.
+                    error -= TWO_PI * std::round(error / TWO_PI);
+                }
+                float limit = std::abs(joint.targetSpeed);
+                target = std::clamp(joint.motorStiffness * error, -limit, limit);
+            }
+            float wanted = (target - rate) / axisMass;
+            // 토크 상한은 «이번 스텝에 낼 수 있는 각운동량» 이라 dt 를 곱한다.
+            float maxImpulse = joint.maxTorque * dt;
+            float total = std::clamp(accumulator.motor + wanted, -maxImpulse, maxImpulse);
+            applyAxis(total - accumulator.motor);
+            accumulator.motor = total;
+        }
+
+        if (joint.useLimit) {
+            // 어긴 각을 속도 편향으로 바꿔 되민다. 한쪽 한계는 한쪽 방향으로만 밀 수 있으므로 누적
+            // 임펄스의 부호를 묶는다.
+            //
+            // ponytail: 접힌 각으로 재므로 한계는 (-180, 180] 안에서만 뜻이 있다. 그 경계를 걸치는
+            // 범위는 적을 수 없고, 한 스텝에 180 도 넘게 어기면 부호가 뒤집혀 반대쪽 한계로 넘어간다.
+            float excess = angle < joint.lowerAngle   ? angle - joint.lowerAngle
+                           : angle > joint.upperAngle ? angle - joint.upperAngle
+                                                      : 0.0F;
+            if (excess == 0.0F) {
+                accumulator.limit = 0.0F;
+            } else {
+                float bias =
+                    std::clamp(excess * (POSITION_CORRECTION / dt), -JOINT_LIMIT_MAX_SPEED, JOINT_LIMIT_MAX_SPEED);
+                float wanted = -(rate + bias) / axisMass;
+                float total = excess < 0.0F ? std::max(accumulator.limit + wanted, 0.0F)
+                                            : std::min(accumulator.limit + wanted, 0.0F);
+                applyAxis(total - accumulator.limit);
+                accumulator.limit = total;
             }
         }
     }
@@ -744,6 +831,15 @@ void collectJoints(const scene::Scene& scene, const std::vector<RigidBodyState>&
         state.localAxis = joint.axis;
         state.length = joint.length;
         state.type = joint.type;
+        state.motor = joint.motor;
+        state.useLimit = joint.useLimit;
+        // 부품은 편집기에서 읽기 쉬운 도로 적혀 있다. 솔버는 라디안만 본다.
+        state.lowerAngle = glm::radians(std::min(joint.lowerAngle, joint.upperAngle));
+        state.upperAngle = glm::radians(std::max(joint.lowerAngle, joint.upperAngle));
+        state.targetAngle = glm::radians(joint.targetAngle);
+        state.targetSpeed = glm::radians(joint.targetSpeed);
+        state.motorStiffness = joint.motorStiffness;
+        state.maxTorque = joint.maxTorque;
         bool otherValid = joint.other >= 0 && static_cast<size_t>(joint.other) < scene.objects.size();
         state.bodyB = otherValid ? bodyOf[static_cast<size_t>(joint.other)] : -1;
         if (state.bodyB >= 0) {
@@ -1051,9 +1147,11 @@ void stepRigidBodies(scene::Scene& scene, float dt, core::JobSystem* jobs) {
     // 5) 관절 속도 행을 먼저, 접촉을 순차 임펄스로, 그 뒤 관절 위치 보정.
     std::vector<JointState> joints;
     collectJoints(scene, bodies, joints);
+    // 모터·한계각의 누적 임펄스는 반복 사이에 살아 있어야 상한이 반복 횟수와 무관해진다.
+    std::vector<JointAccumulator> jointAccumulators(joints.size());
     for (uint32_t iteration = 0; iteration < SOLVER_ITERATIONS; ++iteration) {
-        for (const JointState& joint : joints) {
-            solveJoint(bodies, joint);
+        for (size_t index = 0; index < joints.size(); ++index) {
+            solveJoint(bodies, joints[index], jointAccumulators[index], dt);
         }
     }
     solveContacts(bodies, contacts);

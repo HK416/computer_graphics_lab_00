@@ -57,9 +57,18 @@ struct GpuJoint {
     uint32_t bodyA = 0;
     uint32_t bodyB = RIGID_NO_BODY;
     uint32_t type = 0;
+    // 아래는 경첩 전용. 각은 라디안이다(physics::collectJoints 가 도에서 바꿔 둔다).
+    uint32_t motor = 0;
+    float lowerAngle = 0.0F;
+    float upperAngle = 0.0F;
+    float targetAngle = 0.0F;
+    float targetSpeed = 0.0F;
+    float motorStiffness = 0.0F;
+    float maxTorque = 0.0F;
+    uint32_t useLimit = 0;
     uint32_t pad0 = 0;
 };
-static_assert(sizeof(GpuJoint) == 64, "관절 배치가 셰이더와 어긋난다");
+static_assert(sizeof(GpuJoint) == 96, "관절 배치가 셰이더와 어긋난다");
 
 // shaders/rigid_common.glsl 의 RigidPushConstants 와 배치가 같아야 한다(scalar).
 struct RigidPushConstants {
@@ -80,9 +89,10 @@ struct RigidPushConstants {
     uint32_t planeCount = 0;
     float cellSize = 1.0F;
     uint32_t jointCount = 0;
+    float jointLimitMaxSpeed = physics::JOINT_LIMIT_MAX_SPEED;
     VkDeviceAddress joints = 0;
 };
-static_assert(sizeof(RigidPushConstants) == 96, "강체 푸시 상수 배치가 셰이더와 어긋난다");
+static_assert(sizeof(RigidPushConstants) == 104, "강체 푸시 상수 배치가 셰이더와 어긋난다");
 
 // 강체 GPU 솔버. CPU 솔버와 같은 함수(physics::collectRigidBodies)로 세계 상태를 펴 컴퓨트로 풀고,
 // 결과를 되읽어 오브젝트 변환에 되쓴다.

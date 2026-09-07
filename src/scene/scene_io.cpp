@@ -307,12 +307,21 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
     json joints = json::array();
     for (const Joint& joint : scene.joints) {
         constexpr std::array<const char*, 3> JOINT_NAMES{"distance", "ball", "hinge"};
+        constexpr std::array<const char*, 3> MOTOR_NAMES{"none", "velocity", "position"};
         joints.push_back({{"type", JOINT_NAMES[std::min(static_cast<size_t>(joint.type), JOINT_NAMES.size() - 1)]},
                           {"other", joint.other},
                           {"anchorA", toJson(joint.anchorA)},
                           {"anchorB", toJson(joint.anchorB)},
                           {"axis", toJson(joint.axis)},
-                          {"length", joint.length}});
+                          {"length", joint.length},
+                          {"useLimit", joint.useLimit},
+                          {"lowerAngle", joint.lowerAngle},
+                          {"upperAngle", joint.upperAngle},
+                          {"motor", MOTOR_NAMES[std::min(static_cast<size_t>(joint.motor), MOTOR_NAMES.size() - 1)]},
+                          {"targetAngle", joint.targetAngle},
+                          {"targetSpeed", joint.targetSpeed},
+                          {"motorStiffness", joint.motorStiffness},
+                          {"maxTorque", joint.maxTorque}});
     }
     document["joints"] = joints;
 
@@ -642,6 +651,17 @@ SceneFile readScene(const std::string& text) {
         joint.anchorB = toVec3(entry.value("anchorB", json{}), glm::vec3{0.0F});
         joint.axis = toVec3(entry.value("axis", json{}), glm::vec3{0.0F, 1.0F, 0.0F});
         joint.length = std::max(entry.value("length", joint.length), 0.0F);
+        joint.useLimit = entry.value("useLimit", joint.useLimit);
+        joint.lowerAngle = entry.value("lowerAngle", joint.lowerAngle);
+        joint.upperAngle = entry.value("upperAngle", joint.upperAngle);
+        std::string motor = entry.value("motor", std::string{"none"});
+        joint.motor = motor == "velocity"   ? JointMotor::VELOCITY
+                      : motor == "position" ? JointMotor::POSITION
+                                            : JointMotor::NONE;
+        joint.targetAngle = entry.value("targetAngle", joint.targetAngle);
+        joint.targetSpeed = entry.value("targetSpeed", joint.targetSpeed);
+        joint.motorStiffness = std::max(entry.value("motorStiffness", joint.motorStiffness), 0.0F);
+        joint.maxTorque = std::max(entry.value("maxTorque", joint.maxTorque), 0.0F);
         file.scene.joints.push_back(joint);
     }
 

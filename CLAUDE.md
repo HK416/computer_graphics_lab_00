@@ -80,7 +80,7 @@ cmake --preset debug -DCG_LAB_DLSS_SDK=<NVIDIA/DLSS 경로>   # 주지 않으면
 ```
 
 강체 솔버를 바꾸면 `headless_physics` 기준 파일이 갈린다. 의도한 변화면 위 명령으로 다시 만들어
-`tests/scenes/expected/rigid_cpu_120.json` 과 `joints_cpu_120.json` 을 갱신하고 커밋한다.
+`tests/scenes/expected/rigid_cpu_120.json` `joints_cpu_120.json` `joints_motor_cpu_120.json` 을 갱신하고 커밋한다.
 
 기본 캡처에는 편집기 UI 가 함께 들어가고 콘솔에 시각이 찍히므로 두 실행의 PNG 는 바이트로 같지 않다. **바이트로
 견줄 때는 `--fixed-dt 0.016666 --capture present` 를 준다**(렌더 결과만, 고정 프레임 간격). 동작이 바뀌지 않아야 하는
@@ -248,7 +248,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 (`fluid_field.comp` ↔ `physics::buildFluidField`)과 격자 가장자리를 0 으로 두는 규칙도 같아야 한다.
 
 강체 솔버 상수(`GRAVITY` `POSITION_CORRECTION` `PENETRATION_SLOP` `RESTITUTION_THRESHOLD`
-`POSITION_ITERATIONS`)는 `src/physics/rigid_body.h` 한 곳에만 두고 GPU 쪽은 푸시 상수로 실어 보낸다.
+`POSITION_ITERATIONS` `JOINT_LIMIT_MAX_SPEED`)는 `src/physics/rigid_body.h` 한 곳에만 두고 GPU 쪽은 푸시 상수로 실어 보낸다.
 두 벌로 두면 백엔드를 바꿀 때 거동이 갈린다.
 | `scene::ColliderShape` (`src/scene/scene.h`) | `COLLIDER_SHAPE_*` (`collider_shapes.glsl`; `RIGID_SHAPE_*` `FLUID_COLLIDER_*` 는 그 별칭) |
 

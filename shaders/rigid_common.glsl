@@ -77,6 +77,12 @@ layout(buffer_reference, scalar) buffer RigidIndexBuffer {
 #define RIGID_JOINT_DISTANCE 0u
 #define RIGID_JOINT_BALL 1u
 #define RIGID_JOINT_HINGE 2u
+// scene::JointMotor 와 같은 번호다.
+#define RIGID_JOINT_MOTOR_NONE 0u
+#define RIGID_JOINT_MOTOR_VELOCITY 1u
+#define RIGID_JOINT_MOTOR_POSITION 2u
+// 경첩 각을 한 바퀴로 접을 때 쓴다.
+#define RIGID_TWO_PI 6.283185307179586
 struct RigidJoint {
     vec4 anchorA; // xyz A 지역 앵커, w 목표 거리
     vec4 anchorB; // xyz B 지역 앵커(고정점이면 세계)
@@ -84,6 +90,15 @@ struct RigidJoint {
     uint bodyA;
     uint bodyB;
     uint type;
+    // 아래는 경첩 전용. 각은 라디안이다(CPU 가 도에서 바꿔 실어 보낸다).
+    uint motor;
+    float lowerAngle;
+    float upperAngle;
+    float targetAngle;
+    float targetSpeed;
+    float motorStiffness;
+    float maxTorque;
+    uint useLimit;
     uint pad0;
 };
 layout(buffer_reference, scalar) readonly buffer RigidJointBuffer {
@@ -110,6 +125,8 @@ layout(push_constant, scalar) uniform RigidPushConstants {
     uint planeCount;
     float cellSize;
     uint jointCount;
+    // 경첩 한계각을 어긴 만큼 되미는 속도의 상한(라디안/초). physics::JOINT_LIMIT_MAX_SPEED 다.
+    float jointLimitMaxSpeed;
     RigidJointBuffer joints;
 } push;
 
@@ -631,6 +648,24 @@ mat3 skewMatrix(vec3 v) {
     return mat3(0.0, v.z, -v.y, -v.z, 0.0, v.x, v.y, -v.x, 0.0);
 }
 
+// 쿼터니언 곱 (a * b). rigid_integrate.comp 의 식과 같다.
+vec4 quatMultiply(vec4 a, vec4 b) {
+    return vec4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz), a.w * b.w - dot(a.xyz, b.xyz));
+}
+
+// B 를 기준으로 A 가 경첩 축 둘레로 돈 각(라디안). CPU 의 hingeAngle 과 같은 식이다.
+float rigidHingeAngle(vec4 rotationA, vec4 rotationB, vec3 localAxis) {
+    vec4 relative = quatMultiply(vec4(-rotationA.xyz, rotationA.w), rotationB);
+    float twist = dot(relative.xyz, localAxis);
+    float real = relative.w;
+    // 사원수는 q 와 -q 가 같은 회전이다. 한쪽으로 모아야 각이 (-pi, pi] 에 들어온다.
+    if (real < 0.0) {
+        real = -real;
+        twist = -twist;
+    }
+    return -2.0 * atan(twist, real);
+}
+
 // self 가 관절의 A 인지 B 인지 보고 자기 몫의 속도 변화를 더한다.
 void rigidJointImpulse(uint self, RigidJoint joint, RigidBody body, inout vec3 deltaLinear, inout vec3 deltaAngular) {
     bool isA = joint.bodyA == self;
@@ -687,6 +722,45 @@ void rigidJointImpulse(uint self, RigidJoint joint, RigidBody body, inout vec3 d
             float lambda = -dot(omega, t) / k;
             deltaAngular += mine.inverseInertia * (t * lambda) * sign;
         }
+
+        // 모터와 한계각. 축 둘레 한 행씩이고 양의 임펄스가 «A 가 B 보다 축 방향으로 빨라지는» 쪽이다.
+        //
+        // ponytail: Jacobi 라 스텝 동안 쌓인 임펄스를 들 수 없어 반복마다 상한을 다시 건다. 모터가 CPU
+        // 보다 세게 나오고, 한계각도 그만큼 단단하다. 마찰이 같은 이유로 갈리는 것과 같은 타협이다.
+        float axisMass = dot(axis, inertiaSum * axis);
+        if (axisMass <= 1.0e-9) {
+            return;
+        }
+        vec4 rotationB = joint.bodyB == RIGID_NO_BODY ? vec4(0.0, 0.0, 0.0, 1.0) : push.bodiesIn.items[joint.bodyB].rotation;
+        float angle = rigidHingeAngle(a.rotation, rotationB, joint.axis.xyz / axisLength);
+        float rate = -dot(omega, axis);
+        float lambda = 0.0;
+        if (joint.motor != RIGID_JOINT_MOTOR_NONE && joint.maxTorque > 0.0) {
+            float target = joint.targetSpeed;
+            if (joint.motor == RIGID_JOINT_MOTOR_POSITION) {
+                // CPU 와 같이 한계가 없을 때만 오차를 한 바퀴로 접어 짧은 쪽으로 돈다.
+                float error = joint.targetAngle - angle;
+                if (joint.useLimit == 0u) {
+                    error -= RIGID_TWO_PI * round(error / RIGID_TWO_PI);
+                }
+                float speedLimit = abs(joint.targetSpeed);
+                target = clamp(joint.motorStiffness * error, -speedLimit, speedLimit);
+            }
+            float maxImpulse = joint.maxTorque * push.dt;
+            lambda = clamp((target - rate) / axisMass, -maxImpulse, maxImpulse);
+            rate += axisMass * lambda;
+        }
+        // ponytail: 접힌 각으로 재므로 한계는 (-180, 180] 안에서만 뜻이 있다. CPU 와 같은 한계다.
+        if (joint.useLimit != 0u) {
+            float excess = angle < joint.lowerAngle ? angle - joint.lowerAngle : (angle > joint.upperAngle ? angle - joint.upperAngle : 0.0);
+            if (excess != 0.0) {
+                float bias = clamp(excess * (push.positionCorrection / push.dt), -push.jointLimitMaxSpeed, push.jointLimitMaxSpeed);
+                float wanted = -(rate + bias) / axisMass;
+                lambda += excess < 0.0 ? max(wanted, 0.0) : min(wanted, 0.0);
+            }
+        }
+        // 위의 정렬 행과 달리 A 가 양이라 부호가 반대다.
+        deltaAngular -= mine.inverseInertia * (axis * lambda) * sign;
     }
 }
 

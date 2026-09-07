@@ -16,7 +16,7 @@ namespace scene {
 // 5: DDGI 볼륨 부품(ddgiVolumes).
 // 6: 카메라 부품(cameraComponents)과 카메라 경로(cameraPaths).
 // 7: 관절 부품(joints).
-inline constexpr uint32_t SCENE_FILE_VERSION = 7;
+inline constexpr uint32_t SCENE_FILE_VERSION = 8;
 
 // 저장할 때 전역 메쉬 인덱스를 (모델, 모델 안의 메쉬) 로 나누는 데 쓰는 표.
 struct ModelTable {

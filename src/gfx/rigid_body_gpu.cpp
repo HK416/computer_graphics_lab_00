@@ -383,6 +383,14 @@ void RigidBodySimulator::prepare(const scene::Scene& scene, uint32_t steps, floa
         target.bodyA = joint.bodyA;
         target.bodyB = joint.bodyB >= 0 ? static_cast<uint32_t>(joint.bodyB) : RIGID_NO_BODY;
         target.type = static_cast<uint32_t>(joint.type);
+        target.motor = static_cast<uint32_t>(joint.motor);
+        target.lowerAngle = joint.lowerAngle;
+        target.upperAngle = joint.upperAngle;
+        target.targetAngle = joint.targetAngle;
+        target.targetSpeed = joint.targetSpeed;
+        target.motorStiffness = joint.motorStiffness;
+        target.maxTorque = joint.maxTorque;
+        target.useLimit = joint.useLimit ? 1U : 0U;
     }
     reserveJoints(std::max<uint32_t>(1, static_cast<uint32_t>(joints.size())));
 
@@ -474,6 +482,7 @@ void RigidBodySimulator::record(VkCommandBuffer commandBuffer, uint64_t frameInd
     push.positionCorrection = physics::POSITION_CORRECTION;
     push.penetrationSlop = physics::PENETRATION_SLOP;
     push.restitutionThreshold = physics::RESTITUTION_THRESHOLD;
+    push.jointLimitMaxSpeed = physics::JOINT_LIMIT_MAX_SPEED;
     push.triangles = triangleBuffer.address;
     push.joints = jointBuffers[slot].address;
     push.jointCount = static_cast<uint32_t>(jointUpload.size());

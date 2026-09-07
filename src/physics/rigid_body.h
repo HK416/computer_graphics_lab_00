@@ -25,6 +25,9 @@ inline constexpr float PENETRATION_SLOP = 0.005F;
 inline constexpr float RESTITUTION_THRESHOLD = 1.0F;
 // 위치 보정을 몇 번 도는지. 한 번만 돌면 쌓인 물체가 서서히 가라앉는다.
 inline constexpr uint32_t POSITION_ITERATIONS = 8;
+// 경첩 한계각을 어긴 만큼 되미는 속도의 상한(라디안/초). 되미는 속도 자체는 접촉과 같은
+// POSITION_CORRECTION 비율로 만들고, 크게 어긴 상태에서 튀어 나가지 않도록 여기서 자른다.
+inline constexpr float JOINT_LIMIT_MAX_SPEED = 4.0F;
 // 한 짝이 낼 수 있는 접촉 점 수. 나란히 놓인 상자의 면 접촉이 네 점이다. GLSL 의 RIGID_MAX_MANIFOLD
 // 와 같아야 두 백엔드가 같은 접촉을 본다.
 inline constexpr size_t MAX_MANIFOLD_POINTS = 4;
@@ -68,6 +71,15 @@ struct JointState {
     glm::vec3 localAxis{0.0F, 1.0F, 0.0F};
     float length = 1.0F;
     scene::JointType type = scene::JointType::BALL;
+    // 아래는 경첩 전용이다. 부품이 도로 적어 둔 각을 라디안으로 미리 바꿔 담는다.
+    scene::JointMotor motor = scene::JointMotor::NONE;
+    bool useLimit = false;
+    float lowerAngle = 0.0F;
+    float upperAngle = 0.0F;
+    float targetAngle = 0.0F;
+    float targetSpeed = 0.0F;
+    float motorStiffness = 0.0F;
+    float maxTorque = 0.0F;
 };
 
 // 관절 부품을 bodies 첨자로 편다. A 가 bodies 에 없으면(다른 백엔드·강체 없음) 건너뛰고, B 가 없으면 고정점이다.

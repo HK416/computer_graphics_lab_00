@@ -2,7 +2,7 @@
 # 바이트로 같은지 본다. 인자: -DCG_LAB=<실행 파일> -DSOURCE=<저장소 뿌리> -DOUT=<출력 JSON>.
 #
 # ponytail: 기준 파일은 같은 컴파일러·같은 부동소수 경로를 전제한다. 다른 플랫폼에서 갈리면 허용 오차 비교로 바꾼다.
-foreach(scene_name rigid_cpu joints_cpu)
+foreach(scene_name rigid_cpu joints_cpu joints_motor_cpu)
     execute_process(
         COMMAND "${CG_LAB}" --headless --open tests/scenes/${scene_name}.json --play --frames 120 --save "${OUT}"
         WORKING_DIRECTORY "${SOURCE}"

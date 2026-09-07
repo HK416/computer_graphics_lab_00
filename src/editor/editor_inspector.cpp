@@ -428,6 +428,35 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         ImGui::DragFloat3(joint.other >= 0 ? "앵커 B (지역)" : "앵커 B (세계)", glm::value_ptr(joint.anchorB), 0.01F);
         if (joint.type == scene::JointType::HINGE) {
             ImGui::DragFloat3("축 (A 지역)", glm::value_ptr(joint.axis), 0.01F);
+            ImGui::Checkbox("한계각", &joint.useLimit);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("두 물체의 자세가 같을 때가 0 도이고, 축의 오른손 방향이 양이다.");
+            }
+            if (joint.useLimit) {
+                ImGui::DragFloat("하한 (도)", &joint.lowerAngle, 1.0F, -180.0F, 180.0F, "%.1f");
+                ImGui::DragFloat("상한 (도)", &joint.upperAngle, 1.0F, -180.0F, 180.0F, "%.1f");
+            }
+            int motor = static_cast<int>(joint.motor);
+            if (ImGui::Combo("모터", &motor, "없음\0목표 각속도\0목표 각도\0")) {
+                joint.motor = static_cast<scene::JointMotor>(motor);
+            }
+            if (joint.motor != scene::JointMotor::NONE) {
+                if (joint.motor == scene::JointMotor::POSITION) {
+                    ImGui::DragFloat("목표 각도 (도)", &joint.targetAngle, 1.0F, -180.0F, 180.0F, "%.1f");
+                    ImGui::DragFloat("이득 (1/초)", &joint.motorStiffness, 0.1F, 0.0F, 200.0F, "%.1f");
+                }
+                ImGui::DragFloat(joint.motor == scene::JointMotor::POSITION ? "각속도 상한 (도/초)"
+                                                                            : "목표 각속도 (도/초)",
+                                 &joint.targetSpeed,
+                                 1.0F,
+                                 -1440.0F,
+                                 1440.0F,
+                                 "%.0f");
+                ImGui::DragFloat("최대 토크 (N·m)", &joint.maxTorque, 0.1F, 0.0F, 1000.0F, "%.2f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("0 이면 모터가 꺼진 것과 같다. GPU 백엔드는 Jacobi 라 CPU 보다 세게 나온다.");
+                }
+            }
         }
         if (joint.type == scene::JointType::DISTANCE) {
             ImGui::DragFloat("거리", &joint.length, 0.01F, 0.0F, 100.0F, "%.2f");

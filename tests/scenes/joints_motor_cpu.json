@@ -1,0 +1,337 @@
+{
+ "version": 8,
+ "name": "관절 모터 cpu",
+ "models": [
+  "<builtin:plane>",
+  "<builtin:box>"
+ ],
+ "camera": {
+  "mode": "orbit",
+  "target": [
+   0.0,
+   2.0,
+   0.0
+  ],
+  "distance": 6.0,
+  "pitch": -8.0,
+  "yaw": -90.0,
+  "fovY": 50.0,
+  "near": 0.05,
+  "moveSpeed": 2.0,
+  "position": [
+   0.0,
+   2.5,
+   6.0
+  ]
+ },
+ "ambient": {
+  "color": [
+   0.25,
+   0.25,
+   0.25
+  ],
+  "intensity": 1.0
+ },
+ "lights": [
+  {
+   "type": "directional",
+   "color": [
+    1.0,
+    0.97,
+    0.9
+   ],
+   "intensity": 3.0,
+   "range": 20.0,
+   "innerCone": 20.0,
+   "outerCone": 30.0,
+   "size": [
+    2.0,
+    2.0
+   ],
+   "castsShadow": true
+  }
+ ],
+ "animators": [],
+ "rigidBodies": [
+  {
+   "shape": "plane",
+   "mass": 0.0,
+   "useGravity": false,
+   "kinematic": true,
+   "restitution": 0.2,
+   "friction": 0.6,
+   "radius": 0.5,
+   "halfExtents": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "backend": "cpu"
+  },
+  {
+   "shape": "box",
+   "mass": 1.0,
+   "useGravity": true,
+   "kinematic": false,
+   "restitution": 0.1,
+   "friction": 0.5,
+   "radius": 0.5,
+   "halfExtents": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "backend": "cpu"
+  },
+  {
+   "shape": "box",
+   "mass": 1.0,
+   "useGravity": true,
+   "kinematic": false,
+   "restitution": 0.1,
+   "friction": 0.5,
+   "radius": 0.5,
+   "halfExtents": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "backend": "cpu"
+  },
+  {
+   "shape": "box",
+   "mass": 1.0,
+   "useGravity": true,
+   "kinematic": false,
+   "restitution": 0.1,
+   "friction": 0.5,
+   "radius": 0.5,
+   "halfExtents": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "backend": "cpu"
+  }
+ ],
+ "fluids": [],
+ "objects": [
+  {
+   "name": "태양",
+   "parent": -1,
+   "position": [
+    0,
+    5,
+    0
+   ],
+   "rotation": [
+    -0.383,
+    0.0,
+    0.0,
+    0.924
+   ],
+   "scale": [
+    1,
+    1,
+    1
+   ],
+   "visible": true,
+   "light": 0
+  },
+  {
+   "name": "바닥",
+   "parent": -1,
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation": [
+    0,
+    0,
+    0,
+    1
+   ],
+   "scale": [
+    4.0,
+    1.0,
+    4.0
+   ],
+   "visible": true,
+   "model": 0,
+   "mesh": 0,
+   "skin": -1,
+   "rigidBody": 0
+  },
+  {
+   "name": "각도 모터",
+   "parent": -1,
+   "position": [
+    -1.5,
+    2.0,
+    0.0
+   ],
+   "rotation": [
+    0,
+    0,
+    0,
+    1
+   ],
+   "scale": [
+    0.5,
+    0.08,
+    0.08
+   ],
+   "visible": true,
+   "model": 1,
+   "mesh": 0,
+   "skin": -1,
+   "rigidBody": 1,
+   "joint": 0
+  },
+  {
+   "name": "속도 모터",
+   "parent": -1,
+   "position": [
+    0.0,
+    2.0,
+    0.0
+   ],
+   "rotation": [
+    0,
+    0,
+    0,
+    1
+   ],
+   "scale": [
+    0.5,
+    0.08,
+    0.08
+   ],
+   "visible": true,
+   "model": 1,
+   "mesh": 0,
+   "skin": -1,
+   "rigidBody": 2,
+   "joint": 1
+  },
+  {
+   "name": "한계 막대",
+   "parent": -1,
+   "position": [
+    1.5,
+    2.0,
+    0.0
+   ],
+   "rotation": [
+    0,
+    0,
+    0,
+    1
+   ],
+   "scale": [
+    0.5,
+    0.08,
+    0.08
+   ],
+   "visible": true,
+   "model": 1,
+   "mesh": 0,
+   "skin": -1,
+   "rigidBody": 3,
+   "joint": 2
+  }
+ ],
+ "joints": [
+  {
+   "type": "hinge",
+   "other": -1,
+   "anchorA": [
+    -0.5,
+    0.0,
+    0.0
+   ],
+   "anchorB": [
+    -2.0,
+    2.0,
+    0.0
+   ],
+   "axis": [
+    0,
+    0,
+    1
+   ],
+   "length": 1.0,
+   "useLimit": false,
+   "lowerAngle": -90.0,
+   "upperAngle": 90.0,
+   "motor": "position",
+   "targetAngle": 60.0,
+   "targetSpeed": 180.0,
+   "motorStiffness": 10.0,
+   "maxTorque": 20.0
+  },
+  {
+   "type": "hinge",
+   "other": -1,
+   "anchorA": [
+    -0.5,
+    0.0,
+    0.0
+   ],
+   "anchorB": [
+    -0.5,
+    2.0,
+    0.0
+   ],
+   "axis": [
+    0,
+    0,
+    1
+   ],
+   "length": 1.0,
+   "useLimit": false,
+   "lowerAngle": -90.0,
+   "upperAngle": 90.0,
+   "motor": "velocity",
+   "targetAngle": 0.0,
+   "targetSpeed": 120.0,
+   "motorStiffness": 10.0,
+   "maxTorque": 20.0
+  },
+  {
+   "type": "hinge",
+   "other": -1,
+   "anchorA": [
+    -0.5,
+    0.0,
+    0.0
+   ],
+   "anchorB": [
+    1.0,
+    2.0,
+    0.0
+   ],
+   "axis": [
+    0,
+    0,
+    1
+   ],
+   "length": 1.0,
+   "useLimit": true,
+   "lowerAngle": -45.0,
+   "upperAngle": 45.0,
+   "motor": "none",
+   "targetAngle": 0.0,
+   "targetSpeed": 90.0,
+   "motorStiffness": 10.0,
+   "maxTorque": 10.0
+  }
+ ],
+ "particleSystems": [],
+ "cloths": [],
+ "forceFields": [],
+ "ddgiVolumes": [],
+ "cameraComponents": [],
+ "cameraPaths": []
+}
