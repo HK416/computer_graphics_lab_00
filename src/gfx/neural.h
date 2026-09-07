@@ -71,6 +71,20 @@ public:
 
     // 컴퓨트 파이프라인을 다 만들었는지.
     bool available() const { return ready; }
+    // 협력 행렬(텐서 코어) 가속을 쓸 수 있는지. 장치가 모양을 광고하고 그 변종 파이프라인이 만들어진
+    // 경우에만 참이다.
+    bool cooperativeAvailable() const { return linearCoopPipeline != VK_NULL_HANDLE; }
+    // 켜면 선형 층 **순전파**가 협력 행렬 변종으로 돈다. 역전파와 나머지 연산은 그대로 FMA 경로다.
+    // 기본은 꺼짐이다 — CPU 기준과 비트로 같다는 계약은 FMA 경로만 진다.
+    //
+    // ponytail: 지금 이것을 켜는 곳은 자기 검사뿐이다. 학습 경로가 켜는 것은 12단계의 플러그인이고,
+    // 그때 «가속을 켜면 같은 곳으로 학습이 가는가» 를 점수로 확인한다.
+    //
+    // 파이프라인을 만들 때 서브그룹 크기를 못 박는 것과 작업 그룹 크기를 거기에 맞추는 것도 자기 검사가
+    // 지켜 주지 못한다(돌연변이로 확인). 이 기기는 서브그룹이 늘 32 이고, 작업 그룹을 128 로 두면
+    // 서브그룹 넷이 같은 답을 네 번 쓸 뿐이라 결과가 같다. 규격을 읽어서 지키는 자리다.
+    void setCooperative(bool enable) { cooperative = enable && cooperativeAvailable(); }
+    bool cooperativeEnabled() const { return cooperative; }
 
     // 그래프 표를 올리고 버퍼를 잡는다. 다시 부르면 다시 잡는다. validateForward 를 지나지 않는 표는
     // 거짓이다.
@@ -137,11 +151,14 @@ private:
     // 파이프라인 하나를 threads 개 스레드로 돈다. 푸시 상수는 연산 번호와 방향만 다르다.
     void dispatchKernel(
         VkCommandBuffer commandBuffer, VkPipeline pipeline, uint32_t opIndex, uint32_t flags, uint32_t threads);
+    void dispatchGroups(
+        VkCommandBuffer commandBuffer, VkPipeline pipeline, uint32_t opIndex, uint32_t flags, uint32_t groups);
     void barrier(VkCommandBuffer commandBuffer);
     void clearBarrier(VkCommandBuffer commandBuffer);
 
     Context& context;
     bool ready = false;
+    bool cooperative = false;
     uint32_t missing = 0;
 
     Graph graph;
@@ -153,6 +170,8 @@ private:
     // 선형 층은 방향마다 커널이 다르다. 순전파는 출력 원소마다, 역전파는 dx·dw·db 셋이 각자의 출력
     // 원소마다 스레드 하나씩이라 디스패치 크기가 전부 다르기 때문이다.
     VkPipeline linearPipeline = VK_NULL_HANDLE;
+    // 협력 행렬 변종. 만들지 못해도 실행기는 돈다.
+    VkPipeline linearCoopPipeline = VK_NULL_HANDLE;
     VkPipeline linearDxPipeline = VK_NULL_HANDLE;
     VkPipeline linearDwPipeline = VK_NULL_HANDLE;
     VkPipeline biasGradPipeline = VK_NULL_HANDLE;

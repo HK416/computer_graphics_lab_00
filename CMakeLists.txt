@@ -181,7 +181,12 @@ set(shader_variants
     "shaders/mesh.frag|mesh_rq.frag.spv|RAY_QUERY_SHADOWS"
     "shaders/mesh_oit.frag|mesh_oit_rq.frag.spv|RAY_QUERY_SHADOWS"
     "shaders/particles.comp|particles_rq.comp.spv|PARTICLE_RAY_QUERY"
-    "shaders/cloth_finish.comp|cloth_finish_rq.comp.spv|CLOTH_RAY_QUERY")
+    "shaders/cloth_finish.comp|cloth_finish_rq.comp.spv|CLOTH_RAY_QUERY"
+    # 협력 행렬은 모양이 SPIR-V 에 박히므로 런타임 분기가 안 된다. 모양마다 한 벌씩 컴파일해 두고
+    # 장치가 광고하는 것과 맞는 것만 파이프라인으로 만든다. src/gfx/context.cpp 의 COOP_CANDIDATES 와
+    # 한 줄씩 짝이 맞아야 한다.
+    "shaders/neural_linear_coop.comp|neural_linear_coop_f32_16.comp.spv|NEURAL_COOP_F32_16_16_16"
+    "shaders/neural_linear_coop.comp|neural_linear_coop_f16_16.comp.spv|NEURAL_COOP_F16_16_16_16")
 
 foreach(variant IN LISTS shader_variants)
     string(REPLACE "|" ";" variant_parts "${variant}")

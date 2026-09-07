@@ -121,9 +121,11 @@ struct FeatureChain {
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracing{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
     VkPhysicalDeviceRayQueryFeaturesKHR rayQuery{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
 
     // 드라이버가 광고하지 않은 확장의 구조체를 체인에 넣는 것은 규정 밖이므로 지원 여부로 걸러 연결한다.
-    void link(bool withMesh, bool withAccel, bool withRayTracing, bool withRayQuery) {
+    void link(bool withMesh, bool withAccel, bool withRayTracing, bool withRayQuery, bool withCoop) {
         features2.pNext = nullptr;
         void** next = &features2.pNext;
         auto append = [&next](auto& node) {
@@ -145,6 +147,9 @@ struct FeatureChain {
         }
         if (withRayQuery) {
             append(rayQuery);
+        }
+        if (withCoop) {
+            append(coop);
         }
     }
 };
@@ -254,6 +259,101 @@ bool selectQueueFamilies(VkPhysicalDevice device, VkSurfaceKHR surface, QueueFam
     return true;
 }
 
+// 미리 컴파일해 둔 협력 행렬 모양. **셰이더 변종과 하나씩 짝이 맞아야 한다** — 여기에 줄을 더하면
+// CMakeLists 의 shader_variants 에도 같은 이름의 변종을 더한다. 앞에 있는 것을 먼저 고른다.
+//
+// fp32 A/B 를 먼저 두는 이유: 캐스팅이 없어 FMA 경로와 오차가 거의 없고, 그래서 «가속을 켜도 학습이
+// 같은 곳으로 간다» 를 확인하기 쉽다. fp16 은 A/B 만 반정밀도이고 누산기는 fp32 다.
+struct CoopCandidate {
+    uint32_t m;
+    uint32_t n;
+    uint32_t k;
+    bool float32;
+    // 이 모양으로 컴파일해 둔 변종의 이름. 여기 함께 두어야 모양과 셰이더가 갈라지지 않는다.
+    const char* shader;
+};
+constexpr CoopCandidate COOP_CANDIDATES[] = {
+    // ponytail: fp32 A/B 는 개발 기기(RTX 3060)가 광고하지 않아 **한 번도 돌려 보지 못했다.** 컴파일만
+    // 확인했다. 자기 검사가 지금 증명하는 것은 fp16 갈래뿐이다.
+    {16, 16, 16, true, "neural_linear_coop_f32_16.comp.spv"},
+    {16, 16, 16, false, "neural_linear_coop_f16_16.comp.spv"},
+};
+
+// 장치가 광고하는 모양과 후보의 교집합에서 첫 번째를 고른다. 없으면 caps 를 건드리지 않는다(가속만 꺼진다).
+//
+// **아래 게이트들은 이 기기에서 검사할 방법이 없다.** 개발 기기가 모든 조건을 만족하므로, 조건을 하나씩
+// 빼는 돌연변이를 넣어도 자기 검사가 그대로 통과한다(실측). 조건을 어기는 기기에서만 갈린다 — 하드웨어
+// 게이트가 원래 그런 것이고, 그래서 여기서는 «돌려 보고 맞추는» 대신 규격이 요구하는 것을 하나씩 적는다.
+void selectCooperativeMatrix(VkInstance instance,
+                             VkPhysicalDevice device,
+                             const VkPhysicalDeviceVulkan13Properties& v13,
+                             uint32_t subgroupSize,
+                             Capabilities& caps) {
+    // 서브그룹 크기를 못 박을 수 없으면 시작하지도 않는다. AMD 처럼 wave32/wave64 가 섞이는 기기에서
+    // 작업 그룹 32 개가 64 폭 서브그룹의 절반만 채우면 협력 행렬 연산 자체가 규정 밖이 된다.
+    if (!caps.subgroupSizeControl || (v13.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) == 0) {
+        return;
+    }
+    // 협력 행렬 셰이더는 Vulkan 메모리 모델을 선언한다. 기능을 못 켜면 모듈을 만들 수 없다.
+    if (!caps.vulkanMemoryModel) {
+        return;
+    }
+    // **컴퓨트 단계를 광고해야 한다.** 모양이 맞아도 이 단계가 빠지면 OpTypeCooperativeMatrixKHR 을 담은
+    // 모듈 자체가 규정 밖이다(VUID-RuntimeSpirv-cooperativeMatrixSupportedStages-08985).
+    VkPhysicalDeviceCooperativeMatrixPropertiesKHR coopProperties{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_KHR};
+    VkPhysicalDeviceProperties2 properties2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    properties2.pNext = &coopProperties;
+    vkGetPhysicalDeviceProperties2(device, &properties2);
+    if ((coopProperties.cooperativeMatrixSupportedStages & VK_SHADER_STAGE_COMPUTE_BIT) == 0) {
+        return;
+    }
+    if (subgroupSize < v13.minSubgroupSize || subgroupSize > v13.maxSubgroupSize) {
+        return;
+    }
+    // **로더가 이 함수를 내보내지 않는다.** vkGetInstanceProcAddr 로 받아야 한다.
+    auto enumerate = reinterpret_cast<PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR>(
+        vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR"));
+    if (enumerate == nullptr) {
+        return;
+    }
+    uint32_t count = 0;
+    if (enumerate(device, &count, nullptr) != VK_SUCCESS || count == 0) {
+        return;
+    }
+    std::vector<VkCooperativeMatrixPropertiesKHR> properties(
+        count, VkCooperativeMatrixPropertiesKHR{VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR});
+    if (enumerate(device, &count, properties.data()) != VK_SUCCESS) {
+        return;
+    }
+    properties.resize(count);
+
+    for (const CoopCandidate& candidate : COOP_CANDIDATES) {
+        VkComponentTypeKHR ab = candidate.float32 ? VK_COMPONENT_TYPE_FLOAT32_KHR : VK_COMPONENT_TYPE_FLOAT16_KHR;
+        // fp16 변종은 float16 산술만 있으면 된다. A·B 를 공유 메모리에 담아 싣기 때문에 16비트 «저장
+        // 버퍼» 접근은 필요 없다 — 버퍼 안의 값은 끝까지 fp32 다.
+        if (!candidate.float32 && !caps.shaderFloat16) {
+            continue;
+        }
+        bool found = std::ranges::any_of(properties, [&](const VkCooperativeMatrixPropertiesKHR& item) {
+            // 누산기(C·Result)는 언제나 fp32 로 받는다. 반정밀도로 접으면 열 걸음도 못 간다.
+            return item.scope == VK_SCOPE_SUBGROUP_KHR && item.MSize == candidate.m && item.NSize == candidate.n &&
+                   item.KSize == candidate.k && item.AType == ab && item.BType == ab &&
+                   item.CType == VK_COMPONENT_TYPE_FLOAT32_KHR && item.ResultType == VK_COMPONENT_TYPE_FLOAT32_KHR;
+        });
+        if (found) {
+            caps.cooperativeMatrix = true;
+            caps.coopSubgroupSize = subgroupSize;
+            caps.coopM = candidate.m;
+            caps.coopN = candidate.n;
+            caps.coopK = candidate.k;
+            caps.coopFloat32 = candidate.float32;
+            caps.coopShader = candidate.shader;
+            return;
+        }
+    }
+}
+
 Capabilities queryCapabilities(const FeatureChain& f,
                                const std::vector<VkExtensionProperties>& extensions,
                                const VkPhysicalDeviceSubgroupProperties& subgroup) {
@@ -276,6 +376,7 @@ Capabilities queryCapabilities(const FeatureChain& f,
     caps.shaderInt16 = f.features2.features.shaderInt16 == VK_TRUE && f.v11.storageBuffer16BitAccess == VK_TRUE;
     caps.shaderInt8 = f.v12.shaderInt8 == VK_TRUE;
     caps.subgroupSizeControl = f.v13.subgroupSizeControl == VK_TRUE;
+    caps.vulkanMemoryModel = f.v12.vulkanMemoryModel == VK_TRUE;
     caps.textureCompressionBc = f.features2.features.textureCompressionBC == VK_TRUE;
     caps.textureCompressionAstc = f.features2.features.textureCompressionASTC_LDR == VK_TRUE;
     caps.memoryBudget = contains(extensions, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
@@ -304,7 +405,7 @@ int scoreDevice(const VkPhysicalDeviceProperties& properties, const Capabilities
     return score;
 }
 
-DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
+DeviceCandidate evaluateDevice(VkInstance instance, VkPhysicalDevice device, VkSurfaceKHR surface) {
     DeviceCandidate candidate;
     candidate.device = device;
 
@@ -314,7 +415,9 @@ DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
         return candidate;
     }
 
+    VkPhysicalDeviceVulkan13Properties v13Properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES};
     VkPhysicalDeviceSubgroupProperties subgroup{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+    subgroup.pNext = &v13Properties;
     VkPhysicalDeviceProperties2 properties2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
     properties2.pNext = &subgroup;
     vkGetPhysicalDeviceProperties2(device, &properties2);
@@ -329,8 +432,9 @@ DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
                     contains(extensions, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
     bool rayTracingExt = accelExt && contains(extensions, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
     bool rayQueryExt = accelExt && contains(extensions, VK_KHR_RAY_QUERY_EXTENSION_NAME);
+    bool coopExt = contains(extensions, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
 
-    candidate.features.link(meshExt, accelExt, rayTracingExt, rayQueryExt);
+    candidate.features.link(meshExt, accelExt, rayTracingExt, rayQueryExt, coopExt);
     vkGetPhysicalDeviceFeatures2(device, &candidate.features.features2);
 
     std::vector<const char*> missing = missingRequiredFeatures(candidate.features);
@@ -348,6 +452,10 @@ DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
     }
 
     candidate.caps = queryCapabilities(candidate.features, extensions, subgroup);
+    // 모양을 여기서 고른다. 장치를 만들기 **전**이라야 «쓸 모양이 없으면 확장을 아예 안 켠다» 가 된다.
+    if (coopExt && candidate.features.coop.cooperativeMatrix == VK_TRUE) {
+        selectCooperativeMatrix(instance, device, v13Properties, subgroup.subgroupSize, candidate.caps);
+    }
     // 타임스탬프는 주기와 큐의 유효 비트가 모두 있어야 쓸 수 있다. 어느 하나라도 0 이면 GPU 구간을
     // 잴 수 없고 프로파일러는 CPU 만 잰다.
     candidate.caps.timestamps =
@@ -391,6 +499,9 @@ DeviceCandidate evaluateDevice(VkPhysicalDevice device, VkSurfaceKHR surface) {
     }
     if (candidate.caps.rayQuery) {
         candidate.enabledExtensions.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+    }
+    if (candidate.caps.cooperativeMatrix) {
+        candidate.enabledExtensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
     }
     if (candidate.caps.memoryBudget) {
         candidate.enabledExtensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
@@ -437,6 +548,15 @@ void logCapabilities(const VkPhysicalDeviceProperties& properties,
     spdlog::info("mesh shader: {}, task shader: {}", caps.meshShader, caps.taskShader);
     spdlog::info("ray tracing pipeline: {}, ray query: {}", caps.rayTracingPipeline, caps.rayQuery);
     spdlog::info("drawIndirectCount: {}, subgroup {}", caps.drawIndirectCount, caps.subgroupSize);
+    if (caps.cooperativeMatrix) {
+        spdlog::info("협력 행렬: {}x{}x{} ({} A/B, fp32 누산기)",
+                     caps.coopM,
+                     caps.coopN,
+                     caps.coopK,
+                     caps.coopFloat32 ? "fp32" : "fp16");
+    } else {
+        spdlog::info("협력 행렬: 없음 (신경망 선형 층은 FMA 경로로만 돈다)");
+    }
     spdlog::info("타임스탬프 쿼리: {} (주기 {:.2f} ns, 유효 비트 {})",
                  caps.timestamps,
                  properties.limits.timestampPeriod,
@@ -527,7 +647,7 @@ Context::Context(SDL_Window* window) {
     DeviceCandidate best;
     std::string rejectionDetail;
     for (VkPhysicalDevice device : devices) {
-        DeviceCandidate candidate = evaluateDevice(device, surface);
+        DeviceCandidate candidate = evaluateDevice(instance, device, surface);
         if (!candidate.suitable) {
             VkPhysicalDeviceProperties rejected{};
             vkGetPhysicalDeviceProperties(device, &rejected);
@@ -569,7 +689,8 @@ Context::Context(SDL_Window* window) {
 
     // 조회 결과를 그대로 넘기면 robustBufferAccess 같은 비용 있는 기능까지 켜지므로 필요한 것만 다시 세운다.
     FeatureChain enabled;
-    enabled.link(caps.meshShader, caps.accelerationStructure, caps.rayTracingPipeline, caps.rayQuery);
+    enabled.link(
+        caps.meshShader, caps.accelerationStructure, caps.rayTracingPipeline, caps.rayQuery, caps.cooperativeMatrix);
     enabled.features2.features.multiDrawIndirect = VK_TRUE;
     enabled.features2.features.drawIndirectFirstInstance = VK_TRUE;
     enabled.features2.features.fillModeNonSolid = VK_TRUE;
@@ -600,6 +721,8 @@ Context::Context(SDL_Window* window) {
     enabled.v12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
     enabled.v12.timelineSemaphore = VK_TRUE;
     enabled.v12.scalarBlockLayout = VK_TRUE;
+    // 협력 행렬 셰이더만 이 모델을 쓴다. 메모리 모델은 모듈마다 선언하므로 나머지 셰이더는 영향받지 않는다.
+    enabled.v12.vulkanMemoryModel = caps.vulkanMemoryModel ? VK_TRUE : VK_FALSE;
     enabled.v12.hostQueryReset = VK_TRUE;
     enabled.v12.drawIndirectCount = caps.drawIndirectCount ? VK_TRUE : VK_FALSE;
     enabled.v12.shaderFloat16 = caps.shaderFloat16 ? VK_TRUE : VK_FALSE;
@@ -616,6 +739,7 @@ Context::Context(SDL_Window* window) {
     enabled.accel.accelerationStructureIndirectBuild = caps.accelerationStructureIndirectBuild ? VK_TRUE : VK_FALSE;
     enabled.rayTracing.rayTracingPipeline = caps.rayTracingPipeline ? VK_TRUE : VK_FALSE;
     enabled.rayQuery.rayQuery = caps.rayQuery ? VK_TRUE : VK_FALSE;
+    enabled.coop.cooperativeMatrix = caps.cooperativeMatrix ? VK_TRUE : VK_FALSE;
 
     VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     deviceInfo.pNext = &enabled.features2;

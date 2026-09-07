@@ -1,0 +1,149 @@
+#version 460
+
+// 선형 층 순전파의 **협력 행렬(텐서 코어) 가속 변종**. 기본 경로는 언제나 neural_linear.comp 이고,
+// 이 변종은 장치가 모양을 광고할 때만 만들어진다(gfx::Capabilities::cooperativeMatrix).
+//
+// **이 커널은 CPU 기준과 비트로 같지 않다.** 협력 행렬은 k 를 타일로 쪼개 부분합을 모으므로 덧셈 순서가
+// 다르고, fp16 변종은 A/B 를 반정밀도로 낮춘다. 그래서 자기 검사가 이 열에만 따로 허용치를 둔다. 스택의
+// «두 엔진이 비트로 같다» 계약은 FMA 경로가 지고, 이쪽은 «같은 곳으로 학습이 가는가» 만 본다.
+//
+// 모양은 정의 이름 자체가 나른다. CMakeLists 의 shader_variants 와 context.cpp 의 COOP_CANDIDATES 가
+// 한 줄씩 짝이 맞아야 한다.
+#if defined(NEURAL_COOP_F32_16_16_16)
+#define COOP_COMPONENT float
+#define COOP_M 16
+#define COOP_N 16
+#define COOP_K 16
+#elif defined(NEURAL_COOP_F16_16_16_16)
+#define COOP_HALF 1
+#define COOP_COMPONENT float16_t
+#define COOP_M 16
+#define COOP_N 16
+#define COOP_K 16
+#else
+#error "협력 행렬 모양 정의가 없습니다"
+#endif
+
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#ifdef COOP_HALF
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
+
+#include "neural_common.glsl"
+
+// **이 파일의 배리어와 공유 메모리 왕복은 자기 검사가 지켜 주지 못한다.** 돌연변이로 확인했다 — 배리어를
+// 빼도(공유 배열 채운 뒤, 누산기 출발값 심은 뒤), 누산기 출발값을 공유 대신 전역 버퍼로 왕복시켜도 이
+// 기기에서는 답이 같다. 작업 그룹이 서브그룹 하나(32)라 사실상 한 덩어리로 돌고, 전역 왕복도 같은 SM 의
+// L1 을 지나기 때문이다. 규격은 어느 쪽도 보장하지 않는다. 그러니 이 자리는 **답이 맞는지가 아니라 규격을
+// 읽어서** 지킨다: 협력 행렬 적재가 공유 메모리에서만 오게 두고, 공유 배열을 채운 뒤와 다시 쓰기 전에
+// 배리어를 건다.
+
+// 작업 그룹이 정확히 한 서브그룹이다. 크기는 특수화 상수로 들어오고 파이프라인이
+// VkPipelineShaderStageRequiredSubgroupSizeCreateInfo 로 같은 값을 못 박는다.
+layout(local_size_x_id = 0) in;
+
+// **A·B 는 공유 메모리를 거쳐 싣는다.** coopMatLoad 는 버퍼의 원소를 성분 형으로 «변환» 해 주지 않는다 —
+// fp16 행렬에 fp32 배열을 그대로 물리면 같은 메모리를 반정밀도로 다시 읽어 쓰레기가 나온다(실측: 오차
+// 1.4e9). 그래서 스레드가 나눠 담으며 형을 바꾸고, 그 공유 배열에서 싣는다. fp32 모양에서는 변환이
+// 항등이지만 갈래를 둘로 늘리지 않으려고 같은 길을 쓴다.
+shared COOP_COMPONENT tileA[COOP_M * COOP_K];
+shared COOP_COMPONENT tileB[COOP_K * COOP_N];
+// 누산기의 **출발값**(편향 + k 꼬리)도 공유 메모리에 심는다. 전역 버퍼에 심었다가 다시 싣는 길도
+// 되기는 하지만 **규격이 보장하지 않는다** — 이 셰이더는 Vulkan 메모리 모델로 컴파일되는데, 그 모델에서
+// availability/visibility 는 NonPrivatePointer 로 표시한 접근에만 걸린다. neuralWrite 의 저장과 협력
+// 행렬 적재에는 그 표시가 없어(둘 다 평범한 buffer_reference 접근이다) 사이에 배리어를 걸어도 무동작이다.
+// 공유 배열은 glslang 이 workgroupcoherent 로 보아 표시를 붙여 주므로 이 자리를 안전하게 만든다.
+shared float tileC[COOP_M * COOP_N];
+
+void main() {
+    Op op = push.ops.items[push.op];
+    if (op.kind != NEURAL_OP_LINEAR) {
+        return;
+    }
+    Tensor source = push.tensors.items[op.inputs[0]];
+    Tensor weight = push.tensors.items[op.inputs[1]];
+    Tensor bias = push.tensors.items[op.inputs[2]];
+    Tensor target = push.tensors.items[op.result];
+
+    uint batch = source.dims[0];
+    uint inputs = source.dims[1];
+    uint outputs = target.dims[1];
+
+    // 작업 그룹 하나가 출력 타일 하나(COOP_M 행 x COOP_N 열)를 맡는다. 아래 이른 반환은 모두 작업 그룹
+    // 단위로 갈리므로 barrier() 앞에서 갈래가 나뉘지 않는다.
+    // 타일 번호는 «열 타일이 안쪽» 으로 푼다. 호스트가 세는 수(neural.cpp 의 dispatchGroups 인자)와
+    // 같은 규칙이어야 한다.
+    uint columnTiles = (outputs + COOP_N - 1u) / COOP_N;
+    uint tileIndex = gl_WorkGroupID.x;
+    uint tileRow = (tileIndex / columnTiles) * COOP_M;
+    uint tileCol = (tileIndex % columnTiles) * COOP_N;
+    if (tileRow >= batch || tileCol >= outputs) {
+        return;
+    }
+
+    // 가장자리 타일은 행렬 밖을 읽게 되므로 협력 행렬을 쓸 수 없다. 그런 타일은 스레드가 원소를 나눠
+    // 맡아 FMA 경로와 **글자 그대로 같은 식**으로 센다(그래서 가장자리는 오히려 비트까지 같다).
+    if (tileRow + COOP_M > batch || tileCol + COOP_N > outputs) {
+        uint tileHeight = min(uint(COOP_M), batch - tileRow);
+        uint tileWidth = min(uint(COOP_N), outputs - tileCol);
+        for (uint slot = gl_LocalInvocationID.x; slot < tileHeight * tileWidth; slot += gl_WorkGroupSize.x) {
+            uint n = tileRow + slot / tileWidth;
+            uint m = tileCol + slot % tileWidth;
+            precise float sum = neuralRead(bias, m);
+            for (uint k = 0; k < inputs; ++k) {
+                sum += neuralRead(weight, m * inputs + k) * neuralRead(source, n * inputs + k);
+            }
+            neuralWrite(target, n * outputs + m, sum);
+        }
+        return;
+    }
+
+    // 협력 행렬은 k 를 COOP_K 씩 접으므로 입력 폭이 COOP_K 의 배수가 아니면 꼬리가 남는다. 그 꼬리는
+    // **먼저** 스칼라로 세어 편향과 함께 tileC 에 심고, 그것을 누산기의 출발값으로 싣는다. 그러면
+    // «누산기의 특정 칸에 스칼라를 더할 방법이 없다» 는 제약을 피하면서 임의의 입력 폭을 받을 수 있다.
+    uint blocks = inputs / COOP_K;
+    uint tailBegin = blocks * COOP_K;
+    for (uint slot = gl_LocalInvocationID.x; slot < COOP_M * COOP_N; slot += gl_WorkGroupSize.x) {
+        uint n = tileRow + slot / COOP_N;
+        uint m = tileCol + slot % COOP_N;
+        precise float sum = neuralRead(bias, m);
+        for (uint k = tailBegin; k < inputs; ++k) {
+            sum += neuralRead(weight, m * inputs + k) * neuralRead(source, n * inputs + k);
+        }
+        tileC[slot] = sum;
+    }
+    barrier();
+
+    coopmat<float, gl_ScopeSubgroup, COOP_M, COOP_N, gl_MatrixUseAccumulator> acc;
+    coopMatLoad(acc, tileC, 0, COOP_N, gl_CooperativeMatrixLayoutRowMajor);
+
+    for (uint block = 0; block < blocks; ++block) {
+        uint base = block * COOP_K;
+        // A = x 타일 [행 = 배치][열 = 입력], B = w 의 전치 [행 = 입력][열 = 출력]. 둘 다 행 우선으로
+        // 담아 두고 행 우선으로 싣는다 — 전치는 담을 때 첨자를 바꾸는 것으로 끝난다.
+        for (uint slot = gl_LocalInvocationID.x; slot < COOP_M * COOP_K; slot += gl_WorkGroupSize.x) {
+            uint n = slot / COOP_K;
+            uint k = slot % COOP_K;
+            tileA[slot] = COOP_COMPONENT(neuralRead(source, (tileRow + n) * inputs + base + k));
+        }
+        for (uint slot = gl_LocalInvocationID.x; slot < COOP_K * COOP_N; slot += gl_WorkGroupSize.x) {
+            uint k = slot / COOP_N;
+            uint m = slot % COOP_N;
+            tileB[slot] = COOP_COMPONENT(neuralRead(weight, (tileCol + m) * inputs + base + k));
+        }
+        barrier();
+
+        coopmat<COOP_COMPONENT, gl_ScopeSubgroup, COOP_M, COOP_K, gl_MatrixUseA> a;
+        coopmat<COOP_COMPONENT, gl_ScopeSubgroup, COOP_K, COOP_N, gl_MatrixUseB> b;
+        coopMatLoad(a, tileA, 0, COOP_K, gl_CooperativeMatrixLayoutRowMajor);
+        coopMatLoad(b, tileB, 0, COOP_N, gl_CooperativeMatrixLayoutRowMajor);
+        acc = coopMatMulAdd(a, b, acc);
+        // 다음 바퀴가 공유 배열을 덮어쓰기 전에 이번 적재가 끝나야 한다.
+        barrier();
+    }
+    // 출력은 늘 활성이다(validateForward 가 그것을 보장한다). 작업 그룹마다 자기 타일만 쓰므로 이
+    // 저장에는 다른 호출과의 가시성 문제가 없다 — 다음 연산과의 사이는 실행기가 배리어로 가른다.
+    uint targetBase = target.offset + tileRow * outputs + tileCol;
+    coopMatStore(acc, push.activations.items, targetBase, outputs, gl_CooperativeMatrixLayoutRowMajor);
+}

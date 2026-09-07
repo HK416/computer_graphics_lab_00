@@ -47,6 +47,29 @@ struct Capabilities {
     // 보고하지만 MSL 에 DrawIndex 가 없어 SPIR-V 변환에서 죽는다. 없으면 meshlet 디버그 뷰가 메쉬
     // 단위로 뭉개진다.
     bool shaderDrawIndex = false;
+    // Vulkan 메모리 모델. 협력 행렬 셰이더가 GL_KHR_memory_scope_semantics 를 통해 이 능력을 선언하므로
+    // 켜 두지 않으면 셰이더 모듈 생성이 규정 밖이다(검증 레이어가 VUID-...-pCode-08740 로 잡는다).
+    // 다른 셰이더는 그대로 GLSL450 모델을 쓴다 — 모델은 모듈마다 선언한다.
+    bool vulkanMemoryModel = false;
+    // 협력 행렬(텐서 코어). 신경망 선형 층의 **가속 변종**만 쓴다. 기본 경로는 언제나 FMA 커널이다.
+    // 미리 컴파일해 둔 모양 후보와 장치가 광고하는 모양의 교집합이 비면 꺼진다.
+    bool cooperativeMatrix = false;
+    // 고른 모양의 셰이더 변종 이름. **모양과 셰이더를 한 자리에서 고른다** — 이름을 부르는 쪽에서
+    // 다시 조합하면 후보를 더할 때 모양은 바뀌고 셰이더는 안 바뀌는 어긋남이 생긴다(그러면 디스패치는
+    // 32 행 타일을 세는데 셰이더는 16 행만 채워 출력 아래 절반이 비고, 컴파일러도 검증 레이어도 잡지
+    // 못한다). 정적 수명 리터럴을 가리킨다.
+    const char* coopShader = nullptr;
+    // 고른 모양. cooperativeMatrix 가 false 면 전부 0 이다.
+    uint32_t coopM = 0;
+    uint32_t coopN = 0;
+    uint32_t coopK = 0;
+    // A/B 가 fp32 인가. 그러면 캐스팅이 없어 FMA 경로와 아주 가깝고, false 면 fp16 A/B 에 fp32 누산기라
+    // 오차가 두 자릿수 커진다. 자기 검사의 허용치가 이 값에 따라 갈린다.
+    bool coopFloat32 = false;
+    // 협력 행렬 커널을 못 박아 만들 서브그룹 크기. 협력 행렬은 서브그룹 전체가 함께 도는 연산이라
+    // 작업 그룹이 정확히 한 서브그룹이어야 한다. 드라이버가 컴퓨트 단계의 크기 고정을 허용하지 않으면
+    // 모양이 있어도 가속을 켜지 않는다.
+    uint32_t coopSubgroupSize = 0;
     uint32_t subgroupSize = 0;
 };
 

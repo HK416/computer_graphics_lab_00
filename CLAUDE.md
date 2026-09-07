@@ -58,7 +58,9 @@ ctest --test-dir build/debug --output-on-failure
 `concurrency` `vertex_pack` `physics` `policy` `robot` `neural` `rl_agent` `primitives` `debug_lines` `hardware_profile` `fluid`
 `marching_cubes` `cloth` `headless_physics`(cg_lab 을 `--headless` 로 돌려 저장 결과를 `tests/scenes/expected/` 와 cmp)
 `neural_selfcheck`(cg_lab 을 `--neural-selfcheck` 로 돌려 신경망 컴퓨트 커널을 CPU 기준과 견준다 — GPU 가 있어야 돈다.
-연산마다 최대 오차를 찍고, 마지막에 **두 엔진이 열 걸음 학습한 뒤 가중치가 같은지**를 본다).
+연산마다 최대 오차를 찍고, 마지막에 **두 엔진이 열 걸음 학습한 뒤 가중치가 같은지**를 본다. 네 번째 열은
+협력 행렬 가속 변종인데 **이 열만 상대 오차이고 «0 이 아닌 것이 정상»** 이다 — 덧셈 순서가 다르고 fp16
+모양은 입력을 반정밀도로 누른다).
 
 선택 기능:
 
@@ -279,6 +281,15 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | 연산의 순·역전파 (`forwardImpl`·`backwardFrom`, `src/gfx/neural_math.cpp`) | 같은 갈래 (`shaders/neural_*.comp`) — 알고리즘이 두 벌이라 한쪽을 고치면 다른 쪽도 **같은 순서로** 고친다. 누산 순서까지 같아야 두 엔진이 비트로 같고, 그래서 GLSL 쪽 누산기에는 `precise` 를 붙여 FMA 축약을 막는다(CPU 쪽은 CMake 가 `-ffp-contract=off`). **나눗셈과 `sqrt` 가 있는 연산만은 비트로 같을 수 없다** — Vulkan 이 정확 반올림을 요구하는 것은 덧셈·뺄셈·곱셈·FMA 뿐이고 `OpFDiv` 2.5 ULP, `Sqrt` 3.0 ULP 까지 허용한다. layernorm 이 그 경우다. `--neural-selfcheck` 가 연산마다 견주고, 마지막에 «열 걸음 학습 뒤 가중치» 까지 본다 |
 
 전부 `scalar` 레이아웃이다.
+
+협력 행렬은 **모양이 SPIR-V 에 박혀** 런타임 분기가 안 되므로 세 자리가 한 줄씩 짝이 맞아야 한다:
+`COOP_CANDIDATES`(`src/gfx/context.cpp`) ↔ `shader_variants`(`CMakeLists.txt`) ↔
+`shaders/neural_linear_coop.comp` 의 `#if defined(NEURAL_COOP_*)` 갈래. 후보를 더할 때 셋을 함께 고친다.
+하나만 고치면 장치가 광고하는 모양을 골라 놓고 없는 `.spv` 를 찾거나 엉뚱한 모양의 셰이더를 쓴다 —
+컴파일러도 검증 레이어도 잡지 못하고, 출력의 일부가 조용히 안 써진다.
+
+`COOP_CANDIDATES` 의 한 줄이 **모양과 `.spv` 이름을 함께** 들고 `Capabilities::coopShader` 로 나른다.
+파이프라인을 만드는 쪽에서 이름을 다시 조합하지 않는다(그러면 짝이 넷으로 늘고 어긋날 자리가 생긴다).
 
 배치가 아니라 «값» 이 묶인 자리도 있다. `physics::FluidParams`(`src/physics/fluid_sph.h`)는 CPU
 백엔드가 쓰고, `FluidSimulator::fillParams` 가 그것을 `GpuFluidParams` 로 필드마다 옮겨 담는다. 유체

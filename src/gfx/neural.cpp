@@ -16,7 +16,11 @@ namespace gfx {
 namespace {
 
 // 만들지 못하면 VK_NULL_HANDLE 을 돌려준다. CPU 기준이 있으므로 중단하지 않는다.
-VkPipeline createComputePipeline(Context& context, VkPipelineLayout layout, const char* shaderName) {
+VkPipeline createComputePipeline(Context& context,
+                                 VkPipelineLayout layout,
+                                 const char* shaderName,
+                                 uint32_t groupSizeOverride = 0,
+                                 uint32_t requiredSubgroupSize = 0) {
     VkShaderModule module = tryCreateShaderModule(context.device, shaderName);
     if (module == VK_NULL_HANDLE) {
         return VK_NULL_HANDLE;
@@ -27,7 +31,7 @@ VkPipeline createComputePipeline(Context& context, VkPipelineLayout layout, cons
     entry.constantID = 0;
     entry.offset = 0;
     entry.size = sizeof(uint32_t);
-    uint32_t groupSize = NEURAL_GROUP_SIZE;
+    uint32_t groupSize = groupSizeOverride != 0 ? groupSizeOverride : NEURAL_GROUP_SIZE;
     VkSpecializationInfo specialization{};
     specialization.mapEntryCount = 1;
     specialization.pMapEntries = &entry;
@@ -39,6 +43,15 @@ VkPipeline createComputePipeline(Context& context, VkPipelineLayout layout, cons
     stage.module = module;
     stage.pName = "main";
     stage.pSpecializationInfo = &specialization;
+    // 협력 행렬은 서브그룹 전체가 함께 도는 연산이라 작업 그룹이 정확히 한 서브그룹이어야 한다. 크기를
+    // 못 박지 않으면 드라이버가 [min, max] 안에서 고를 수 있고, 그러면 작업 그룹이 서브그룹의 일부만
+    // 채워 연산 자체가 규정 밖이 된다.
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroupSize{
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO};
+    if (requiredSubgroupSize != 0) {
+        subgroupSize.requiredSubgroupSize = requiredSubgroupSize;
+        stage.pNext = &subgroupSize;
+    }
     VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     info.stage = stage;
     info.layout = layout;
@@ -99,6 +112,7 @@ NeuralExecutor::~NeuralExecutor() {
     }
     for (VkPipeline pipeline : {elementwisePipeline,
                                 linearPipeline,
+                                linearCoopPipeline,
                                 linearDxPipeline,
                                 linearDwPipeline,
                                 biasGradPipeline,
@@ -134,6 +148,15 @@ void NeuralExecutor::createPipelines() {
 
     elementwisePipeline = createComputePipeline(context, pipelineLayout, "neural_elementwise.comp.spv");
     linearPipeline = createComputePipeline(context, pipelineLayout, "neural_linear.comp.spv");
+    if (context.caps.cooperativeMatrix && context.caps.coopShader != nullptr) {
+        // 모양도 셰이더 이름도 이미 골라져 있다(COOP_CANDIDATES 가 둘을 한 줄에 담는다). 여기서 이름을
+        // 다시 조합하지 않는 것이 요점이다 — 후보를 더할 때 모양과 셰이더가 갈라지는 것을 막는다.
+        linearCoopPipeline = createComputePipeline(context,
+                                                   pipelineLayout,
+                                                   context.caps.coopShader,
+                                                   context.caps.coopSubgroupSize,
+                                                   context.caps.coopSubgroupSize);
+    }
     linearDxPipeline = createComputePipeline(context, pipelineLayout, "neural_linear_dx.comp.spv");
     linearDwPipeline = createComputePipeline(context, pipelineLayout, "neural_linear_dw.comp.spv");
     biasGradPipeline = createComputePipeline(context, pipelineLayout, "neural_bias_grad.comp.spv");
@@ -355,6 +378,21 @@ void NeuralExecutor::dispatchKernel(
     vkCmdDispatch(commandBuffer, (threads + NEURAL_GROUP_SIZE - 1) / NEURAL_GROUP_SIZE, 1, 1);
 }
 
+// 작업 그룹 **수**를 그대로 넘기는 갈래. 협력 행렬 커널은 작업 그룹 하나가 타일 하나를 맡으므로
+// 스레드 수에서 그룹 수를 되짚는 위 규칙이 맞지 않는다.
+void NeuralExecutor::dispatchGroups(
+    VkCommandBuffer commandBuffer, VkPipeline pipeline, uint32_t opIndex, uint32_t flags, uint32_t groups) {
+    if (groups == 0) {
+        return;
+    }
+    NeuralPushConstants push = basePush();
+    push.op = opIndex;
+    push.flags = flags;
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+    vkCmdDispatch(commandBuffer, groups, 1, 1);
+}
+
 void NeuralExecutor::dispatch(VkCommandBuffer commandBuffer, uint32_t opIndex, uint32_t flags) {
     const Op& op = graph.ops[opIndex];
     if (op.kind == OpKind::INPUT || !supported(op.kind)) {
@@ -368,7 +406,13 @@ void NeuralExecutor::dispatch(VkCommandBuffer commandBuffer, uint32_t opIndex, u
         uint32_t batch = input.dims[0];
         uint32_t inputs = input.dims[1];
         uint32_t outputs = graph.tensors[op.output].dims[1];
-        if (!backward) {
+        if (!backward && cooperative) {
+            // 작업 그룹 하나가 출력 타일 하나를 맡는다. 스레드 수가 아니라 **타일 수**를 넘긴다.
+            uint32_t rows = context.caps.coopM;
+            uint32_t columns = context.caps.coopN;
+            uint32_t tiles = ((batch + rows - 1) / rows) * ((outputs + columns - 1) / columns);
+            dispatchGroups(commandBuffer, linearCoopPipeline, opIndex, flags, tiles);
+        } else if (!backward) {
             dispatchKernel(commandBuffer, linearPipeline, opIndex, flags, batch * outputs);
         } else {
             // 셋이 서로 다른 자리에 쓰므로 사이에 배리어를 두지 않는다 — 다음 연산으로 넘어가기

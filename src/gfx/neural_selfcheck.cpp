@@ -34,6 +34,14 @@ constexpr float LAYERNORM_TOLERANCE = 5.0e-6F;
 // 마침 CPU 와 같게 반올림된 것이지 보장이 아니므로, 접는 연산에는 전부 이 허용치를 준다. 그래도 누산
 // 순서를 뒤집는 돌연변이는 4.8e-7 을 내 이 안에 들지 못한다.
 constexpr float DIVIDE_TOLERANCE = 2.0e-7F;
+// 협력 행렬 변종의 허용치. 이 열은 **앞 세 열과 성격이 다르다** — 재는 것이 «비트까지 같은가» 가 아니라
+// «가속을 켜도 같은 곳을 가리키는가» 다. fp32 A/B 는 캐스팅이 없어 k 를 타일로 접는 덧셈 순서 차이만
+// 남고, fp16 A/B 는 입력을 반정밀도(상대 오차 약 5e-4)로 눌러 두 자릿수가 더 든다.
+//
+// **이 열만 상대 오차다.** fp16 이 내는 오차는 값의 크기에 비례하므로 절대값으로 재면 층이 넓어지거나
+// 씨앗이 바뀔 때마다 허용치를 손봐야 한다. 기준 활성의 최대 크기로 나눈다(1 아래로는 나누지 않는다).
+constexpr float COOP_FLOAT32_TOLERANCE = 1.0e-5F;
+constexpr float COOP_FLOAT16_TOLERANCE = 2.0e-2F;
 // tanh 만 예외다. GLSL 의 tanh 와 std::tanh 는 서로 다른 근사라 마지막 자리가 갈린다. 실측이 1.64e-7
 // 이라 허용치를 그 두 배에 붙여 둔다 — 1e-6 처럼 넉넉히 잡으면 «조금 틀린 미분» 이 그 안에 숨는다.
 //
@@ -330,6 +338,58 @@ Case makeWideLinear() {
     uint32_t headWeight = builder.addParameter(2, 15, 1, 1);
     uint32_t headBias = builder.addParameter(2, 1, 1, 1);
     builder.addLinear(hidden, headWeight, headBias);
+    item.inputs = {input};
+    return item;
+}
+
+// **협력 행렬 타일을 실제로 밟는 모양.** 앞의 선형 검사들은 배치·출력·입력이 모두 16 보다 작아, 가속
+// 변종을 켜도 전부 «가장자리 타일» 로 떨어져 스칼라 갈래만 돈다 — 네 번째 열이 0 으로 보이지만 아무
+// 것도 검사하지 않은 것이다. 그래서 세 축을 일부러 어긋나게 잡는다.
+//
+//   배치 20  = 16(온전한 타일) + 4(가장자리)
+//   출력 21  = 16(온전한 타일) + 5(가장자리)
+//   입력 37  = 16 x 2(협력 행렬이 접는 부분) + 5(스칼라로 미리 세는 꼬리)
+//
+// 세 갈래(온전한 타일, 꼬리, 가장자리)가 한 표 안에서 모두 돈다.
+Case makeCoopTiles() {
+    Case item;
+    item.name = "coop tiles";
+    GraphBuilder builder(item.graph);
+    // 앞에 층을 하나 둔다. 뒤 층의 입력이 경사를 받는 활성이라야 dx 갈래가 돌고, 그래야 이 표가
+    // 네 열을 모두 검사한다(입력 텐서를 바로 물리면 dx 가 한 번도 돌지 않는다).
+    uint32_t input = builder.addInput(20, 5, 1, 1);
+    uint32_t stemWeight = builder.addParameter(37, 5, 1, 1);
+    uint32_t stemBias = builder.addParameter(37, 1, 1, 1);
+    // 이 층은 입력 폭이 5 라 온전한 k 블록이 하나도 없다 — 꼬리만으로 도는 갈래를 밟는다.
+    uint32_t stem = builder.addLinear(input, stemWeight, stemBias);
+    uint32_t weight = builder.addParameter(21, 37, 1, 1);
+    uint32_t bias = builder.addParameter(21, 1, 1, 1);
+    if (builder.addLinear(stem, weight, bias) == gfx::NO_TENSOR) {
+        item.graph = Graph{};
+    }
+    item.inputs = {input};
+    return item;
+}
+
+// 온전한 타일이 **여럿** 나오는 모양. 위 coop tiles 는 온전한 타일이 하나뿐이라 타일 번호를 행·열로
+// 푸는 산술이 사실상 검사되지 않는다(0 은 어떤 나눗셈으로도 0 이다).
+//
+//   배치 33  = 16 x 2 + 1(가장자리)
+//   출력 48  = 16 x 3, 가장자리 없음
+//   입력 64  = 16 x 4, 꼬리 없음
+Case makeCoopWide() {
+    Case item;
+    item.name = "coop wide";
+    GraphBuilder builder(item.graph);
+    uint32_t input = builder.addInput(33, 5, 1, 1);
+    uint32_t stemWeight = builder.addParameter(64, 5, 1, 1);
+    uint32_t stemBias = builder.addParameter(64, 1, 1, 1);
+    uint32_t stem = builder.addLinear(input, stemWeight, stemBias);
+    uint32_t weight = builder.addParameter(48, 64, 1, 1);
+    uint32_t bias = builder.addParameter(48, 1, 1, 1);
+    if (builder.addLinear(stem, weight, bias) == gfx::NO_TENSOR) {
+        item.graph = Graph{};
+    }
     item.inputs = {input};
     return item;
 }
@@ -842,6 +902,8 @@ bool runNeuralSelfCheck() {
     cases.push_back(makeLinear());
     cases.push_back(makeConcat());
     cases.push_back(makeWideLinear());
+    cases.push_back(makeCoopTiles());
+    cases.push_back(makeCoopWide());
     cases.push_back(makeConv("conv s1 p0", 1, 0, 3, 3));
     cases.push_back(makeConv("conv s2 p1", 2, 1, 3, 3));
     cases.push_back(makeConv("conv k2x3 s2", 2, 2, 2, 3));
@@ -859,7 +921,19 @@ bool runNeuralSelfCheck() {
     cases.push_back(makeFrozenLinear());
 
     std::printf("신경망 자기 검사 (CPU 기준 대 GPU)\n");
-    std::printf("  %-12s %10s %10s %10s\n", "연산", "활성", "파라미터 경사", "활성 경사");
+    // 네 번째 열은 협력 행렬(텐서 코어) 변종이다. **비트로 같지 않은 것이 정상이다** — k 를 타일로 접어
+    // 덧셈 순서가 다르고, fp16 모양은 A/B 를 반정밀도로 낮춘다. 그래서 허용치가 앞 세 열과 따로 논다.
+    if (executor.cooperativeAvailable()) {
+        std::printf("  협력 행렬 %ux%ux%u (%s A/B, fp32 누산기), 허용치 %.1e\n",
+                    context.caps.coopM,
+                    context.caps.coopN,
+                    context.caps.coopK,
+                    context.caps.coopFloat32 ? "fp32" : "fp16",
+                    static_cast<double>(context.caps.coopFloat32 ? COOP_FLOAT32_TOLERANCE : COOP_FLOAT16_TOLERANCE));
+    } else {
+        std::printf("  협력 행렬: 없음 (네 번째 열은 비운다)\n");
+    }
+    std::printf("  %-12s %10s %10s %10s %12s\n", "연산", "활성", "파라미터 경사", "활성 경사", "협력 행렬(상대)");
     bool ok = true;
     for (Case& item : cases) {
         if (!executor.build(item.graph)) {
@@ -969,14 +1043,66 @@ bool runNeuralSelfCheck() {
         float activationError = compare(activations, executor.activationResult());
         float parameterError = compare(parameterGradients, executor.parameterGradientResult());
         float gradientError = compare(activationGradients, executor.activationGradientResult());
-        std::printf("  %-12s %10.3e %10.3e %10.3e\n",
-                    item.name,
-                    static_cast<double>(activationError),
-                    static_cast<double>(parameterError),
-                    static_cast<double>(gradientError));
+
+        // 협력 행렬 변종은 **선형 층 순전파만** 갈아 끼운다. 그래서 그 연산이 없는 표는 견줄 것이 없다.
+        bool hasLinear = std::ranges::any_of(graph.ops, [](const Op& op) { return op.kind == OpKind::LINEAR; });
+        float coopError = 0.0F;
+        bool coopRan = false;
+        if (executor.cooperativeAvailable() && hasLinear) {
+            executor.setCooperative(true);
+            std::copy(parameters.begin(), parameters.end(), executor.parameterStaging());
+            std::copy(seedActivations.begin(), seedActivations.end(), executor.activationStaging());
+            std::copy(seedGradients.begin(), seedGradients.end(), executor.activationGradientStaging());
+            // **역전파까지 돌린다.** 순전파만 돌리면 «가속 변종을 역전파에도 잘못 쓴다» 는 결함이 드러나지
+            // 않는다 — 그 커널은 flags 를 보지 않고 언제나 순전파를 하므로, 잘못 불리면 경사가 씨앗
+            // 그대로 남는다. 역전파 자체는 FMA 경로 그대로라, 경사는 순전파가 낸 차이만큼만 흔들려야 한다.
+            compute.submit([&](VkCommandBuffer commandBuffer, uint64_t) {
+                executor.recordClearGradients(commandBuffer);
+                executor.recordUpload(commandBuffer);
+                executor.recordUploadGradientSeed(commandBuffer);
+                executor.recordForward(commandBuffer);
+                executor.recordBackward(commandBuffer);
+                executor.recordDownload(commandBuffer);
+            });
+            executor.invalidateReadback();
+            // 기준의 최대 크기로 나눈다. fp16 오차는 값에 비례하므로 절대값으로 재면 층 폭에 따라
+            // 허용치가 떠다닌다. 활성과 파라미터 경사를 각각 제 크기로 재고 큰 쪽을 쓴다.
+            auto relative = [](const std::vector<float>& expected, const float* measured) {
+                float scale = 1.0F;
+                for (float value : expected) {
+                    scale = std::max(scale, std::abs(value));
+                }
+                return compare(expected, measured) / scale;
+            };
+            coopError = std::max(relative(activations, executor.activationResult()),
+                                 relative(parameterGradients, executor.parameterGradientResult()));
+            coopRan = true;
+            executor.setCooperative(false);
+        }
+
+        if (coopRan) {
+            std::printf("  %-12s %10.3e %10.3e %10.3e %12.3e\n",
+                        item.name,
+                        static_cast<double>(activationError),
+                        static_cast<double>(parameterError),
+                        static_cast<double>(gradientError),
+                        static_cast<double>(coopError));
+        } else {
+            std::printf("  %-12s %10.3e %10.3e %10.3e %12s\n",
+                        item.name,
+                        static_cast<double>(activationError),
+                        static_cast<double>(parameterError),
+                        static_cast<double>(gradientError),
+                        "-");
+        }
         float worst = std::max({activationError, parameterError, gradientError});
         if (!(worst <= item.tolerance)) {
             std::printf("      허용치 %.3e 를 넘었습니다\n", static_cast<double>(item.tolerance));
+            ok = false;
+        }
+        float coopTolerance = context.caps.coopFloat32 ? COOP_FLOAT32_TOLERANCE : COOP_FLOAT16_TOLERANCE;
+        if (coopRan && !(coopError <= coopTolerance)) {
+            std::printf("      협력 행렬이 허용치 %.3e 를 넘었습니다\n", static_cast<double>(coopTolerance));
             ok = false;
         }
     }

@@ -566,6 +566,18 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::Checkbox("drawIndirectCount", &drawIndirectCount);
         ImGui::Checkbox("gl_DrawID (없으면 meshlet 디버그 뷰가 메쉬 단위)", &drawIndex);
         ImGui::EndDisabled();
+        // 협력 행렬(텐서 코어). 신경망 선형 층의 가속 변종이 이것으로 갈린다. 미지원이면 사유를 보인다 —
+        // 저장소 규약대로 소프트웨어 폴백을 만들지 않고 그 경로만 끄기 때문이다.
+        if (caps.cooperativeMatrix) {
+            ImGui::TextDisabled("Cooperative Matrix %ux%ux%u (%s A/B, fp32 누산기), 서브그룹 %u",
+                                caps.coopM,
+                                caps.coopN,
+                                caps.coopK,
+                                caps.coopFloat32 ? "fp32" : "fp16",
+                                caps.coopSubgroupSize);
+        } else {
+            ImGui::TextDisabled("Cooperative Matrix 없음 — 신경망 선형 층은 FMA 경로로만 돕니다");
+        }
     }
     // 플러그인의 절(물리·유체·프로파일러·콜라이더 표시). 렌더러 필드만 만지는 절은 위에 남아 있다.
     if (pluginSettings) {
