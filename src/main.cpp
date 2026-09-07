@@ -50,6 +50,16 @@ int main(int argc, char* argv[]) {
             options.frames = static_cast<uint64_t>(std::atoll(argv[++i]));
         } else if (argument == "--save" && i + 1 < argc) {
             options.savePath = argv[++i];
+        } else if (argument == "--policy" && i + 1 < argc) {
+            options.policyPath = argv[++i];
+        } else if (argument == "--train") {
+            options.train = true;
+        } else if (argument == "--generations" && i + 1 < argc) {
+            options.generations = static_cast<uint32_t>(std::atoi(argv[++i]));
+        } else if (argument == "--population" && i + 1 < argc) {
+            options.population = static_cast<uint32_t>(std::atoi(argv[++i]));
+        } else if (argument == "--rollout-frames" && i + 1 < argc) {
+            options.rolloutFrames = static_cast<uint32_t>(std::atoi(argv[++i]));
         } else if (argument == "--fixed-dt" && i + 1 < argc) {
             options.fixedDeltaSeconds = static_cast<float>(std::atof(argv[++i]));
         } else if (argument == "--capture" && i + 1 < argc) {

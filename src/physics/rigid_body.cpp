@@ -628,22 +628,6 @@ JointSide jointStaticSide(const glm::vec3& worldAnchor) {
     return side;
 }
 
-// B 를 기준으로 A 가 경첩 축 둘레로 돈 각(라디안). 부품이 A 에 붙어 있으니 «이 오브젝트가 얼마나
-// 돌았는가» 가 편집기에서 자연스러운 뜻이고, 축의 오른손 방향이 양이다. 두 자세가 같을 때 0 이고
-// (-pi, pi] 에 든다. 상대 회전에서 축 성분만 남긴 «비틀림» 사원수의 각을 뒤집은 것이다(경첩은 두
-// 물체의 축이 나란하므로 뒤집기만 하면 기준이 바뀐다). GLSL 의 rigidHingeAngle 과 같은 식이다.
-float hingeAngle(const glm::quat& rotationA, const glm::quat& rotationB, const glm::vec3& localAxis) {
-    glm::quat relative = glm::conjugate(rotationA) * rotationB;
-    float twist = glm::dot(glm::vec3{relative.x, relative.y, relative.z}, localAxis);
-    float real = relative.w;
-    // 사원수는 q 와 -q 가 같은 회전이다. 한쪽으로 모아야 각이 (-pi, pi] 에 들어온다.
-    if (real < 0.0F) {
-        real = -real;
-        twist = -twist;
-    }
-    return -2.0F * std::atan2(twist, real);
-}
-
 // 관절 하나가 이번 스텝에서 축 둘레로 쌓은 임펄스. 순차 임펄스는 누적값을 클램프해야 모터의 토크
 // 상한과 한계각의 «한쪽으로만 민다» 는 성질이 반복 횟수와 무관해진다.
 struct JointAccumulator {
@@ -806,6 +790,22 @@ void correctJoint(std::vector<Body>& bodies, const JointState& joint) {
 }
 
 } // namespace
+
+// B 를 기준으로 A 가 경첩 축 둘레로 돈 각(라디안). 부품이 A 에 붙어 있으니 «이 오브젝트가 얼마나
+// 돌았는가» 가 편집기에서 자연스러운 뜻이고, 축의 오른손 방향이 양이다. 두 자세가 같을 때 0 이고
+// (-pi, pi] 에 든다. 상대 회전에서 축 성분만 남긴 «비틀림» 사원수의 각을 뒤집은 것이다(경첩은 두
+// 물체의 축이 나란하므로 뒤집기만 하면 기준이 바뀐다). GLSL 의 rigidHingeAngle 과 같은 식이다.
+float hingeAngle(const glm::quat& rotationA, const glm::quat& rotationB, const glm::vec3& localAxis) {
+    glm::quat relative = glm::conjugate(rotationA) * rotationB;
+    float twist = glm::dot(glm::vec3{relative.x, relative.y, relative.z}, localAxis);
+    float real = relative.w;
+    // 사원수는 q 와 -q 가 같은 회전이다. 한쪽으로 모아야 각이 (-pi, pi] 에 들어온다.
+    if (real < 0.0F) {
+        real = -real;
+        twist = -twist;
+    }
+    return -2.0F * std::atan2(twist, real);
+}
 
 void collectJoints(const scene::Scene& scene, const std::vector<RigidBodyState>& bodies, std::vector<JointState>& out) {
     out.clear();

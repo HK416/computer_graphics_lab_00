@@ -6,6 +6,7 @@
 #include "app/plugin.h"
 #include "gfx/headless_compute.h"
 #include "gfx/rigid_body_gpu.h"
+#include "physics/rigid_body.h"
 
 namespace app {
 
@@ -18,7 +19,7 @@ namespace app {
 // 직접 제출하고 기다린다. 기다리는 만큼 되읽기가 늦지 않아 그 프레임 안에서 결과가 장면에 들어온다.
 class PhysicsPlugin : public Plugin {
 public:
-    static constexpr float STEP_SECONDS = 1.0F / 120.0F;
+    static constexpr float STEP_SECONDS = physics::STEP_SECONDS;
     static constexpr uint32_t MAX_STEPS_PER_FRAME = 8;
 
     const char* name() const override { return "물리"; }

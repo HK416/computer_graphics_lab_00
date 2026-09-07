@@ -693,4 +693,6 @@ external/
 
 # 편집기에서 저장한 장면 파일
 /public/scenes/
+# --train 이 쓰는 학습 결과. 소스가 아니라 산출물이다.
+/public/policies/
 /public/prefabs/

@@ -105,6 +105,15 @@ struct Options {
     bool headless = false;
     uint64_t frames = 120;
     std::filesystem::path savePath;
+    // --policy <파일>: 로봇 정책을 읽어 재생 중 액추에이터를 몬다. --train 과 함께 주면 학습 결과를
+    // 여기에 쓴다.
+    std::filesystem::path policyPath;
+    // --train: 기동할 때 진화 전략으로 정책을 학습한다. 장면의 모터 달린 경첩이 액추에이터다.
+    bool train = false;
+    uint32_t generations = 200;
+    uint32_t population = 32;
+    // 롤아웃 하나가 밟을 프레임 수. 프레임마다 정책을 한 번 부르고 물리를 1/120 초로 두 번 진행한다.
+    uint32_t rolloutFrames = 300;
 };
 
 class Application {

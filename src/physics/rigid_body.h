@@ -18,6 +18,9 @@ namespace physics {
 // CPU 솔버와 GPU 솔버가 **함께 쓰는** 상수. 한쪽만 고치면 백엔드를 바꿀 때 거동이 달라진다.
 // GPU 쪽은 gfx::RigidBodySimulator 가 이 값을 푸시 상수에 실어 보낸다.
 inline constexpr float GRAVITY = -9.81F;
+// 고정 물리 간격. 부르는 쪽(app::PhysicsPlugin 의 프레임 누적기, physics::RolloutSettings)이 모두
+// 이 값을 쓴다. 두 벌로 두면 학습한 정책이 재생에서 다른 간격으로 몰게 된다.
+inline constexpr float STEP_SECONDS = 1.0F / 120.0F;
 // Baumgarte 위치 보정 비율과 허용 침투. 너무 크면 튀고 너무 작으면 서서히 가라앉는다.
 inline constexpr float POSITION_CORRECTION = 0.2F;
 inline constexpr float PENETRATION_SLOP = 0.005F;
@@ -81,6 +84,10 @@ struct JointState {
     float motorStiffness = 0.0F;
     float maxTorque = 0.0F;
 };
+
+// B 를 기준으로 A 가 경첩 축 둘레로 돈 각(라디안). 두 자세가 같을 때 0 이고 (-pi, pi] 에 든다.
+// localAxis 는 정규화된 A 지역 축이다. 솔버의 한계각·모터와 로봇 관측이 같은 각을 본다.
+float hingeAngle(const glm::quat& rotationA, const glm::quat& rotationB, const glm::vec3& localAxis);
 
 // 관절 부품을 bodies 첨자로 편다. A 가 bodies 에 없으면(다른 백엔드·강체 없음) 건너뛰고, B 가 없으면 고정점이다.
 void collectJoints(const scene::Scene& scene, const std::vector<RigidBodyState>& bodies, std::vector<JointState>& out);

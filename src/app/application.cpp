@@ -18,6 +18,7 @@
 #include "app/plugins/fluid_plugin.h"
 #include "app/plugins/physics_plugin.h"
 #include "app/plugins/profiler_plugin.h"
+#include "app/plugins/robot_plugin.h"
 #include "asset/model.h"
 #include "asset/primitives.h"
 #include "core/error.h"
@@ -267,6 +268,8 @@ void Application::applyActiveCamera(scene::Scene& scene) {
 }
 
 void Application::registerPlugins() {
+    // 로봇이 물리보다 앞이다. 정책이 쓴 관절 목표를 이번 스텝이 보고 풀어야 한다.
+    plugins.push_back(std::make_unique<RobotPlugin>());
     plugins.push_back(std::make_unique<PhysicsPlugin>());
     plugins.push_back(std::make_unique<FluidPlugin>());
     plugins.push_back(std::make_unique<DebugLinesPlugin>());
