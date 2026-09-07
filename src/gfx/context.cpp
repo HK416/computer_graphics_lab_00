@@ -376,7 +376,7 @@ Capabilities queryCapabilities(const FeatureChain& f,
     caps.shaderInt16 = f.features2.features.shaderInt16 == VK_TRUE && f.v11.storageBuffer16BitAccess == VK_TRUE;
     caps.shaderInt8 = f.v12.shaderInt8 == VK_TRUE;
     caps.subgroupSizeControl = f.v13.subgroupSizeControl == VK_TRUE;
-    caps.vulkanMemoryModel = f.v12.vulkanMemoryModel == VK_TRUE;
+    caps.vulkanMemoryModel = f.v12.vulkanMemoryModel == VK_TRUE && f.v12.vulkanMemoryModelDeviceScope == VK_TRUE;
     caps.textureCompressionBc = f.features2.features.textureCompressionBC == VK_TRUE;
     caps.textureCompressionAstc = f.features2.features.textureCompressionASTC_LDR == VK_TRUE;
     caps.memoryBudget = contains(extensions, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
@@ -721,8 +721,10 @@ Context::Context(SDL_Window* window) {
     enabled.v12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
     enabled.v12.timelineSemaphore = VK_TRUE;
     enabled.v12.scalarBlockLayout = VK_TRUE;
-    // 협력 행렬 셰이더만 이 모델을 쓴다. 메모리 모델은 모듈마다 선언하므로 나머지 셰이더는 영향받지 않는다.
+    // 협력 행렬 셰이더만 이 모델을 «선언» 하지만, 기능을 켜면 규격의 제약은 장치 전체에 걸린다. 장치 범위
+    // 원자 합을 쓰는 컬링·유체·강체 셰이더가 짝 기능을 요구하므로 둘을 함께 켠다.
     enabled.v12.vulkanMemoryModel = caps.vulkanMemoryModel ? VK_TRUE : VK_FALSE;
+    enabled.v12.vulkanMemoryModelDeviceScope = caps.vulkanMemoryModel ? VK_TRUE : VK_FALSE;
     enabled.v12.hostQueryReset = VK_TRUE;
     enabled.v12.drawIndirectCount = caps.drawIndirectCount ? VK_TRUE : VK_FALSE;
     enabled.v12.shaderFloat16 = caps.shaderFloat16 ? VK_TRUE : VK_FALSE;
