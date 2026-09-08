@@ -1099,8 +1099,9 @@ bool runReplayCheck(Context& context, HeadlessCompute& compute) {
                 for (uint32_t channel = 0; channel < OBSERVATION_STACK; ++channel) {
                     for (uint32_t y = 0; y < OBSERVATION_SIZE; ++y) {
                         for (uint32_t x = 0; x < OBSERVATION_SIZE; ++x) {
+                            // 뷰가 바깥 축이다(neural_replay_sample.comp 와 같은 식).
                             size_t offset =
-                                ((static_cast<size_t>(sampleIndex) * VIEWS + view) * OBSERVATION_STACK + channel) *
+                                ((static_cast<size_t>(view) * BATCH + sampleIndex) * OBSERVATION_STACK + channel) *
                                     PLANE +
                                 static_cast<size_t>(y) * OBSERVATION_SIZE + x;
                             if (result[offset] != expected(picked, sampleIndex, false, view, channel, x, y)) {

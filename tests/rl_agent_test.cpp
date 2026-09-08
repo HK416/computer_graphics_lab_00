@@ -50,6 +50,13 @@ gfx::AgentConfig smallVectorConfig() {
     return config;
 }
 
+// 같은 판에 카메라만 둘. 뷰 수는 가중치 수를 바꾸지 않으므로 파라미터 배치가 위와 같다.
+gfx::AgentConfig multiViewConfig() {
+    gfx::AgentConfig config = smallPixelConfig();
+    config.views = 2;
+    return config;
+}
+
 // 파라미터 구간 안에 드는 텐서들. 첨자를 손으로 적지 않고 배치에서 끌어낸다.
 std::vector<uint32_t> tensorsIn(const gfx::Graph& graph, const gfx::ParameterRange& range) {
     std::vector<uint32_t> result;
@@ -280,8 +287,8 @@ void testActMatchesActor() {
     std::vector<float> actActivations(agent.act.graph.activationCount, 0.0F);
     std::vector<float> actorActivations(agent.actor.graph.activationCount, 0.0F);
     uint32_t pixels = config.frameStack * config.imageSize * config.imageSize;
-    float* actObservation = gfx::tensorValues(agent.act.graph, agent.act.observation, actActivations.data());
-    float* actorObservation = gfx::tensorValues(agent.actor.graph, agent.actor.observation, actorActivations.data());
+    float* actObservation = gfx::tensorValues(agent.act.graph, agent.act.observation[0], actActivations.data());
+    float* actorObservation = gfx::tensorValues(agent.actor.graph, agent.actor.observation[0], actorActivations.data());
     for (uint32_t sample = 0; sample < config.batch; ++sample) {
         for (uint32_t i = 0; i < pixels; ++i) {
             // 표본마다 다른 그림을 넣는다. 그래야 «첫 줄만 보고 나머지를 무시하는» 배치 첨자 버그가
@@ -326,7 +333,7 @@ void testTargetValue() {
 
     const gfx::Graph& graph = agent.critic.graph;
     uint32_t pixels = config.frameStack * config.imageSize * config.imageSize;
-    float* nextObservation = gfx::tensorValues(graph, agent.critic.nextObservation, activations.data());
+    float* nextObservation = gfx::tensorValues(graph, agent.critic.nextObservation[0], activations.data());
     for (uint32_t i = 0; i < config.batch * pixels; ++i) {
         nextObservation[i] = gfx::neuralGaussian(211, i);
     }
@@ -462,13 +469,13 @@ double checkCritic(const gfx::Agent& agent, uint64_t seed) {
     append(partial, tensorsIn(critic.graph, agent.parameters.trunk));
     // discount 를 빼먹으면 0 으로 남아 y = r 이 되고, 타깃 갈래가 통째로 손실에 닿지 않는다. 그러면
     // «다음 관측을 흔들어도 손실이 안 움직인다» 로 걸린다 — 입력을 모두 적는 것이 이 검사의 전제다.
-    return checkLoss(
-        critic.graph,
-        {critic.observation, critic.nextObservation, critic.action, critic.reward, critic.discount, critic.noise},
-        frozen,
-        partial,
-        {},
-        seed);
+    // 다중 뷰면 뷰 입력과 SADA 가중치까지 전부 흔든다. 가중치를 빼면 0 으로 남아 단일 뷰 갈래가
+    // 손실에 닿지 않고, 그러면 SADA 항이 통째로 검사되지 않는다 — discount 와 같은 함정이다.
+    std::vector<uint32_t> inputs = critic.observation;
+    append(inputs, critic.nextObservation);
+    append(inputs, critic.sadaWeight);
+    append(inputs, {critic.action, critic.reward, critic.discount, critic.noise});
+    return checkLoss(critic.graph, inputs, frozen, partial, {}, seed);
 }
 
 // **끝난 전이만 담긴 배치.** 감가를 입력 목록에서 빼면 0 으로 남아 y = r 이 되고, 타깃 갈래가 손실에
@@ -479,7 +486,10 @@ double checkCriticTerminal(const gfx::Agent& agent, uint64_t seed) {
     const gfx::AgentCriticGraph& critic = agent.critic;
     std::vector<uint32_t> frozen = tensorsIn(critic.graph, agent.parameters.target);
     append(frozen, tensorsIn(critic.graph, agent.parameters.actorUpdate));
-    return checkLoss(critic.graph, {critic.observation, critic.action, critic.reward}, frozen, {}, {}, seed);
+    std::vector<uint32_t> inputs = critic.observation;
+    append(inputs, critic.sadaWeight);
+    append(inputs, {critic.action, critic.reward});
+    return checkLoss(critic.graph, inputs, frozen, {}, {}, seed);
 }
 
 // 액터 손실. 끊은 자리는 인코더·trunk(액터가 표현을 끌고 가지 않는다)와 타깃 구간이다. 온라인 크리틱은
@@ -506,7 +516,9 @@ double checkActor(const gfx::Agent& agent, uint64_t seed, bool firstWins) {
     std::vector<uint32_t> biases = outputBiases(actor.graph, agent.parameters.online);
     assert(biases.size() == 2);
     std::vector<std::pair<size_t, float>> nudges{{actor.graph.tensors[biases[firstWins ? 0 : 1]].offset, -20.0F}};
-    return checkLoss(actor.graph, {actor.observation}, frozen, {}, nudges, seed);
+    std::vector<uint32_t> inputs = actor.observation;
+    append(inputs, actor.sadaWeight);
+    return checkLoss(actor.graph, inputs, frozen, {}, nudges, seed);
 }
 
 void testGradients() {
@@ -516,8 +528,10 @@ void testGradients() {
     };
     gfx::Agent pixel;
     gfx::Agent vector;
+    gfx::Agent multi;
     assert(gfx::buildAgent(smallPixelConfig(), pixel));
     assert(gfx::buildAgent(smallVectorConfig(), vector));
+    assert(gfx::buildAgent(multiViewConfig(), multi));
     Case cases[] = {
         {"크리틱(픽셀)", checkCritic(pixel, 17)},
         {"끝난 전이(픽셀)", checkCriticTerminal(pixel, 19)},
@@ -527,6 +541,12 @@ void testGradients() {
         {"끝난 전이(저차원)", checkCriticTerminal(vector, 31)},
         {"액터(저차원) Q1", checkActor(vector, 37, true)},
         {"액터(저차원) Q2", checkActor(vector, 37, false)},
+        // 다중 뷰. 병합 갈래와 SADA 단일 뷰 갈래가 **같은 인코더 가중치에 경사를 누적**하는 자리라,
+        // 유한차분이 그 누적까지 함께 잰다. 계획서가 말한 «열 갈래 넘게 나는 사슬» 이 여기서 밟힌다.
+        {"크리틱(2뷰)", checkCritic(multi, 41)},
+        {"끝난 전이(2뷰)", checkCriticTerminal(multi, 43)},
+        {"액터(2뷰) Q1", checkActor(multi, 47, true)},
+        {"액터(2뷰) Q2", checkActor(multi, 47, false)},
     };
     std::printf("  손실별 최대 상대 오차 (해석 경사 대 중앙 유한차분)\n");
     for (const Case& item : cases) {
@@ -557,8 +577,8 @@ void testStopGradientIsReal() {
             values[i] = gfx::neuralGaussian(stream, i);
         }
     };
-    fillInput(agent.critic.observation, 601);
-    fillInput(agent.critic.nextObservation, 607);
+    fillInput(agent.critic.observation[0], 601);
+    fillInput(agent.critic.nextObservation[0], 607);
     fillInput(agent.critic.action, 613);
     fillInput(agent.critic.reward, 617);
     fillInput(agent.critic.noise, 619);
@@ -608,7 +628,7 @@ void testActorTouchesCritic() {
     std::vector<float> activationGradients(agent.actor.graph.activationCount, 0.0F);
 
     const gfx::Graph& graph = agent.actor.graph;
-    float* observation = gfx::tensorValues(graph, agent.actor.observation, activations.data());
+    float* observation = gfx::tensorValues(graph, agent.actor.observation[0], activations.data());
     uint32_t pixels = agent.config.frameStack * agent.config.imageSize * agent.config.imageSize;
     for (uint32_t i = 0; i < agent.config.batch * pixels; ++i) {
         observation[i] = gfx::neuralGaussian(419, i);
@@ -731,8 +751,8 @@ void testCriticLossFalls() {
     std::vector<float> parameterGradients(agent.parameters.total, 0.0F);
     std::vector<float> activationGradients(graph.activationCount, 0.0F);
     fillInputs(graph,
-               {agent.critic.observation,
-                agent.critic.nextObservation,
+               {agent.critic.observation[0],
+                agent.critic.nextObservation[0],
                 agent.critic.action,
                 agent.critic.reward,
                 agent.critic.noise},
@@ -781,7 +801,7 @@ void testActorRaisesValue() {
     std::vector<float> activations(graph.activationCount, 0.0F);
     std::vector<float> parameterGradients(agent.parameters.total, 0.0F);
     std::vector<float> activationGradients(graph.activationCount, 0.0F);
-    fillInputs(graph, {agent.actor.observation}, activations.data(), 809);
+    fillInputs(graph, {agent.actor.observation[0]}, activations.data(), 809);
 
     auto meanValue = [&]() {
         const float* value = gfx::tensorValues(graph, agent.actor.value, activations.data());
@@ -1023,10 +1043,10 @@ void testTrainerMatchesHandWork() {
         const gfx::Graph& critic = graphs.critic.graph;
         std::copy(observations.begin(),
                   observations.end(),
-                  gfx::tensorValues(critic, graphs.critic.observation, criticValues.data()));
+                  gfx::tensorValues(critic, graphs.critic.observation[0], criticValues.data()));
         std::copy(nextObservations.begin(),
                   nextObservations.end(),
-                  gfx::tensorValues(critic, graphs.critic.nextObservation, criticValues.data()));
+                  gfx::tensorValues(critic, graphs.critic.nextObservation[0], criticValues.data()));
         std::copy(actions.begin(), actions.end(), gfx::tensorValues(critic, graphs.critic.action, criticValues.data()));
         std::copy(rewards.begin(), rewards.end(), gfx::tensorValues(critic, graphs.critic.reward, criticValues.data()));
         std::copy(
@@ -1045,7 +1065,7 @@ void testTrainerMatchesHandWork() {
         const gfx::Graph& actor = graphs.actor.graph;
         std::copy(observations.begin(),
                   observations.end(),
-                  gfx::tensorValues(actor, graphs.actor.observation, actorValues.data()));
+                  gfx::tensorValues(actor, graphs.actor.observation[0], actorValues.data()));
         gfx::forward(actor, expected.data(), actorValues.data());
         float handValue = -*gfx::tensorValues(actor, graphs.actor.loss, actorValues.data());
         assert(gfx::backward(actor, expected.data(), actorValues.data(), gradients.data(), actorGradients.data()));
@@ -1280,6 +1300,602 @@ void testPendulumLearns() {
     assert(worstTrained > bestBaseline);
 }
 
+// ---- MAD 다중 뷰
+
+// 병합이 정말 «더하기» 인가. 같은 그림을 두 뷰에 넣으면 M 이 V 의 정확히 두 배여야 한다.
+//
+// 채널로 이어 붙이는 구현이었다면 여기서 깨진다. 그리고 M = sum(V_i) 여야 뷰 수가 인코더의 모양을
+// 바꾸지 않아 **배포 때 카메라를 뺄 수 있다** — 논문의 주장이 통째로 이 등식 위에 서 있다.
+void testMergeIsSum() {
+    gfx::Agent agent;
+    assert(gfx::buildAgent(multiViewConfig(), agent));
+    const gfx::Graph& graph = agent.act.graph;
+    assert(agent.act.observation.size() == 2);
+    assert(agent.act.viewFeature.size() == 2);
+    // 뷰가 여럿이면 병합은 새 텐서다(뷰가 하나면 V_0 그 자체다 — 아래 testSingleViewGraphUnchanged).
+    assert(agent.act.merged != agent.act.viewFeature[0]);
+
+    std::vector<float> parameters(agent.parameters.total, 0.0F);
+    gfx::initializeAgent(agent, 71, parameters.data());
+    std::vector<float> activations(graph.activationCount, 0.0F);
+
+    uint32_t viewSize = agent.config.viewSize();
+    for (uint32_t view = 0; view < 2; ++view) {
+        float* values = gfx::tensorValues(graph, agent.act.observation[view], activations.data());
+        for (uint32_t i = 0; i < viewSize; ++i) {
+            values[i] = gfx::neuralGaussian(701, i);
+        }
+    }
+    gfx::forward(graph, parameters.data(), activations.data());
+
+    const float* first = gfx::tensorValues(graph, agent.act.viewFeature[0], activations.data());
+    const float* second = gfx::tensorValues(graph, agent.act.viewFeature[1], activations.data());
+    const float* merged = gfx::tensorValues(graph, agent.act.merged, activations.data());
+    uint32_t count = graph.tensors[agent.act.merged].count();
+    assert(count == graph.tensors[agent.act.viewFeature[0]].count());
+    bool nonzero = false;
+    for (uint32_t i = 0; i < count; ++i) {
+        // 같은 가중치·같은 그림이라 비트까지 같다.
+        assert(first[i] == second[i]);
+        assert(merged[i] == first[i] + second[i]);
+        nonzero = nonzero || merged[i] != 0.0F;
+    }
+    // 인코더가 통째로 죽어 0 만 내면 위 두 줄이 0 == 0 으로 조용히 지나간다.
+    assert(nonzero);
+
+    // **표집 셰이더가 쓰는 자리와 텐서 자리가 정확히 겹치는가.** neural_replay_sample.comp 는
+    //   ((view * batch + sample) * stack + channel) * plane + y * size + x
+    // 로 쓴다. 그러려면 뷰 v 의 입력 텐서가 첫 텐서에서 v * batch * viewSize 만큼 떨어져 있어야 하고,
+    // 그 값이 곧 텐서 하나의 크기다. 여기가 어긋나면 뷰가 서로의 자리에 섞여 들어가는데, 학습은
+    // 그럭저럭 돌고 점수만 조용히 낮아져 눈으로는 알 수 없다.
+    const gfx::Graph& critic = agent.critic.graph;
+    uint32_t stride = agent.config.batch * viewSize;
+    for (uint32_t view = 0; view < 2; ++view) {
+        assert(critic.tensors[agent.critic.observation[view]].count() == stride);
+        assert(critic.tensors[agent.critic.observation[view]].offset ==
+               critic.tensors[agent.critic.observation[0]].offset + view * stride);
+        assert(critic.tensors[agent.critic.nextObservation[view]].offset ==
+               critic.tensors[agent.critic.nextObservation[0]].offset + view * stride);
+    }
+
+    // 뷰 자리를 맞바꿔도 M 이 같다. 더하기는 순서를 타지 않는다 — 잇기였다면 여기서 갈린다.
+    float* left = gfx::tensorValues(graph, agent.act.observation[0], activations.data());
+    float* right = gfx::tensorValues(graph, agent.act.observation[1], activations.data());
+    for (uint32_t i = 0; i < viewSize; ++i) {
+        left[i] = gfx::neuralGaussian(703, i);
+    }
+    gfx::forward(graph, parameters.data(), activations.data());
+    std::vector<float> before(merged, merged + count);
+    const float* actionValues = gfx::tensorValues(graph, agent.act.action, activations.data());
+    std::vector<float> action(actionValues, actionValues + agent.config.actionCount);
+    for (uint32_t i = 0; i < viewSize; ++i) {
+        std::swap(left[i], right[i]);
+    }
+    gfx::forward(graph, parameters.data(), activations.data());
+    for (uint32_t i = 0; i < count; ++i) {
+        assert(std::abs(merged[i] - before[i]) < 1.0e-6F);
+    }
+    for (uint32_t i = 0; i < agent.config.actionCount; ++i) {
+        assert(std::abs(actionValues[i] - action[i]) < 1.0e-6F);
+    }
+    // 바꾸기 전 그림과 정말 다른 그림이었는지. 같았다면 위 비교가 헛돈다.
+    bool differs = false;
+    for (uint32_t i = 0; i < viewSize; ++i) {
+        differs = differs || left[i] != right[i];
+    }
+    assert(differs);
+}
+
+// 뷰가 하나면 표가 지금까지와 **글자 그대로 같다.** 다중 뷰를 얹으면서 단일 뷰 경로에 ADD 하나나
+// 가중치 입력 하나가 슬그머니 끼면, 앞의 모든 테스트가 그대로 통과하면서 GPU 쪽 활성 배치만 어긋난다.
+void testSingleViewGraphUnchanged() {
+    gfx::Agent agent;
+    assert(gfx::buildAgent(smallPixelConfig(), agent));
+    assert(agent.config.views == 1);
+    assert(!agent.config.multiView());
+    assert(agent.act.observation.size() == 1);
+    assert(agent.act.viewFeature.size() == 1);
+    assert(agent.act.merged == agent.act.viewFeature[0]);
+    assert(agent.critic.sadaWeight.empty());
+    assert(agent.actor.sadaWeight.empty());
+    assert(agent.critic.loss == agent.critic.mergedLoss);
+    assert(agent.actor.loss == agent.actor.mergedLoss);
+    // 뷰 하나짜리 배포 표는 학습 표와 크기까지 같다.
+    assert(agent.actDeploy.graph.ops.size() == agent.act.graph.ops.size());
+    assert(agent.actDeploy.graph.activationCount == agent.act.graph.activationCount);
+}
+
+// 뷰를 뺀 배포 경로가 «단일 뷰로 학습한 에이전트» 와 문자 그대로 같은 계산인가.
+//
+// views 는 가중치 수를 바꾸지 않으므로 같은 씨앗이면 두 에이전트의 파라미터가 비트로 같고, 그러면
+// actDeploy 의 행동이 단일 뷰 에이전트의 act 와 비트로 같아야 한다. 이 등식이 «카메라 하나로 돌린다»
+// 의 정의다 — 빠진 뷰를 0 으로 채우는 것과는 다르다(인코더 편향이 0 입력에도 값을 내 M 에 더해진다).
+void testSingleViewDeployment() {
+    gfx::AgentTrainer one;
+    gfx::AgentTrainer two;
+    assert(one.build(smallPixelConfig(), 83));
+    assert(two.build(multiViewConfig(), 83));
+    assert(one.weights().size() == two.weights().size());
+    assert(std::equal(one.weights().begin(), one.weights().end(), two.weights().begin()));
+    // **가중치를 흔들어 편향이 0 이 아니게 만든다.** 초기화는 편향을 0 으로 두므로 인코더가 0 입력에
+    // 0 을 내고, 그러면 «뷰를 뺐다» 와 «뺀 자리를 0 으로 두었다» 가 우연히 같아진다. 학습이 조금이라도
+    // 돈 뒤에는 그렇지 않으므로, 검사는 학습한 망을 흉내 내야 한다.
+    for (size_t i = 0; i < one.weights().size(); ++i) {
+        float shaken = one.weights()[i] + 0.05F * gfx::neuralGaussian(829, i);
+        one.weights()[i] = shaken;
+        two.weights()[i] = shaken;
+    }
+    assert(two.config().observationSize() == 2 * two.config().viewSize());
+
+    std::vector<float> view(one.config().observationSize(), 0.0F);
+    for (size_t i = 0; i < view.size(); ++i) {
+        view[i] = gfx::neuralGaussian(811, i);
+    }
+    std::vector<float> expected(one.config().actionCount, 0.0F);
+    std::vector<float> measured(expected.size(), 0.0F);
+    one.act(view.data(), expected.data());
+    two.actDeploy(view.data(), measured.data());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        assert(expected[i] == measured[i]);
+    }
+
+    // 두 뷰를 다 주면 행동이 달라진다. 위 등식이 «두 표가 어차피 같아서» 성립하는 것이 아님을 못 박는다.
+    std::vector<float> both(two.config().observationSize(), 0.0F);
+    for (size_t i = 0; i < both.size(); ++i) {
+        both[i] = gfx::neuralGaussian(821, i);
+    }
+    std::vector<float> paired(expected.size(), 0.0F);
+    two.act(both.data(), paired.data());
+    bool moved = false;
+    for (size_t i = 0; i < expected.size(); ++i) {
+        moved = moved || std::abs(paired[i] - measured[i]) > 1.0e-4F;
+    }
+    assert(moved);
+}
+
+// SADA 손실이 정말 (1-alpha)L(M) + alpha*L(V_i) 인가.
+//
+// 표가 고정이라 «무작위 뷰» 를 가중치 입력으로 풀었으므로, 그 가중치를 0 / alpha / 1 로 두고 손실과
+// **경사 전체**가 가중치에 선형인지 본다. w=0 이면 (1-alpha)L(M) 만 남고, w=1 과의 차가 꼭 L(V_0) 이다.
+// 그러면 w=alpha 는 두 점을 alpha 로 내분한 자리여야 한다. 계획서가 요구한 «결합 경사가
+// (1-alpha)g_M + alpha*g_V» 가 이 선형성과 같은 말이다.
+void testSadaWeighting() {
+    gfx::AgentConfig config = multiViewConfig();
+    gfx::Agent agent;
+    assert(gfx::buildAgent(config, agent));
+    assert(agent.critic.sadaWeight.size() == 2);
+    const gfx::Graph& graph = agent.critic.graph;
+
+    std::vector<float> parameters(agent.parameters.total, 0.0F);
+    gfx::initializeAgent(agent, 89, parameters.data());
+    std::vector<float> activations(graph.activationCount, 0.0F);
+    std::vector<float> parameterGradients(agent.parameters.total, 0.0F);
+    std::vector<float> activationGradients(graph.activationCount, 0.0F);
+
+    auto fill = [&](uint32_t tensor, uint64_t stream) {
+        float* values = gfx::tensorValues(graph, tensor, activations.data());
+        for (uint32_t i = 0; i < graph.tensors[tensor].count(); ++i) {
+            values[i] = gfx::neuralGaussian(stream, i);
+        }
+    };
+    // 두 뷰가 이어져 있으므로 첫 뷰 자리에서 통째로 채우면 둘 다 채워진다.
+    for (uint32_t view = 0; view < 2; ++view) {
+        fill(agent.critic.observation[view], 901 + view);
+        fill(agent.critic.nextObservation[view], 911 + view);
+    }
+    fill(agent.critic.action, 921);
+    fill(agent.critic.reward, 923);
+    fill(agent.critic.noise, 927);
+    float* discount = gfx::tensorValues(graph, agent.critic.discount, activations.data());
+    for (uint32_t i = 0; i < config.batch; ++i) {
+        discount[i] = 0.99F;
+    }
+
+    struct Pass {
+        float loss = 0.0F;
+        float merged = 0.0F;
+        std::vector<float> gradients;
+    };
+    auto run = [&](float weight) {
+        *gfx::tensorValues(graph, agent.critic.sadaWeight[0], activations.data()) = weight;
+        *gfx::tensorValues(graph, agent.critic.sadaWeight[1], activations.data()) = 0.0F;
+        std::fill(parameterGradients.begin(), parameterGradients.end(), 0.0F);
+        std::fill(activationGradients.begin(), activationGradients.end(), 0.0F);
+        gfx::forward(graph, parameters.data(), activations.data());
+        assert(gfx::backward(
+            graph, parameters.data(), activations.data(), parameterGradients.data(), activationGradients.data()));
+        Pass pass;
+        pass.loss = activations[graph.tensors[agent.critic.loss].offset];
+        pass.merged = activations[graph.tensors[agent.critic.mergedLoss].offset];
+        pass.gradients = parameterGradients;
+        return pass;
+    };
+    Pass none = run(0.0F);
+    Pass full = run(1.0F);
+    Pass mixed = run(config.sadaAlpha);
+
+    // w=0 이면 병합 손실에 (1-alpha) 만 걸린 값이다.
+    assert(std::abs(none.loss - (1.0F - config.sadaAlpha) * none.merged) < 1.0e-4F * std::abs(none.merged));
+    // 단일 뷰 항이 실제로 값을 갖는다. 0 이면 아래 선형성이 0 == 0 으로 지나간다.
+    float single = full.loss - none.loss;
+    assert(single > 1.0e-3F);
+    // 손실이 가중치에 선형이다.
+    float expected = none.loss + config.sadaAlpha * single;
+    assert(std::abs(mixed.loss - expected) < 1.0e-4F * std::abs(expected));
+
+    // 경사도 같은 자리에서 내분된다. 자리마다 견주되 눈금은 그래프 전체의 크기로 잡는다.
+    double typical = 0.0;
+    for (float value : full.gradients) {
+        typical = std::max(typical, static_cast<double>(std::abs(value)));
+    }
+    assert(typical > 0.0);
+    double worst = 0.0;
+    bool differs = false;
+    for (size_t i = 0; i < parameterGradients.size(); ++i) {
+        double blend = none.gradients[i] + config.sadaAlpha * (full.gradients[i] - none.gradients[i]);
+        worst = std::max(worst, std::abs(blend - mixed.gradients[i]) / std::max(1.0e-6, 0.05 * typical));
+        differs = differs || std::abs(full.gradients[i] - none.gradients[i]) > 1.0e-4F;
+    }
+    // 두 끝의 경사가 실제로 다르다 — 같으면 선형성 검사가 헛돈다.
+    assert(differs);
+    assert(worst < 1.0e-3);
+}
+
+// 뷰 둘이 대칭인가. 같은 그림을 두 뷰에 넣고 살리는 뷰만 바꾸면 경사가 같아야 한다. 여기가 깨지면
+// 뷰마다 다른 가중치를 태우고 있다는 뜻이다(공유 인코더가 아니다).
+void testViewsAreSymmetric() {
+    gfx::Agent agent;
+    assert(gfx::buildAgent(multiViewConfig(), agent));
+    const gfx::Graph& graph = agent.critic.graph;
+    std::vector<float> parameters(agent.parameters.total, 0.0F);
+    gfx::initializeAgent(agent, 97, parameters.data());
+    std::vector<float> activations(graph.activationCount, 0.0F);
+    std::vector<float> parameterGradients(agent.parameters.total, 0.0F);
+    std::vector<float> activationGradients(graph.activationCount, 0.0F);
+
+    auto fillBoth = [&](const std::vector<uint32_t>& tensors, uint64_t stream) {
+        for (uint32_t tensor : tensors) {
+            float* values = gfx::tensorValues(graph, tensor, activations.data());
+            for (uint32_t i = 0; i < graph.tensors[tensor].count(); ++i) {
+                values[i] = gfx::neuralGaussian(stream, i);
+            }
+        }
+    };
+    fillBoth(agent.critic.observation, 1009);
+    fillBoth(agent.critic.nextObservation, 1013);
+    fillBoth({agent.critic.action}, 1019);
+    fillBoth({agent.critic.reward}, 1021);
+    fillBoth({agent.critic.noise}, 1031);
+    float* discount = gfx::tensorValues(graph, agent.critic.discount, activations.data());
+    for (uint32_t i = 0; i < agent.config.batch; ++i) {
+        discount[i] = 0.99F;
+    }
+
+    auto run = [&](uint32_t chosen) {
+        for (uint32_t view = 0; view < 2; ++view) {
+            *gfx::tensorValues(graph, agent.critic.sadaWeight[view], activations.data()) =
+                view == chosen ? agent.config.sadaAlpha : 0.0F;
+        }
+        std::fill(parameterGradients.begin(), parameterGradients.end(), 0.0F);
+        std::fill(activationGradients.begin(), activationGradients.end(), 0.0F);
+        gfx::forward(graph, parameters.data(), activations.data());
+        assert(gfx::backward(
+            graph, parameters.data(), activations.data(), parameterGradients.data(), activationGradients.data()));
+        return parameterGradients;
+    };
+    std::vector<float> first = run(0);
+    float loss = activations[graph.tensors[agent.critic.loss].offset];
+    std::vector<float> second = run(1);
+    assert(std::abs(activations[graph.tensors[agent.critic.loss].offset] - loss) < 1.0e-4F * std::abs(loss));
+    double typical = 0.0;
+    for (float value : first) {
+        typical = std::max(typical, static_cast<double>(std::abs(value)));
+    }
+    assert(typical > 0.0);
+    for (size_t i = 0; i < first.size(); ++i) {
+        // 누산 순서가 갈리므로 비트까지 같지는 않다.
+        assert(std::abs(first[i] - second[i]) < 1.0e-4 * typical);
+    }
+}
+
+// 이음 확인이 실제로 무언가를 보는가. buildAgent 안에서만 쓰면 «늘 참» 으로 바꿔도 아무 테스트가
+// 빨개지지 않는다 — 지금의 빌더가 늘 이어 붙이기 때문이다. 그래서 여기서 직접 어긋난 판을 만든다.
+void testTensorsContiguous() {
+    gfx::Graph graph;
+    gfx::GraphBuilder builder(graph);
+    uint32_t first = builder.addInput(2, 3, 1, 1);
+    uint32_t second = builder.addInput(2, 3, 1, 1);
+    assert(gfx::tensorsContiguous(graph, {first, second}));
+    assert(gfx::tensorsContiguous(graph, {first}));
+    // 사이에 다른 텐서를 끼우면 끊긴다.
+    uint32_t between = builder.addInput(1, 1, 1, 1);
+    uint32_t third = builder.addInput(2, 3, 1, 1);
+    assert(!gfx::tensorsContiguous(graph, {first, third}));
+    assert(gfx::tensorsContiguous(graph, {second, between, third}));
+    // 순서가 뒤집혀도 끊긴 것이다.
+    assert(!gfx::tensorsContiguous(graph, {second, first}));
+    // 빈 목록은 «이어져 있다» 가 아니다. 참으로 두면 뷰가 0 개인 판이 조용히 통과한다.
+    assert(!gfx::tensorsContiguous(graph, {}));
+}
+
+// **단일 뷰 항이 정말 그 뷰를 보는가.** 병합 특징 M 을 대신 태워도 손실은 여전히 가중치에 선형이라
+// 위의 testSadaWeighting 이 통과한다. 가르는 것은 «뷰마다 값이 달라야 한다» 이다 — 뷰 입력을 서로 다르게
+// 두고 살리는 뷰만 바꾸면 손실이 갈려야 하고, M 을 태우면 두 값이 정확히 같아진다.
+//
+// testViewsAreSymmetric 과 짝이다: 같은 그림이면 같고, 다른 그림이면 달라야 한다. 하나만으로는
+// 둘 다 통과하는 잘못된 구현이 남는다.
+void testSadaSeesItsOwnView() {
+    gfx::Agent agent;
+    assert(gfx::buildAgent(multiViewConfig(), agent));
+    std::vector<float> parameters(agent.parameters.total, 0.0F);
+    gfx::initializeAgent(agent, 101, parameters.data());
+
+    // 크리틱과 액터를 같은 눈으로 본다. 액터 표는 입력이 관측과 가중치뿐이라 더 짧다.
+    auto measure = [&](const gfx::Graph& graph,
+                       const std::vector<uint32_t>& observations,
+                       const std::vector<uint32_t>& weights,
+                       uint32_t loss,
+                       const std::vector<std::pair<uint32_t, uint64_t>>& extras,
+                       uint32_t chosen) {
+        std::vector<float> activations(graph.activationCount, 0.0F);
+        for (uint32_t view = 0; view < observations.size(); ++view) {
+            float* values = gfx::tensorValues(graph, observations[view], activations.data());
+            // **뷰마다 다른 그림.** 같으면 아래 «달라야 한다» 가 성립할 수 없다.
+            for (uint32_t i = 0; i < graph.tensors[observations[view]].count(); ++i) {
+                values[i] = gfx::neuralGaussian(1103 + view, i);
+            }
+        }
+        for (const std::pair<uint32_t, uint64_t>& item : extras) {
+            float* values = gfx::tensorValues(graph, item.first, activations.data());
+            for (uint32_t i = 0; i < graph.tensors[item.first].count(); ++i) {
+                values[i] = item.second == 0 ? 0.99F : gfx::neuralGaussian(item.second, i);
+            }
+        }
+        for (uint32_t view = 0; view < weights.size(); ++view) {
+            *gfx::tensorValues(graph, weights[view], activations.data()) = view == chosen ? 1.0F : 0.0F;
+        }
+        gfx::forward(graph, parameters.data(), activations.data());
+        return activations[graph.tensors[loss].offset];
+    };
+
+    std::vector<std::pair<uint32_t, uint64_t>> criticExtras{{agent.critic.action, 1109},
+                                                            {agent.critic.reward, 1117},
+                                                            {agent.critic.noise, 1123},
+                                                            {agent.critic.discount, 0}};
+    std::vector<uint32_t> nextObservations = agent.critic.nextObservation;
+    for (uint32_t view = 0; view < nextObservations.size(); ++view) {
+        criticExtras.emplace_back(nextObservations[view], 1129 + view);
+    }
+    float criticFirst = measure(
+        agent.critic.graph, agent.critic.observation, agent.critic.sadaWeight, agent.critic.loss, criticExtras, 0);
+    float criticSecond = measure(
+        agent.critic.graph, agent.critic.observation, agent.critic.sadaWeight, agent.critic.loss, criticExtras, 1);
+    assert(std::abs(criticFirst - criticSecond) > 1.0e-3F * std::max(std::abs(criticFirst), 1.0F));
+
+    float actorFirst =
+        measure(agent.actor.graph, agent.actor.observation, agent.actor.sadaWeight, agent.actor.loss, {}, 0);
+    float actorSecond =
+        measure(agent.actor.graph, agent.actor.observation, agent.actor.sadaWeight, agent.actor.loss, {}, 1);
+    assert(std::abs(actorFirst - actorSecond) > 1.0e-3F * std::max(std::abs(actorFirst), 1.0F));
+}
+
+// 학습 루프가 **고른 뷰 하나만** 살리고, 크리틱과 액터가 **같은 뷰**를 보는가.
+//
+// 액터 표는 입력이 관측과 뷰 가중치뿐이라 손으로 그대로 다시 세울 수 있다. 학습률과 tau 를 0 으로 두면
+// 갱신이 파라미터를 건드리지 않으므로, update 가 돌려준 가치는 «lastViewChoice 를 살린 순전파» 와
+// 비트까지 같아야 한다. 전부에 alpha 를 세우거나 액터가 다른 뷰를 보면 여기서 갈린다.
+void testTrainerPicksOneView() {
+    gfx::AgentConfig config = multiViewConfig();
+    // 뷰 셋. 둘이면 «다음 뷰» 같은 어긋남이 여전히 일대일이라 덮개가 얇다.
+    config.views = 3;
+    gfx::AgentTrainer trainer;
+    assert(trainer.build(config, 131));
+    gfx::Agent mirror;
+    assert(gfx::buildAgent(config, mirror));
+
+    size_t observationTotal = static_cast<size_t>(config.batch) * config.observationSize();
+    std::vector<float> observations(observationTotal, 0.0F);
+    std::vector<float> nextObservations(observationTotal, 0.0F);
+    for (size_t i = 0; i < observationTotal; ++i) {
+        observations[i] = gfx::neuralGaussian(1201, i);
+        nextObservations[i] = gfx::neuralGaussian(1213, i);
+    }
+    std::vector<float> actions(static_cast<size_t>(config.batch) * config.actionCount, 0.0F);
+    std::vector<float> rewards(config.batch, 0.0F);
+    std::vector<float> discounts(config.batch, 0.99F);
+    for (size_t i = 0; i < actions.size(); ++i) {
+        actions[i] = gfx::neuralGaussian(1217, i);
+    }
+    for (uint32_t i = 0; i < config.batch; ++i) {
+        rewards[i] = gfx::neuralGaussian(1223, i);
+    }
+    gfx::AgentBatch batch;
+    batch.observations = observations.data();
+    batch.nextObservations = nextObservations.data();
+    batch.actions = actions.data();
+    batch.rewards = rewards.data();
+    batch.discounts = discounts.data();
+
+    // 학습률 0. 갱신이 재기만 하고 아무 것도 바꾸지 않는다.
+    gfx::AgentUpdateSettings settings;
+    settings.critic.learningRate = 0.0F;
+    settings.actor.learningRate = 0.0F;
+    settings.tau = 0.0F;
+
+    const gfx::Graph& actor = mirror.actor.graph;
+    std::vector<float> activations(actor.activationCount, 0.0F);
+    std::vector<bool> seen(config.views, false);
+    for (uint32_t round = 0; round < 12; ++round) {
+        gfx::AgentUpdateStats stats = trainer.update(batch, settings);
+        uint32_t chosen = trainer.lastViewChoice();
+        assert(chosen < config.views);
+        seen[chosen] = true;
+
+        std::copy(observations.begin(),
+                  observations.end(),
+                  gfx::tensorValues(actor, mirror.actor.observation[0], activations.data()));
+        for (uint32_t view = 0; view < config.views; ++view) {
+            *gfx::tensorValues(actor, mirror.actor.sadaWeight[view], activations.data()) =
+                view == chosen ? config.sadaAlpha : 0.0F;
+        }
+        gfx::forward(actor, trainer.weights().data(), activations.data());
+        float expected = -activations[actor.tensors[mirror.actor.loss].offset];
+        assert(stats.value == expected);
+    }
+    // 뷰를 하나만 고르고 있으면 위 비교가 그 뷰에서만 돈다.
+    for (uint32_t view = 0; view < config.views; ++view) {
+        assert(seen[view]);
+    }
+}
+
+// **단일 뷰 항은 그 뷰 말고 아무 것도 보지 않아야 한다.**
+//
+// alpha 를 1 로 두면 병합 항의 계수가 0 이 되어 손실이 순수하게 L(V_0) 다. 그러면 뷰 1 의 그림을
+// 통째로 바꿔도 손실이 **한 비트도** 움직이지 않아야 한다.
+//
+// 이 검사가 잡는 것은 액터의 급소다. 액터의 단일 뷰 항이 행동을 병합 특징 M 으로 고르면(처음 구현이
+// 그랬다) 뷰 1 을 바꿀 때 M 이 바뀌어 행동이 바뀌고 손실이 따라 움직인다. 그 상태에서는 액터 머리가
+// 학습 내내 trunk(M) 만 보므로, 카메라를 뺀 배포에서 trunk(V_0) 를 먹이는 것이 **분포 밖**이 된다 —
+// 그러면 «1뷰 평가» 점수가 MAD 의 주장에 대해 아무 말도 하지 못한다.
+//
+// 크리틱 쪽은 «현재 관측» 만 본다. 목표값 y 는 병합 특징으로 만드므로 **다음 관측**은 뷰 전부에
+// 걸리는 것이 정상이라, 여기서는 현재 관측만 흔든다.
+void testSadaTermIsViewLocal() {
+    gfx::AgentConfig config = multiViewConfig();
+    // alpha 1 이면 병합 항이 0 배로 눌린다. 표는 그대로다.
+    config.sadaAlpha = 1.0F;
+    gfx::Agent agent;
+    assert(gfx::buildAgent(config, agent));
+    std::vector<float> parameters(agent.parameters.total, 0.0F);
+    gfx::initializeAgent(agent, 149, parameters.data());
+    // 편향이 0 이면 인코더가 0 입력에 0 을 내 «본다/안 본다» 가 흐려진다. 학습한 망을 흉내 낸다.
+    for (size_t i = 0; i < parameters.size(); ++i) {
+        parameters[i] += 0.05F * gfx::neuralGaussian(151, i);
+    }
+
+    auto lossWith = [&](const gfx::Graph& graph,
+                        const std::vector<uint32_t>& observations,
+                        const std::vector<uint32_t>& weights,
+                        uint32_t loss,
+                        const std::vector<std::pair<uint32_t, uint64_t>>& extras,
+                        uint64_t secondViewStream) {
+        std::vector<float> activations(graph.activationCount, 0.0F);
+        auto fill = [&](uint32_t tensor, uint64_t stream) {
+            float* values = gfx::tensorValues(graph, tensor, activations.data());
+            for (uint32_t i = 0; i < graph.tensors[tensor].count(); ++i) {
+                values[i] = stream == 0 ? 0.99F : gfx::neuralGaussian(stream, i);
+            }
+        };
+        fill(observations[0], 1301);
+        fill(observations[1], secondViewStream);
+        for (const std::pair<uint32_t, uint64_t>& item : extras) {
+            fill(item.first, item.second);
+        }
+        // 뷰 0 만 살린다.
+        for (uint32_t view = 0; view < weights.size(); ++view) {
+            *gfx::tensorValues(graph, weights[view], activations.data()) = view == 0 ? config.sadaAlpha : 0.0F;
+        }
+        gfx::forward(graph, parameters.data(), activations.data());
+        return activations[graph.tensors[loss].offset];
+    };
+
+    std::vector<std::pair<uint32_t, uint64_t>> criticExtras{{agent.critic.action, 1307},
+                                                            {agent.critic.reward, 1309},
+                                                            {agent.critic.noise, 1319},
+                                                            {agent.critic.discount, 0},
+                                                            {agent.critic.nextObservation[0], 1321},
+                                                            {agent.critic.nextObservation[1], 1327}};
+    float criticFirst = lossWith(
+        agent.critic.graph, agent.critic.observation, agent.critic.sadaWeight, agent.critic.loss, criticExtras, 1331);
+    float criticSecond = lossWith(
+        agent.critic.graph, agent.critic.observation, agent.critic.sadaWeight, agent.critic.loss, criticExtras, 1361);
+    assert(criticFirst == criticSecond);
+
+    float actorFirst =
+        lossWith(agent.actor.graph, agent.actor.observation, agent.actor.sadaWeight, agent.actor.loss, {}, 1331);
+    float actorSecond =
+        lossWith(agent.actor.graph, agent.actor.observation, agent.actor.sadaWeight, agent.actor.loss, {}, 1361);
+    assert(actorFirst == actorSecond);
+
+    // 두 흐름이 정말 다른 그림이었는지. 뷰 0 을 살리는 대신 뷰 1 을 살리면 값이 달라야 한다.
+    auto onSecondView = [&](const gfx::Graph& graph,
+                            const std::vector<uint32_t>& observations,
+                            const std::vector<uint32_t>& weights,
+                            uint32_t loss,
+                            const std::vector<std::pair<uint32_t, uint64_t>>& extras,
+                            uint64_t stream) {
+        std::vector<float> activations(graph.activationCount, 0.0F);
+        auto fill = [&](uint32_t tensor, uint64_t source) {
+            float* values = gfx::tensorValues(graph, tensor, activations.data());
+            for (uint32_t i = 0; i < graph.tensors[tensor].count(); ++i) {
+                values[i] = source == 0 ? 0.99F : gfx::neuralGaussian(source, i);
+            }
+        };
+        fill(observations[0], 1301);
+        fill(observations[1], stream);
+        for (const std::pair<uint32_t, uint64_t>& item : extras) {
+            fill(item.first, item.second);
+        }
+        for (uint32_t view = 0; view < weights.size(); ++view) {
+            *gfx::tensorValues(graph, weights[view], activations.data()) = view == 1 ? config.sadaAlpha : 0.0F;
+        }
+        gfx::forward(graph, parameters.data(), activations.data());
+        return activations[graph.tensors[loss].offset];
+    };
+    float movedCritic = onSecondView(
+        agent.critic.graph, agent.critic.observation, agent.critic.sadaWeight, agent.critic.loss, criticExtras, 1331);
+    float movedActor =
+        onSecondView(agent.actor.graph, agent.actor.observation, agent.actor.sadaWeight, agent.actor.loss, {}, 1331);
+    assert(std::abs(movedCritic - criticFirst) > 1.0e-4F * std::max(std::abs(criticFirst), 1.0F));
+    assert(std::abs(movedActor - actorFirst) > 1.0e-4F * std::max(std::abs(actorFirst), 1.0F));
+}
+
+// 저차원 관측도 **뷰마다 입력을 잡는다.** observationSize() 가 뷰 수를 곱하지 않으면 학습 루프가 첫 뷰만
+// 채우고 나머지 뷰의 텐서는 0 인 채로 병합과 SADA 에 들어간다 — 값은 그럴듯하게 나오고, SADA 가 그 뷰를
+// 뽑는 갱신(절반)마다 «온통 0 인 특징» 으로 머리를 학습시킨다. 아무 것도 터지지 않는다.
+void testLowDimensionalMultiView() {
+    gfx::AgentConfig config = smallVectorConfig();
+    config.views = 2;
+    assert(config.observationSize() == 2 * config.observationCount);
+
+    gfx::AgentUpdateSettings settings;
+    settings.critic.learningRate = 0.0F;
+    settings.actor.learningRate = 0.0F;
+    settings.tau = 0.0F;
+    size_t half = static_cast<size_t>(config.batch) * config.observationCount;
+    std::vector<float> actions(static_cast<size_t>(config.batch) * config.actionCount, 0.0F);
+    std::vector<float> rewards(config.batch, 0.0F);
+    std::vector<float> discounts(config.batch, 0.99F);
+    for (size_t i = 0; i < actions.size(); ++i) {
+        actions[i] = gfx::neuralGaussian(1433, i);
+    }
+    for (uint32_t i = 0; i < config.batch; ++i) {
+        rewards[i] = gfx::neuralGaussian(1439, i);
+    }
+
+    // **뷰 1 의 관측만 바꾼다.** 그 자리를 채우지 않는 구현에서는 두 판의 손실이 정확히 같다.
+    auto lossFor = [&](uint64_t secondViewStream) {
+        gfx::AgentTrainer trainer;
+        assert(trainer.build(config, 163));
+        std::vector<float> observations(2 * half, 0.0F);
+        std::vector<float> nextObservations(2 * half, 0.0F);
+        for (size_t i = 0; i < half; ++i) {
+            observations[i] = gfx::neuralGaussian(1409, i);
+            observations[half + i] = gfx::neuralGaussian(secondViewStream, i);
+            nextObservations[i] = gfx::neuralGaussian(1423, i);
+            nextObservations[half + i] = gfx::neuralGaussian(1427, i);
+        }
+        gfx::AgentBatch batch;
+        batch.observations = observations.data();
+        batch.nextObservations = nextObservations.data();
+        batch.actions = actions.data();
+        batch.rewards = rewards.data();
+        batch.discounts = discounts.data();
+        return trainer.update(batch, settings).criticLoss;
+    };
+    assert(lossFor(1451) != lossFor(1481));
+}
+
 } // namespace
 
 int main() {
@@ -1297,6 +1913,16 @@ int main() {
     testActorRaisesValue();
     testCheckpoint();
     testGradients();
+    testMergeIsSum();
+    testSingleViewGraphUnchanged();
+    testSingleViewDeployment();
+    testSadaWeighting();
+    testViewsAreSymmetric();
+    testTensorsContiguous();
+    testSadaSeesItsOwnView();
+    testSadaTermIsViewLocal();
+    testLowDimensionalMultiView();
+    testTrainerPicksOneView();
     testTrainerUpdate();
     testTrainerNoiseClip();
     testTrainerNoiseVariesPerStep();

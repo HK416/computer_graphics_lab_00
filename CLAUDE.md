@@ -87,7 +87,14 @@ cmake --preset debug -DCG_LAB_DLSS_SDK=<NVIDIA/DLSS 경로>   # 주지 않으면
 ./build/release/cg_lab --headless --open tests/scenes/pendulum_pixels.json --play --train-pixels --pixel-steps 24000 --policy-net net.json   # 픽셀 학습
 ./build/release/cg_lab --headless --open tests/scenes/pendulum_pixels.json --play --policy-net net.json --frames 1500   # 잡음 없이 평가
 ./build/release/cg_lab --headless --open tests/scenes/reacher.json --play --train-pixels --pixel-steps 24000 --policy-net net.json   # 2관절 리처, 뷰 둘
+./build/release/cg_lab --headless --open tests/scenes/reacher.json --play --policy-net net.json --frames 600 --eval-views 1   # 카메라 하나만 주고 평가
+./build/release/cg_lab --headless --open tests/scenes/reacher_single.json --play --train-pixels --pixel-steps 24000 --policy-net one.json   # 같은 리처, 카메라 하나
 ```
+
+MAD 의 헤드라인은 이 셋을 같은 걸음 수로 재어 견주는 것이다: 뷰 둘로 학습해 둘로 평가 / 뷰 둘로 학습해
+**하나로** 평가(`--eval-views 1`) / `reacher_single.json` 으로 학습해 하나로 평가. 가운데 줄이 무너지지
+않는다는 것이 논문의 주장이고, 셋째 줄이 «애초에 뷰가 하나면 어땠나» 의 기준선이다. 평가는
+`--train-pixels` 없이 돌려 탐험 잡음을 끄고, 걸음 수는 `--pixel-steps` 가 아니라 `--frames` 가 정한다.
 
 강체 솔버를 바꾸면 `headless_physics` 기준 파일이 갈린다. 의도한 변화면 위 명령으로 다시 만들어
 `tests/scenes/expected/rigid_cpu_120.json` `joints_cpu_120.json` `joints_motor_cpu_120.json` 을 갱신하고 커밋한다.
@@ -284,6 +291,14 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `DebugLineVertex` (`src/gfx/debug_lines.h`), `DebugLinePushConstants` (`src/app/plugins/debug_lines_plugin.cpp`) | 동명 구조체 (`shaders/debug_line_common.glsl`) |
 | `GpuReplaySlot` `GpuReplaySample` `ReplayStorePushConstants` `ReplaySamplePushConstants` (`src/gfx/replay.h`) | `ReplaySlot` `ReplaySample`·동명 블록 (`shaders/replay_common.glsl`, `neural_replay_*.comp`) — **첨자 규칙이 두 벌이다**: `replayStackIndex`(`src/gfx/neural_math.h`) ↔ 동명 함수(`replay_common.glsl`). 링 되감기·에피소드 경계·창 잘림 셋이 한 식에서 만나는 자리라 C++ 쪽을 순수 함수로 떼어 `neural` 테스트가 본다. 한쪽을 고치면 다른 쪽도 고친다 |
 
+표집이 채우는 배치의 **축 순서도 묶인 자리다**: `neural_replay_sample.comp` 는
+`((view * batch + sample) * stack + channel) * plane + y * size + x` 로 쓰고, 그 자리는 에이전트 표에서
+**뷰마다 따로 잡은 입력 텐서들**(`AgentCriticGraph::observation`)이 차지한다. 뷰가 바깥 축이라야 뷰 하나가
+통째로 이어져 텐서 하나와 정확히 겹친다 — 표본을 바깥에 두면 조각이 흩어져 경계와 어긋난다. `buildAgent` 가
+텐서들이 이어져 있는지 보고, `rl_agent` 테스트가 뷰 사이 간격이 `batch * viewSize` 인지 못 박으며,
+`--neural-selfcheck` 가 GPU 가 쓴 바이트를 CPU 기준과 견준다. 관측 렌더가 내놓는 꼴(`(view * stack + channel) * plane`,
+배치가 1 이라 같은 식이다)도 함께 맞춰야 한다.
+
 회색값을 float 로 푸는 자리는 **역수 곱이어야 한다**(`observation_encode.comp` 의 `round(g*255)*(1/255)`,
 `replay_common.glsl` 의 `replayFetch`, 자기 검사의 `greyToFloat`). `b / 255.0f` 로 바꾸면 어떤 바이트에서
 마지막 비트가 갈려 «살아 있는 관측» 과 «리플레이에서 꺼낸 관측» 이 달라진다 — 1/255 는 정확히 담기지
@@ -338,6 +353,11 @@ MoltenVK(macOS)에는 mesh shader 와 광선 추적이 없어 고전 경로만 �
 - **강화 학습의 관측 카메라**는 `scene::CameraComponent::observation` 으로 가른다. 참이면 화면 후보에서 빠지고
   (`Scene::activeCameraObject`) 관측 렌더의 뷰가 된다(`gfx::buildObservationLayout`). 뷰가 여럿인데 화면은 하나라
   이 플래그가 없으면 «어느 것이 화면인가» 를 정할 수 없다. 장면 파일에 항목을 더했으므로 판이 9 다.
+- **다중 뷰는 채널로 잇지 않고 더한다**(MAD 의 `M = sum(V_i)`, `gfx::encodeViews`). 뷰마다 같은 인코더를
+  따로 태우고 특징을 더하므로 **뷰 수가 인코더의 모양을 바꾸지 않고**, 그래서 배포 때 카메라를 빼도 같은
+  가중치가 그대로 돈다(`Agent::actDeploy`, `--eval-views`). 채널로 이으면 둘 다 무너진다. 갱신마다 뷰 하나를
+  뽑아 단일 뷰 특징으로 손실을 다시 재는 SADA 항이 붙는데, 연산 표가 고정이라 «무작위 뷰» 를 **뷰별 가중치
+  입력**으로 푼다 — 호스트가 고른 뷰에 `sadaAlpha` 를, 나머지에 0 을 넣는다.
 - **새 장면 부품 종류**는 `scene.h` 의 `forEachComponentKind` 표와 `ComponentSlot` 특수화에 한 쌍씩 더한다. 떼기·삭제·복제·
   배치 비교가 그 표를 돌고, `Scene::component<T>(object)` 가 첨자 가드를 대신한다. `SceneSnapshot`·`scene_io.cpp` 는 따로.
 - **새 렌더 패스**는 `recordCommands` 의 `graph.add` 노드로(또는 플러그인이면 `Renderer::addPass` 훅의 `addAfter` 로)

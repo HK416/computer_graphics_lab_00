@@ -125,6 +125,10 @@ struct Options {
     bool trainPixels = false;
     uint64_t pixelSteps = 30000;
     std::filesystem::path policyNetPath;
+    // --eval-views <n>: 정책에게 **앞의 n 개 뷰만** 준다(0 이면 전부). MAD 의 주장 — 여러 뷰로 학습한
+    // 정책이 배포 때 카메라 하나만 있어도 무너지지 않는다 — 을 재는 자리다. 장면은 그대로 두고 정책이
+    // 보는 것만 줄이므로, 학습 때와 평가 때의 물리가 문자 그대로 같다.
+    uint32_t evalViews = 0;
 };
 
 class Application {

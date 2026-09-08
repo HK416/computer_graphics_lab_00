@@ -36,12 +36,19 @@ constexpr uint32_t MAX_UPDATES_PER_FRAME = 4;
 NeuralPlugin::~NeuralPlugin() {
     if (context != nullptr) {
         destroyBuffer(*context, noiseBuffer);
+        destroyBuffer(*context, sadaBuffer);
     }
 }
 
 void NeuralPlugin::build(Services& services) {
     enabled = services.options.trainPixels || !services.options.policyNetPath.empty();
     training = services.options.trainPixels;
+    evalViews = services.options.evalViews;
+    // 인자의 존재 이유가 «주장을 잴 수 있게» 인데 조용히 아무 일도 하지 않는 것이 가장 나쁘다.
+    if (evalViews != 0 && !enabled) {
+        spdlog::warn(
+            "--eval-views 는 픽셀 정책이 도는 실행에서만 걸립니다 (--train-pixels 또는 --policy-net 이 필요합니다)");
+    }
     settings.critic.learningRate = 1.0e-4F;
     settings.actor.learningRate = 1.0e-4F;
 }
@@ -73,9 +80,20 @@ bool NeuralPlugin::ensure(Services& services) {
 
     gfx::AgentConfig config;
     config.imageSize = gfx::OBSERVATION_SIZE;
-    // **뷰마다 스택 하나가 아니라, 뷰 전부를 채널로 잇는다.** 12단계는 단일 뷰라 이 둘이 같고,
-    // 14단계의 MAD 가 뷰마다 인코더를 따로 태울 때 갈린다.
-    config.frameStack = gfx::OBSERVATION_STACK * layout.count();
+    // **뷰마다 인코더를 따로 태우고 특징을 더한다**(MAD). 채널로 이어 붙이던 12·13단계와 갈리는
+    // 자리다 — 이어 붙이면 뷰 수가 인코더의 모양을 바꿔 배포 때 카메라를 뺄 수 없다.
+    config.frameStack = gfx::OBSERVATION_STACK;
+    config.views = layout.count();
+    // 배포 표가 볼 뷰 수. 0 은 «전부» 다.
+    if (evalViews > config.views) {
+        // 조용히 잘라 넣으면 «뷰를 뺀 채로 쟀다» 고 믿은 결과가 사실은 전부로 잰 것이 된다.
+        spdlog::warn("--eval-views {} 는 이 장면의 관측 카메라 {} 개보다 많아 {} 로 잘랐습니다",
+                     evalViews,
+                     config.views,
+                     config.views);
+    }
+    config.deployViews = std::clamp(evalViews == 0 ? config.views : evalViews, 1U, config.views);
+    reducedViews = config.deployViews < config.views;
     config.actionCount = static_cast<uint32_t>(robot.actuators.size());
     config.batch = 32;
     if (!gfx::buildAgent(config, agent)) {
@@ -84,7 +102,9 @@ bool NeuralPlugin::ensure(Services& services) {
         return false;
     }
 
-    sources = {&agent.act.graph, &agent.critic.graph, &agent.actor.graph};
+    // **배포 표도 함께 잇는다.** 뷰를 뺀 채로 도는 것이 «같은 가중치를 같은 자리에서 읽는 다른 표» 여야
+    // 하고, 표를 하나로 합쳐 두면 그것이 배치로 보장된다.
+    sources = {&agent.act.graph, &agent.critic.graph, &agent.actor.graph, &agent.actDeploy.graph};
     if (!gfx::mergeGraphs(sources, merged)) {
         spdlog::warn("픽셀 학습: 표 셋을 잇지 못했습니다");
         disabled = true;
@@ -116,25 +136,35 @@ bool NeuralPlugin::ensure(Services& services) {
         return false;
     }
 
-    actObservation = gfx::mergedTensor(merged, 0, agent.act.observation);
+    actObservation = gfx::mergedTensor(merged, 0, agent.act.observation[0]);
     actAction = gfx::mergedTensor(merged, 0, agent.act.action);
     criticLoss = gfx::mergedTensor(merged, 1, agent.critic.loss);
     criticNoise = gfx::mergedTensor(merged, 1, agent.critic.noise);
     actorLoss = gfx::mergedTensor(merged, 2, agent.actor.loss);
+    deployObservation = gfx::mergedTensor(merged, 3, agent.actDeploy.observation[0]);
+    deployAction = gfx::mergedTensor(merged, 3, agent.actDeploy.action);
+    // **먼저 비운다.** 뷰 둘짜리 장면에서 하나짜리로 갈아타면 ensure() 가 다시 도는데, 여기서 비우지
+    // 않으면 옛 표의 텐서 번호가 남아 새 표의 엉뚱한 자리에 한 float 를 쓰거나 배열 밖을 짚는다.
+    criticSadaWeight = gfx::NO_TENSOR;
+    actorSadaWeight = gfx::NO_TENSOR;
+    if (config.multiView()) {
+        criticSadaWeight = gfx::mergedTensor(merged, 1, agent.critic.sadaWeight[0]);
+        actorSadaWeight = gfx::mergedTensor(merged, 2, agent.actor.sadaWeight[0]);
+    }
 
     auto address = [&](size_t which, uint32_t tensor) {
         uint32_t index = gfx::mergedTensor(merged, which, tensor);
         return executor->activationAddress() +
                static_cast<VkDeviceSize>(merged.graph.tensors[index].offset) * sizeof(float);
     };
-    criticTargets.state = address(1, agent.critic.observation);
-    criticTargets.nextState = address(1, agent.critic.nextObservation);
+    criticTargets.state = address(1, agent.critic.observation[0]);
+    criticTargets.nextState = address(1, agent.critic.nextObservation[0]);
     criticTargets.action = address(1, agent.critic.action);
     criticTargets.reward = address(1, agent.critic.reward);
     criticTargets.discount = address(1, agent.critic.discount);
     // 액터 표는 관측만 쓴다. 나머지는 크리틱 쪽에 채운 것을 그대로 두면 되므로 상태만 가리킨다.
     actorTargets = criticTargets;
-    actorTargets.state = address(2, agent.actor.observation);
+    actorTargets.state = address(2, agent.actor.observation[0]);
 
     // 가중치를 초기화해 올린다. 파일이 있으면 그것으로 덮는다.
     std::vector<float> parameters(merged.graph.parameterCount, 0.0F);
@@ -163,6 +193,14 @@ bool NeuralPlugin::ensure(Services& services) {
                                gfx::MemoryLocation::HOST_WRITE,
                                "타깃 평활화 잡음");
     noiseStaging = static_cast<float*>(noiseBuffer.mapped);
+    destroyBuffer(*context, sadaBuffer);
+    sadaBuffer =
+        createBuffer(*services.context,
+                     static_cast<VkDeviceSize>(MAX_UPDATES_PER_FRAME) * std::max(config.views, 1U) * sizeof(float),
+                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     gfx::MemoryLocation::HOST_WRITE,
+                     "SADA 뷰 가중치");
+    sadaStaging = static_cast<float*>(sadaBuffer.mapped);
     builtScene = scene.id;
     builtTopology = scene.topologyRevision();
     builtComponents = scene.componentRevision();
@@ -177,16 +215,26 @@ bool NeuralPlugin::ensure(Services& services) {
     totalSteps = 0;
     hasPending = false;
     episodeReward = 0.0F;
-    spdlog::info("픽셀 학습 준비: 뷰 {}, 행동 {}, 가중치 {} 개, 배치 {}",
-                 layout.count(),
+    spdlog::info("픽셀 학습 준비: 뷰 {}(행동은 {} 개 뷰로), 행동 {}, 가중치 {} 개, 배치 {}, SADA alpha {:.2f}",
+                 config.views,
+                 config.deployViews,
                  config.actionCount,
                  merged.graph.parameterCount,
-                 config.batch);
+                 config.batch,
+                 static_cast<double>(config.sadaAlpha));
     return true;
 }
 
 void NeuralPlugin::resetEpisode(Services& services) {
     scene::Scene& scene = services.scenes.active();
+    // **되돌리기 전에 마지막 걸음의 보상을 잰다.** 순서가 계약이다 — 되돌린 뒤에 재면 저작 자세에서
+    // 잰 값이 되어 걸음 299 의 보상이 늘 같은 상수가 된다. 여기서 hasPending 을 끄기만 하면 그 칸에
+    // 결과가 영영 오지 않고, 점수도 보상 299 개를 300 으로 나눈 것이 된다.
+    if (hasPending) {
+        float reward = physics::stepReward(scene, robot);
+        episodeReward += reward;
+        replay->patchOutcome(pendingSlot, reward, 0.0F);
+    }
     // **자세까지 되돌린다.** 속도만 지우면 지난 에피소드가 끝난 각도에서 이어 시작해, 세워 둔 자세를
     // 물려받은 에피소드가 거저 높은 점수를 받는다. 비교 기준인 physics::rollout 은 장면을 값으로 받아
     // 매번 저작 자세에서 출발하므로, 그것과 견주려면 여기도 같아야 한다.
@@ -203,16 +251,23 @@ void NeuralPlugin::resetEpisode(Services& services) {
         body.velocity = glm::vec3{0.0F};
         body.angularVelocity = glm::vec3{0.0F};
     }
+    // 모터 목표도 되돌린다. act 가 덮어쓴 «지난 에피소드의 마지막 명령» 이 남아 있으면 되돌린 자세에
+    // 그 명령이 한 번 걸린다.
+    physics::restoreAuthoredMotors(scene, robot);
+    // **세계 변환 캐시를 여기서 다시 만든다.**
+    //
+    // 관측 렌더는 scene.world(i) 로 **캐시**를 읽는데, 그 캐시는 프레임 끝의 scene.refresh 가 만든다.
+    // 되돌리고 나서 같은 프레임 안에서 관측을 그리면 캐시가 아직 지난 에피소드의 마지막 자세라, 새
+    // 에피소드의 **첫 그림이 통째로 틀린다** — 정책은 엉뚱한 그림에서 행동을 고르고, 그 전이가 되돌린
+    // 상태의 결과와 짝지어 링에 담긴다. 에피소드마다 딱 한 걸음씩 조용히 썩는 자리다.
+    //
+    // 프레임 안에서 한 번 더 부르는 셈이지만, 되돌린 오브젝트는 이 프레임의 PhysicsPlugin 이 다시
+    // 움직이므로 프레임 끝의 refresh 가 그것들을 여전히 더티로 잡는다.
+    //
     // **구조가 바뀐 것이 아니다.** markStructureDirty 를 부르면 개정 번호가 올라 ensure() 가 에피소드마다
     // 통째로 다시 짓고, 그러면 링이 비워져 워밍업에 영영 닿지 못한다(학습이 도는 것처럼 보이면서 갱신이
-    // 한 번도 일어나지 않는다). 세계 변환 캐시는 이 프레임 끝의 scene.refresh 가 어차피 다시 만든다.
-    // **마지막 걸음의 보상을 먼저 채운다.** 여기서 hasPending 을 끄면 그 칸에 결과가 영영 오지 않고,
-    // 점수도 보상 299 개를 300 으로 나눈 것이 된다.
-    if (hasPending) {
-        float reward = physics::stepReward(scene, robot);
-        episodeReward += reward;
-        replay->patchOutcome(pendingSlot, reward, 0.0F);
-    }
+    // 한 번도 일어나지 않는다).
+    scene.refresh();
     ++episode;
     stepInEpisode = 0;
     lastEpisodeReward = episodeReward;
@@ -254,6 +309,16 @@ bool NeuralPlugin::step(Services& services) {
     }
     auto begin = std::chrono::steady_clock::now();
 
+    // **에피소드를 여는 것은 관측을 그리기 전이다.** 지난 걸음 끝에서 되돌리면 그 프레임의 물리가 되돌린
+    // 자세를 한 번 밟고 나서야 관측이 그려져, 첫 그림이 «저작 자세» 가 아니게 된다. 여기서 되돌리면
+    // physics::rollout 과 같은 차례가 된다 — 되돌린다 → 본다 → 고른다 → 물리가 밟는다.
+    //
+    // 덤으로 마지막 걸음의 보상이 제자리를 찾는다. 걸음 299 의 행동으로 물리가 밟은 것은 그 프레임의
+    // PhysicsPlugin 이고, 그 결과를 여기서 재면 앞의 298 개와 같은 규약이 된다.
+    if (stepInEpisode >= EPISODE_FRAMES) {
+        resetEpisode(services);
+    }
+
     // **지난 프레임의 결과를 먼저 채운다.** 그 행동으로 물리가 한 걸음 밟았으니 이제 보상을 안다.
     if (hasPending) {
         float reward = physics::stepReward(scene, robot);
@@ -277,17 +342,48 @@ bool NeuralPlugin::step(Services& services) {
         }
         vmaFlushAllocation(services.context->allocator, noiseBuffer.allocation, 0, VK_WHOLE_SIZE);
     }
+    // SADA. 갱신마다 뷰 하나를 뽑아 그 자리에만 alpha 를 세운다. **크리틱과 액터가 같은 뷰를 본다** —
+    // 갱신 한 번 안에서 갈리면 액터가 «다른 뷰로 잰 크리틱» 을 오르게 되고, 그것은 논문의 손실이 아니다.
+    uint32_t views = agent.config.views;
+    if (updates > 0 && sadaStaging != nullptr && agent.config.multiView()) {
+        for (uint32_t k = 0; k < updates; ++k) {
+            uint32_t chosen = gfx::neuralRandomBelow(20260914, updateCount + k + 1, views);
+            for (uint32_t view = 0; view < views; ++view) {
+                sadaStaging[k * views + view] = view == chosen ? agent.config.sadaAlpha : 0.0F;
+            }
+        }
+        vmaFlushAllocation(services.context->allocator, sadaBuffer.allocation, 0, VK_WHOLE_SIZE);
+    }
+    // 뷰 가중치를 갱신 k 의 자리에서 표로 올린다. 뷰마다 텐서가 하나씩이지만 연달아 잡혀 있어
+    // 복사 하나로 끝난다.
+    auto uploadSada = [&](VkCommandBuffer commandBuffer, uint32_t k, uint32_t tensor) {
+        if (tensor == gfx::NO_TENSOR) {
+            return;
+        }
+        executor->recordUploadActivationRange(commandBuffer,
+                                              sadaBuffer.handle,
+                                              static_cast<VkDeviceSize>(k) * views * sizeof(float),
+                                              merged.graph.tensors[tensor].offset,
+                                              views);
+    };
     uint32_t stored = gfx::ReplayBuffer::NO_SLOT;
     submit->submit([&](VkCommandBuffer commandBuffer, uint64_t) {
         observation->record(commandBuffer, scene, layout, 0, stepInEpisode == 0);
         stored = replay->recordStore(commandBuffer, observation->featureAddress());
-        // 관측을 행동 표의 입력 자리에 밀어 넣는다.
-        executor->recordUploadActivationRange(commandBuffer,
-                                              observation->featureBuffer(),
-                                              0,
-                                              merged.graph.tensors[actObservation].offset,
-                                              merged.graph.tensors[actObservation].count());
-        executor->recordForward(commandBuffer, merged.opBegin[0], merged.opCount[0]);
+        // 관측을 행동 표의 입력 자리에 밀어 넣는다. 뷰가 여럿이면 입력 텐서도 여럿이지만 **연달아
+        // 놓여 있어**(gfx::buildAgent 가 확인한다) 첫 자리에서 통째로 부으면 된다. 인코드가 내놓는
+        // 꼴도 뷰가 바깥 축이라 조각이 그대로 겹친다.
+        //
+        // 뷰를 뺀 평가에서는 배포 표에 **앞의 몇 뷰만** 넣는다. 나머지를 0 으로 채우는 것과 다르다 —
+        // 인코더 편향이 0 입력에도 값을 내 M 에 없던 항을 더한다.
+        uint32_t actGraph = reducedViews ? 3 : 0;
+        uint32_t actInput = reducedViews ? deployObservation : actObservation;
+        // **텐서 하나의 크기가 아니라 뷰 수를 곱한 것이다.** count() 로 쓰면 첫 뷰만 채워지고 나머지
+        // 뷰는 0 인 채로 M 에 더해진다 — 학습은 그럭저럭 돌고 점수만 조용히 낮아진다.
+        uint32_t actFloats = (reducedViews ? agent.config.deployViews : views) * agent.config.viewSize();
+        executor->recordUploadActivationRange(
+            commandBuffer, observation->featureBuffer(), 0, merged.graph.tensors[actInput].offset, actFloats);
+        executor->recordForward(commandBuffer, merged.opBegin[actGraph], merged.opCount[actGraph]);
 
         for (uint32_t k = 0; k < updates; ++k) {
             // 크리틱. 표집이 관측·행동·보상·감가를 표의 입력 자리에 바로 채운다.
@@ -302,6 +398,7 @@ bool NeuralPlugin::step(Services& services) {
                                                   static_cast<VkDeviceSize>(k) * noiseTensor.count() * sizeof(float),
                                                   noiseTensor.offset,
                                                   noiseTensor.count());
+            uploadSada(commandBuffer, k, criticSadaWeight);
             executor->recordClearGradients(commandBuffer);
             executor->recordForward(commandBuffer, merged.opBegin[1], merged.opCount[1]);
             executor->recordSeedLossGradient(commandBuffer, criticLoss);
@@ -316,6 +413,7 @@ bool NeuralPlugin::step(Services& services) {
             //   ponytail: 셰이더에 «이 대상은 건너뛰라» 가 없어 다음 관측·행동·보상·감가도 다시 쓴다.
             //   값이 같아 해롭지는 않지만 갱신마다 2.7 MB 를 헛되이 쓴다.
             replay->recordSampleWith(commandBuffer, actorTargets, replay->lastSamples());
+            uploadSada(commandBuffer, k, actorSadaWeight);
             executor->recordClearGradients(commandBuffer);
             executor->recordForward(commandBuffer, merged.opBegin[2], merged.opCount[2]);
             executor->recordSeedLossGradient(commandBuffer, actorLoss);
@@ -334,12 +432,13 @@ bool NeuralPlugin::step(Services& services) {
         }
         // **행동만 되읽는다.** 전체 되읽기는 가중치 4.3M 개를 매 걸음 가져와 그 복사가 걸음의 값을
         // 통째로 먹는다.
-        executor->recordDownloadTensor(commandBuffer, actAction);
+        executor->recordDownloadTensor(commandBuffer, reducedViews ? deployAction : actAction);
     });
     executor->invalidateReadback();
 
     // 행동을 읽어 잡음을 섞는다. **링에는 실제로 한 행동을 담는다.**
-    const float* result = executor->activationResult() + merged.graph.tensors[actAction].offset;
+    const float* result =
+        executor->activationResult() + merged.graph.tensors[reducedViews ? deployAction : actAction].offset;
     for (size_t i = 0; i < action.size(); ++i) {
         float value = result[i];
         if (training) {
@@ -374,9 +473,6 @@ bool NeuralPlugin::step(Services& services) {
         } else if (lastStepMilliseconds < FRAME_BUDGET_MILLISECONDS * 0.5F && updatesPerFrame < MAX_UPDATES_PER_FRAME) {
             ++updatesPerFrame;
         }
-    }
-    if (stepInEpisode >= EPISODE_FRAMES) {
-        resetEpisode(services);
     }
     return true;
 }
@@ -418,6 +514,14 @@ void NeuralPlugin::ui(Services& services) {
         // 한 번 더 묶어야 한다(ImGui_ImplVulkan_AddTexture). 지금은 --observation-dump 가 그 자리를 맡는다.
         ImGui::TextDisabled(
             "관측 %u x %u, 뷰 %u", gfx::OBSERVATION_SIZE, gfx::OBSERVATION_SIZE, observation->viewCount());
+    }
+    // **뷰를 뺀 채로 도는 중이면 드러낸다.** 조용히 전부로 돌면 «카메라 하나로도 된다» 는 결론이
+    // 거짓이 되고, 반대로 조용히 하나로 돌면 학습이 왜 느린지 알 수 없다.
+    if (agent.config.multiView()) {
+        ImGui::TextDisabled("MAD: 특징 합산 병합, SADA alpha %.2f", static_cast<double>(agent.config.sadaAlpha));
+    }
+    if (reducedViews) {
+        ImGui::TextDisabled("행동은 앞의 %u 개 뷰만 본다 (--eval-views)", agent.config.deployViews);
     }
 }
 

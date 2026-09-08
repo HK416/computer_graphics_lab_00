@@ -1130,15 +1130,21 @@ void initializeParameters(const Graph& graph, uint64_t seed, float* parameters) 
     // 편향은 0 으로 남기고 가중치만 채운다. layernorm 의 이득만 1 이다. 어느 파라미터가 무엇인지는
     // 연산 표가 말해 준다 — 텐서만 봐서는 가중치와 편향을 가를 수 없다.
     uint64_t stream = 0;
+    // **가중치 하나는 한 번만 채운다.** 같은 가중치가 표에 여러 번 나오기 때문이다 — 온라인 trunk 는
+    // 크리틱 표에서 두 번(현재 특징과 다음 행동), 공유 인코더는 뷰마다 한 번씩 쓰인다. 쓰임마다 채우면
+    // 마지막 것이 이기는 데다 흐름 번호가 함께 밀려, **뷰 수를 바꾸는 것만으로 초기 가중치가 통째로
+    // 갈린다.** 그러면 «1뷰 학습 대 2뷰 학습» 이 같은 출발점에서 견주는 비교가 아니게 된다.
+    std::vector<bool> filled(graph.tensors.size(), false);
     for (const Op& op : graph.ops) {
         auto fill = [&](uint32_t tensorIndex, uint32_t fanIn) {
             if (tensorIndex >= graph.tensors.size()) {
                 return;
             }
             const Tensor& tensor = graph.tensors[tensorIndex];
-            if (tensor.arena != Arena::PARAMETER) {
+            if (tensor.arena != Arena::PARAMETER || filled[tensorIndex]) {
                 return;
             }
+            filled[tensorIndex] = true;
             // He 정규. ReLU 를 지나며 분산이 절반으로 줄어드는 것을 미리 갚아 둔다.
             float deviation = std::sqrt(2.0F / static_cast<float>(std::max(fanIn, 1U)));
             for (uint32_t i = 0; i < tensor.count(); ++i) {

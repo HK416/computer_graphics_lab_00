@@ -77,6 +77,8 @@ int main(int argc, char* argv[]) {
             options.pixelSteps = static_cast<uint64_t>(std::atoll(argv[++i]));
         } else if (argument == "--policy-net" && i + 1 < argc) {
             options.policyNetPath = argv[++i];
+        } else if (argument == "--eval-views" && i + 1 < argc) {
+            options.evalViews = static_cast<uint32_t>(std::atoi(argv[++i]));
         } else if (argument == "--observation-dump" && i + 1 < argc) {
             options.observationDumpPath = argv[++i];
         } else if (argument == "--capture" && i + 1 < argc) {

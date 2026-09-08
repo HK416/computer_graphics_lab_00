@@ -42,6 +42,11 @@ private:
 
     bool enabled = false;
     bool training = false;
+    // 정책에게 줄 뷰 수. 학습에는 늘 전부를 쓰고, 이것은 **행동을 고를 때만** 걸린다. 0 이면 전부다.
+    uint32_t evalViews = 0;
+    // evalViews 가 뷰 수보다 적어 뷰를 뺀 표로 도는 중인가. 로그가 이 사실을 드러내야 한다 —
+    // 조용히 전부로 돌면 «카메라 하나로도 된다» 는 결론이 거짓이 된다.
+    bool reducedViews = false;
     // 한 번 실패하면 다시 시도하지 않는다. 프레임마다 만들었다 지우면 경고만 쏟아진다.
     bool disabled = false;
 
@@ -71,6 +76,12 @@ private:
     uint32_t criticLoss = gfx::NO_TENSOR;
     uint32_t actorLoss = gfx::NO_TENSOR;
     uint32_t criticNoise = gfx::NO_TENSOR;
+    // SADA 가중치의 첫 자리. 뷰마다 하나씩 **연달아** 놓여 있어 복사 한 번으로 다 채운다.
+    uint32_t criticSadaWeight = gfx::NO_TENSOR;
+    uint32_t actorSadaWeight = gfx::NO_TENSOR;
+    // 뷰를 뺀 배포 표(agent.actDeploy)의 자리. reducedViews 일 때만 쓴다.
+    uint32_t deployObservation = gfx::NO_TENSOR;
+    uint32_t deployAction = gfx::NO_TENSOR;
     gfx::ReplayBatchTargets criticTargets;
     gfx::ReplayBatchTargets actorTargets;
 
@@ -93,6 +104,10 @@ private:
     // 타깃 정책 평활화 잡음. 갱신마다 다른 값을 써야 해서 프레임당 갱신 수만큼 담아 한 번에 올린다.
     gfx::Buffer noiseBuffer;
     float* noiseStaging = nullptr;
+    // SADA 가중치. 갱신마다 뷰 하나에만 alpha 가 서고 나머지는 0 이다 — 표가 고정이라 «무작위 뷰» 가
+    // 이렇게 풀린다. 잡음과 같은 이유로 프레임당 갱신 수만큼 담아 한 번에 올린다.
+    gfx::Buffer sadaBuffer;
+    float* sadaStaging = nullptr;
     uint64_t sampleStream = 0;
     // --policy-net 가 준 경로. 학습 중이면 에피소드마다 여기에 가중치를 쓴다.
     std::string savePath;

@@ -56,6 +56,19 @@ struct AgentConfig {
     uint32_t frameStack = 3;
     // imageSize 가 0 일 때의 관측 수.
     uint32_t observationCount = 0;
+    // 카메라 수. **뷰마다 같은 인코더를 따로 태우고 특징을 더해 합친다**(MAD 의 M = sum(V_i)).
+    // 채널로 이어 붙이지 않는 이유가 이 논문의 요점이다 — 이어 붙이면 뷰 수가 인코더의 모양을 바꿔
+    // 배포 때 카메라를 뺄 수 없지만, 더하면 뺀 채로도 같은 인코더가 돈다.
+    uint32_t views = 1;
+    // 단일 뷰 특징으로 손실을 다시 재는 몫(SADA 의 alpha). 0 이면 병합만 쓰는 단순 후퇴다.
+    // L = (1 - alpha) * L(M) + alpha * L(V_i) 이고 i 는 갱신마다 무작위인데, 표가 고정이라 «무작위» 를
+    // 뷰별 가중치 입력으로 푼다 — 호스트가 고른 뷰에 alpha 를, 나머지에 0 을 넣는다.
+    float sadaAlpha = 0.8F;
+    // **배포 표가 더하는 뷰 수.** 학습은 늘 views 개를 다 쓰고, 이것은 카메라를 뺀 상태를 재는 별도
+    // 표(Agent::actDeploy)에만 걸린다. 1 이 논문의 주장을 그대로 재는 자리다.
+    uint32_t deployViews = 1;
+
+    bool multiView() const { return views > 1; }
 
     uint32_t actionCount = 1;
     // 학습 한 걸음이 보는 전이 수.
@@ -68,8 +81,11 @@ struct AgentConfig {
 
     bool pixels() const { return imageSize > 0; }
 
-    // 관측 하나가 차지하는 float 개수. 픽셀이면 프레임 스택 x 변 x 변이다.
-    uint32_t observationSize() const { return pixels() ? frameStack * imageSize * imageSize : observationCount; }
+    // 뷰 하나가 차지하는 float 개수. 픽셀이면 프레임 스택 x 변 x 변이다.
+    uint32_t viewSize() const { return pixels() ? frameStack * imageSize * imageSize : observationCount; }
+    // 관측 한 벌이 차지하는 float 개수. **저차원에서도 뷰 수를 곱한다** — 표가 뷰마다 입력을 잡으므로
+    // 여기서 곱하지 않으면 학습 루프가 첫 뷰만 채우고 나머지는 0 인 채로 병합과 SADA 에 들어간다.
+    uint32_t observationSize() const { return views * viewSize(); }
 };
 
 // 파라미터 배열 안의 구간(float 첨자). [begin, end) 다.
@@ -110,7 +126,13 @@ struct AgentParameterMap {
 // 관측 하나에서 행동 하나. 배치가 1 이고 손실이 없어 validateForward 만 지난다.
 struct AgentActGraph {
     Graph graph;
-    uint32_t observation = NO_TENSOR;
+    // 뷰마다 하나. **연달아 잡혀 있어** observation[0] 의 자리에서 전부가 이어진다 — 표집이 주소 하나로
+    // 채우고 뷰별 인코더가 자기 조각만 본다. buildAgent 가 그 이음을 확인한다.
+    std::vector<uint32_t> observation;
+    // 뷰마다의 인코더 출력 V_i 와 그것을 더한 M = sum(V_i). 뷰가 하나면 merged 가 viewFeature[0] 과
+    // **같은 텐서**다 — 더할 것이 없어 ADD 를 두지 않는다.
+    std::vector<uint32_t> viewFeature;
+    uint32_t merged = NO_TENSOR;
     // tanh 를 지난 [-1, 1] 이다. physics::act 가 그대로 받는다.
     uint32_t action = NO_TENSOR;
 };
@@ -119,8 +141,10 @@ struct AgentActGraph {
 // with no_grad() 와 같은 자리이고, 역전파가 그 구간의 연산을 아예 건너뛴다.
 struct AgentCriticGraph {
     Graph graph;
-    uint32_t observation = NO_TENSOR;
-    uint32_t nextObservation = NO_TENSOR;
+    std::vector<uint32_t> observation;
+    std::vector<uint32_t> nextObservation;
+    // 뷰마다 하나. 갱신마다 호스트가 고른 뷰에 alpha 를, 나머지에 0 을 넣는다(SADA). 뷰가 하나면 비어 있다.
+    std::vector<uint32_t> sadaWeight;
     // 리플레이에 담긴 «그때 실제로 한 행동». 액터가 지금 낼 행동이 아니다.
     uint32_t action = NO_TENSOR;
     uint32_t reward = NO_TENSOR;
@@ -138,29 +162,44 @@ struct AgentCriticGraph {
     uint32_t targetTwin2 = NO_TENSOR;
     // y = r + γ(1 - 끝)·min(Q1', Q2'). 경사를 받지 않는다.
     uint32_t targetValue = NO_TENSOR;
-    // mse(Q1, y) + mse(Q2, y).
+    // 병합 특징 M 으로 잰 손실. mse(Q1, y) + mse(Q2, y).
+    uint32_t mergedLoss = NO_TENSOR;
+    // (1 - alpha)*L(M) + sum(w_i * L(V_i)). 뷰가 하나면 mergedLoss 와 같은 텐서다.
     uint32_t loss = NO_TENSOR;
 };
 
 // 액터 손실 -mean(min(Q1, Q2)). 특징을 detach 해 **인코더와 trunk 를 갱신하지 않는다**(DrQ-v2 규약).
 struct AgentActorGraph {
     Graph graph;
-    uint32_t observation = NO_TENSOR;
+    std::vector<uint32_t> observation;
+    std::vector<uint32_t> sadaWeight;
     uint32_t action = NO_TENSOR;
     // 온라인 크리틱 둘이 지금 행동에 매긴 값. value 는 그 최소다.
     uint32_t q1 = NO_TENSOR;
     uint32_t q2 = NO_TENSOR;
     uint32_t value = NO_TENSOR;
+    uint32_t mergedLoss = NO_TENSOR;
     uint32_t loss = NO_TENSOR;
 };
 
 struct Agent {
     AgentConfig config;
     AgentActGraph act;
+    // **앞의 deployViews 개 뷰만** 보는 행동 표. 배포 때 카메라를 뺀 상태를 재는 데 쓴다 —
+    // M = sum(V_i) 라 뷰를 빼는 것이 곧 «있는 것만 더한다» 이고, SADA 가 단일 뷰 특징으로도 머리를
+    // 학습시켜 두었기에 성립한다. 뷰 수와 deployViews 가 같으면 act 와 같은 표다.
+    AgentActGraph actDeploy;
     AgentCriticGraph critic;
     AgentActorGraph actor;
     AgentParameterMap parameters;
 };
+
+// 텐서들이 배열에서 **이어져 있는가**(앞 텐서가 끝나는 자리에서 다음 텐서가 시작한다).
+//
+// buildAgent 가 뷰 입력에 대해 이것을 요구한다 — 표집 셰이더가 주소 하나로 전부를 채우고 학습 루프가
+// 복사 한 번으로 배치를 넣기 때문이다. 빌더가 자리를 순서대로 잡으니 지금은 늘 참이지만, 자리 재사용이나
+// 정렬이 들어오면 조용히 깨지는 자리라 밖에서도 볼 수 있게 둔다. 빈 목록은 거짓이다.
+bool tensorsContiguous(const Graph& graph, const std::vector<uint32_t>& tensors);
 
 // 설정에서 그래프 셋을 짓는다. 설정이 말이 안 되면(합성곱이 이미지를 다 먹거나, 저차원인데 관측이 0
 // 이거나) 거짓을 돌려주고 out 을 건드리지 않는다.
@@ -198,7 +237,13 @@ struct AgentUpdateSettings {
 
 // 갱신 한 번이 보는 전이 묶음. 배열은 부르는 쪽이 들고 있고 update 가 읽기만 한다.
 struct AgentBatch {
-    // batch x observationSize().
+    // batch x observationSize() 이고, 축 순서는 **뷰가 바깥**이다:
+    //
+    //     ((view * batch + sample) * frameStack + channel) * (imageSize * imageSize) + y * imageSize + x
+    //
+    // 표가 뷰마다 [batch, stack, 변, 변] 텐서를 하나씩 **연달아** 잡고 update 가 첫 뷰 자리에 통째로
+    // 부어 넣기 때문이다. 표본을 바깥에 두면 뷰 조각이 표본마다 흩어져 텐서 경계와 어긋난다 —
+    // GPU 쪽 neural_replay_sample.comp 가 같은 식으로 쓴다(CLAUDE.md 의 묶인 자리 표에 있다).
     const float* observations = nullptr;
     // batch x actionCount. **그때 실제로 한 행동** 이다.
     const float* actions = nullptr;
@@ -210,8 +255,11 @@ struct AgentBatch {
 };
 
 struct AgentUpdateStats {
+    // 액터·크리틱 손실 모두 **표가 실제로 최적화한 값**이다. 뷰가 여럿이면 SADA 로 섞인 것이라
+    // (1 - alpha) * (병합 항) + alpha * (그 걸음에 뽑힌 뷰의 항) 이고, 뷰가 하나면 병합 항 그대로다.
     float criticLoss = 0.0F;
-    // 액터가 본 min(Q1, Q2) 의 평균. 액터 손실은 이것의 음수다.
+    // 액터 손실의 음수. 뷰가 하나면 «액터가 본 min(Q1, Q2) 의 평균» 이고, 여럿이면 위와 같이 섞인 값이라
+    // 걸음마다 뽑힌 뷰가 달라 그만큼 출렁인다.
     float value = 0.0F;
 };
 
@@ -234,9 +282,16 @@ public:
     const AgentConfig& config() const { return agent.config; }
     // 지금까지 밟은 갱신 걸음 수. Adam 의 편향 보정이 이것을 쓴다.
     uint32_t steps() const { return step; }
+    // 지난 갱신이 SADA 로 살린 뷰. 뷰가 하나면 늘 0 이다. **크리틱과 액터가 같은 값을 본다** — 갱신
+    // 한 번 안에서 갈리면 액터가 «다른 뷰로 잰 크리틱» 을 오르게 된다.
+    uint32_t lastViewChoice() const { return viewChoice; }
 
     // 관측 하나로 행동 하나. 탐험 잡음은 부르는 쪽이 얹는다(학습이냐 평가냐를 여기서 정하지 않는다).
+    // observation 은 **뷰를 이어 붙인** config().observationSize() 개다.
     void act(const float* observation, float* action);
+    // 앞의 config().deployViews 개 뷰만 보고 행동 하나. observation 은 그 수 x viewSize() 개다.
+    // 나머지 뷰를 0 으로 채우는 것과 **같지 않다** — 인코더 편향이 0 입력에도 값을 내 M 에 더해진다.
+    void actDeploy(const float* observation, float* action);
 
     // 크리틱 한 걸음, 액터 한 걸음, 그리고 polyak. 순서가 계약이다 — 액터는 **이번 걸음에 갱신된**
     // 크리틱을 보고 오른다(DrQ-v2 와 같다).
@@ -261,11 +316,13 @@ private:
     std::vector<float> criticMoments;
     std::vector<float> actorMoments;
     std::vector<float> actActivations;
+    std::vector<float> actDeployActivations;
     std::vector<float> criticActivations;
     std::vector<float> criticActivationGradients;
     std::vector<float> actorActivations;
     std::vector<float> actorActivationGradients;
     uint32_t step = 0;
+    uint32_t viewChoice = 0;
     uint64_t noiseStream = 0;
 };
 

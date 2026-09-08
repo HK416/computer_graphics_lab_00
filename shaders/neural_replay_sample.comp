@@ -52,7 +52,10 @@ void main() {
         uint age = push.stack - 1u - channel;
         uint from = replayStackIndex(push.capacity, push.count, push.cursor, index, step, age);
         uint nextFrom = replayStackIndex(push.capacity, push.count, push.cursor, next, nextStep, age);
-        uint target = ((sampleIndex * push.views + view) * push.stack + channel) * plane + y * push.size + x;
+        // **뷰가 바깥 축이다.** 뷰마다 입력 텐서가 따로 있고 그것들이 활성 배열에 연달아 놓여 있으므로
+        // (gfx::buildAgent 가 이음을 확인한다), 뷰 하나가 통째로 이어져야 그 텐서 하나와 정확히 겹친다.
+        // 표본을 바깥에 두면 뷰 조각이 표본마다 흩어져 텐서 경계와 어긋난다.
+        uint target = ((view * push.batch + sampleIndex) * push.stack + channel) * plane + y * push.size + x;
         push.state.items[target] =
             replayFetch(push.frames, from, view, push.views, push.size, int(x) + item.shiftX, int(y) + item.shiftY);
         push.nextState.items[target] = replayFetch(push.frames,
