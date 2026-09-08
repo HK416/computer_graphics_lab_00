@@ -344,7 +344,10 @@ void NeuralExecutor::recordClearGradients(VkCommandBuffer commandBuffer) {
     VkMemoryBarrier2 memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
     memory.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
     memory.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    memory.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT;
+    // CLEAR 를 함께 둔다. 바로 뒤에 오는 것이 손실 씨앗의 vkCmdFillBuffer 이고, 그것은 COPY 가 아니라
+    // CLEAR 단계다.
+    memory.dstStageMask =
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT;
     memory.dstAccessMask =
         VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
     VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
@@ -464,14 +467,32 @@ void NeuralExecutor::dispatch(VkCommandBuffer commandBuffer, uint32_t opIndex, u
 }
 
 void NeuralExecutor::recordForward(VkCommandBuffer commandBuffer) {
-    for (uint32_t i = 0; i < graph.ops.size(); ++i) {
+    recordForward(commandBuffer, 0, static_cast<uint32_t>(graph.ops.size()));
+}
+
+void NeuralExecutor::recordBackward(VkCommandBuffer commandBuffer) {
+    recordBackward(commandBuffer, 0, static_cast<uint32_t>(graph.ops.size()));
+}
+
+// 연산 **구간**만 돈다. 에이전트는 표가 셋인데 셋이 파라미터 하나를 나눠 써서 한 표로 이어 붙였고
+// (gfx::mergeGraphs), 갱신 한 번은 그중 한 구간만 밟는다.
+//
+// 끝을 자르는 것(min)은 자기 검사가 지켜 주지 못한다. 자르지 않으면 표 밖의 연산을 첨자하는데, 릴리스
+// 빌드의 std::vector 는 그것을 진단하지 않고 읽은 쓰레기의 kind 가 supported() 를 통과하지 못해 조용히
+// 넘어간다(돌연변이로 확인했다). 값이 맞는지가 아니라 **규격을 읽어서** 지키는 자리다.
+void NeuralExecutor::recordForward(VkCommandBuffer commandBuffer, uint32_t begin, uint32_t count) {
+    uint32_t total = static_cast<uint32_t>(graph.ops.size());
+    uint32_t end = begin >= total ? begin : std::min(begin + count, total);
+    for (uint32_t i = begin; i < end; ++i) {
         dispatch(commandBuffer, i, 0);
     }
 }
 
-void NeuralExecutor::recordBackward(VkCommandBuffer commandBuffer) {
-    for (size_t i = graph.ops.size(); i-- > 0;) {
-        dispatch(commandBuffer, static_cast<uint32_t>(i), NEURAL_FLAG_BACKWARD);
+void NeuralExecutor::recordBackward(VkCommandBuffer commandBuffer, uint32_t begin, uint32_t count) {
+    uint32_t total = static_cast<uint32_t>(graph.ops.size());
+    uint32_t end = begin >= total ? begin : std::min(begin + count, total);
+    for (uint32_t i = end; i-- > begin;) {
+        dispatch(commandBuffer, i, NEURAL_FLAG_BACKWARD);
     }
 }
 
@@ -584,6 +605,96 @@ void NeuralExecutor::recordPolyak(
     vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
     vkCmdDispatch(commandBuffer, (count + NEURAL_GROUP_SIZE - 1) / NEURAL_GROUP_SIZE, 1, 1);
     barrier(commandBuffer);
+}
+
+void NeuralExecutor::recordUploadActivationRange(
+    VkCommandBuffer commandBuffer, VkBuffer source, VkDeviceSize sourceOffset, uint32_t floatOffset, uint32_t floats) {
+    if (floats == 0 || source == VK_NULL_HANDLE) {
+        return;
+    }
+    // **복사 앞에도 배리어를 건다.** 앞의 컴퓨트가 이 배열을 쓰고 있었을 수도 있고(WAR), 앞의 업로드
+    // 복사와 겹칠 수도 있다(WAW) — uploadBarrier 의 dst 가 COMPUTE 뿐이라 복사끼리는 줄 세우지 못한다.
+    // 검증 레이어의 동기화 검사가 vkCmdCopyBuffer 의 WRITE_AFTER_WRITE 로 짚는다.
+    VkMemoryBarrier2 memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    memory.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT;
+    memory.srcAccessMask =
+        VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    memory.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    memory.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &memory;
+    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+
+    VkBufferCopy region{};
+    region.srcOffset = sourceOffset;
+    region.dstOffset = static_cast<VkDeviceSize>(floatOffset) * sizeof(float);
+    region.size = static_cast<VkDeviceSize>(floats) * sizeof(float);
+    vkCmdCopyBuffer(commandBuffer, source, activationBuffer.handle, 1, &region);
+    uploadBarrier(commandBuffer);
+}
+
+void NeuralExecutor::recordSeedLossGradient(VkCommandBuffer commandBuffer, uint32_t tensor) {
+    if (tensor >= graph.tensors.size()) {
+        return;
+    }
+    const Tensor& item = graph.tensors[tensor];
+    if (item.arena != Arena::ACTIVATION) {
+        return;
+    }
+    // **채우기 앞에 배리어를 건다.** recordClearGradients 가 같은 배열을 통째로 지우는데 그 꼬리
+    // 배리어의 dst 에 CLEAR 가 없어(COPY 는 CLEAR 를 포함하지 않는다) 두 채우기가 동기화 없는 WAW 다.
+    // 전체 지우기가 뒤로 밀리면 씨앗이 날아가 그 갱신의 경사가 통째로 0 이 된다.
+    //
+    // 이 배리어와 recordUploadActivationRange 의 uploadBarrier 는 자기 검사가 지켜 주지 못한다 — 빼도
+    // 이 드라이버에서는 답이 같다(돌연변이로 확인했다). 검증 레이어의 동기화 검사가 잡는 자리이고,
+    // 그래서 규격을 읽어서 지킨다.
+    clearBarrier(commandBuffer);
+    // 1.0F 의 비트를 채운다. vkCmdFillBuffer 는 uint32 단위라 값을 그대로 넘긴다.
+    uint32_t one = 0;
+    float value = 1.0F;
+    std::memcpy(&one, &value, sizeof(one));
+    vkCmdFillBuffer(commandBuffer,
+                    activationGradientBuffer.handle,
+                    static_cast<VkDeviceSize>(item.offset) * sizeof(float),
+                    static_cast<VkDeviceSize>(item.count()) * sizeof(float),
+                    one);
+    VkMemoryBarrier2 memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    memory.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+    memory.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    memory.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    memory.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &memory;
+    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+}
+
+void NeuralExecutor::recordDownloadTensor(VkCommandBuffer commandBuffer, uint32_t tensor) {
+    if (tensor >= graph.tensors.size()) {
+        return;
+    }
+    const Tensor& item = graph.tensors[tensor];
+    if (item.arena != Arena::ACTIVATION) {
+        return;
+    }
+    VkMemoryBarrier2 memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    memory.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    memory.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    memory.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    memory.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &memory;
+    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+
+    // 되읽기 버퍼의 배치는 recordDownload 와 같다(활성이 맨 앞이다). 그래서 activationResult() 가 그대로
+    // 이 텐서를 가리킨다.
+    VkBufferCopy region{};
+    region.srcOffset = static_cast<VkDeviceSize>(item.offset) * sizeof(float);
+    region.dstOffset = region.srcOffset;
+    region.size = static_cast<VkDeviceSize>(item.count()) * sizeof(float);
+    vkCmdCopyBuffer(commandBuffer, activationBuffer.handle, readback.handle, 1, &region);
 }
 
 void NeuralExecutor::recordDownload(VkCommandBuffer commandBuffer) {

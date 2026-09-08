@@ -229,6 +229,33 @@ float neuralGaussian(uint64_t seed, uint64_t index);
 // 같은 흐름의 [0, bound) 균등 정수. 표본 첨자와 증강 변위를 고르는 데 쓴다. bound 가 0 이면 0 이다.
 uint32_t neuralRandomBelow(uint64_t seed, uint64_t index, uint32_t bound);
 
+// ---- 표 여럿을 한 표로 합치기
+//
+// 에이전트는 표가 셋이다(행동·크리틱 손실·액터 손실). 셋이 **파라미터 배열 하나를 나눠 쓰지만** GPU
+// 실행기는 표를 하나만 든다. 실행기를 셋 두면 파라미터도 세 벌이 되어 학습이 갈라진다.
+//
+// 그래서 표를 잇는다. 파라미터 오프셋은 셋이 이미 같은 배치를 쓰므로 그대로 두고, 활성 오프셋만 앞
+// 표들의 크기만큼 민다. 연산의 텐서 첨자도 같은 만큼 민다. 결과는 «연산 구간을 골라 도는» 표 하나다.
+struct MergedGraph {
+    Graph graph;
+    // 표 i 의 연산이 시작하는 자리와 그 개수. recordForward(begin, count) 로 그 구간만 돈다.
+    std::vector<uint32_t> opBegin;
+    std::vector<uint32_t> opCount;
+    // 표 i 의 활성이 시작하는 자리. 원래 표의 텐서 오프셋에 이것을 더하면 합친 표의 자리다.
+    std::vector<uint32_t> activationBase;
+    // 표 i 의 텐서가 시작하는 자리. mergedTensor 가 이것을 쓴다 — 밖에서 다시 세면 «merged 를 만든 것과
+    // 다른 표 목록» 을 줘도 범위 안의 엉뚱한 번호가 조용히 나온다.
+    std::vector<uint32_t> tensorBase;
+    std::vector<uint32_t> tensorCount;
+};
+
+// 표들을 이어 붙인다. 파라미터 수가 서로 다르면(같은 에이전트에서 나온 표가 아니면) 거짓이다.
+bool mergeGraphs(const std::vector<const Graph*>& sources, MergedGraph& out);
+
+// 합친 표에서 원래 표 which 의 텐서 tensor 가 앉은 자리. 입력을 채우고 결과를 읽는 데 쓴다.
+// 범위를 벗어나면 NO_TENSOR 다.
+uint32_t mergedTensor(const MergedGraph& merged, size_t which, uint32_t tensor);
+
 // ---- 리플레이 링의 첨자 규칙
 //
 // 여기가 순수 함수인 것이 요점이다. 링·에피소드 경계·유효 표본 판정은 **글로 읽어서는 맞는지 알 수

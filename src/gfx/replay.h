@@ -116,8 +116,17 @@ public:
     // 다음에 쓸 칸의 메타를 채운다. **record 하기 전에 부른다** — 그 칸의 에피소드·걸음이 정해져야
     // 표집이 스택을 어디까지 거슬러 올라갈지 안다. 에피소드가 바뀌면 episode 를 올려서 준다.
     void beginSlot(uint32_t episode, uint32_t stepInEpisode, float reward, float discount, const float* action);
-    // beginSlot 이 정한 칸에 이번 관측을 담고 커서를 하나 민다.
-    void recordStore(VkCommandBuffer commandBuffer, VkDeviceAddress observationFeatures);
+    // 담지 못했음을 나타내는 칸 번호. 0 을 실패로 쓰면 0 번 칸에 담은 것과 구별되지 않는다.
+    static constexpr uint32_t NO_SLOT = 0xFFFFFFFFU;
+    // beginSlot 이 정한 칸에 이번 관측을 담고 커서를 하나 민다. 돌려주는 것은 담은 칸의 번호이고,
+    // 담지 못했으면 NO_SLOT 이다.
+    uint32_t recordStore(VkCommandBuffer commandBuffer, VkDeviceAddress observationFeatures);
+
+    // 담은 뒤에 메타를 고친다. **행동과 보상은 관측보다 늦게 정해진다** — 행동은 같은 제출의 순전파가
+    // 내놓고, 보상은 그 행동으로 물리를 한 걸음 밟은 **다음 프레임**에야 안다. 그래도 순서가 어긋나지
+    // 않는 것은, 방금 담은 칸이 뒤가 없어 다음 프레임까지 표본이 되지 못하기 때문이다.
+    void patchAction(uint32_t slot, const float* action);
+    void patchOutcome(uint32_t slot, float reward, float discount);
 
     // 표본을 뽑아 targets 에 채운다. 뽑을 것이 모자라면 거짓을 돌려주고 아무 것도 하지 않는다.
     // seed 와 stream 이 같으면 같은 표본이 나온다 — 자기 검사가 CPU 로도 같은 것을 만들어 견준다.

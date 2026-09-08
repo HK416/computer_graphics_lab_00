@@ -71,6 +71,12 @@ int main(int argc, char* argv[]) {
             options.rolloutFrames = static_cast<uint32_t>(std::atoi(argv[++i]));
         } else if (argument == "--fixed-dt" && i + 1 < argc) {
             options.fixedDeltaSeconds = static_cast<float>(std::atof(argv[++i]));
+        } else if (argument == "--train-pixels") {
+            options.trainPixels = true;
+        } else if (argument == "--pixel-steps" && i + 1 < argc) {
+            options.pixelSteps = static_cast<uint64_t>(std::atoll(argv[++i]));
+        } else if (argument == "--policy-net" && i + 1 < argc) {
+            options.policyNetPath = argv[++i];
         } else if (argument == "--observation-dump" && i + 1 < argc) {
             options.observationDumpPath = argv[++i];
         } else if (argument == "--capture" && i + 1 < argc) {

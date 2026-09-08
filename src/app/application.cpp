@@ -17,6 +17,7 @@
 
 #include "app/plugins/debug_lines_plugin.h"
 #include "app/plugins/fluid_plugin.h"
+#include "app/plugins/neural_plugin.h"
 #include "app/plugins/physics_plugin.h"
 #include "app/plugins/profiler_plugin.h"
 #include "app/plugins/robot_plugin.h"
@@ -119,7 +120,7 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
         bindless = std::make_unique<gfx::BindlessTextures>(*context);
         textures = std::make_unique<gfx::TextureCache>(*context, *bindless);
         geometry = std::make_unique<gfx::GeometryStore>(*context);
-        spdlog::info("헤드리스 GPU 장치 준비: 관측 렌더");
+        spdlog::info("헤드리스 GPU 장치 준비: 관측 렌더{}", options.trainPixels ? " + 픽셀 학습" : "");
     }
     // 내장 도형은 헤드리스에서도 올린다. 장면 파일이 가리키는 메쉬 번호와 메쉬 콜라이더가 여기서 나온다.
     registerBuiltinModels();
@@ -285,6 +286,8 @@ void Application::applyActiveCamera(scene::Scene& scene) {
 void Application::registerPlugins() {
     // 로봇이 물리보다 앞이다. 정책이 쓴 관절 목표를 이번 스텝이 보고 풀어야 한다.
     plugins.push_back(std::make_unique<RobotPlugin>());
+    // 픽셀 정책은 로봇 정책 뒤, 물리 앞이다. 관절 목표를 쓰고 나서 물리가 그것을 푼다.
+    plugins.push_back(std::make_unique<NeuralPlugin>());
     plugins.push_back(std::make_unique<PhysicsPlugin>());
     plugins.push_back(std::make_unique<FluidPlugin>());
     plugins.push_back(std::make_unique<DebugLinesPlugin>());
@@ -1068,7 +1071,9 @@ void Application::runHeadless() {
     // 벽시계를 쓰지 않는다. 실행마다 같은 결과가 나와야 저장 파일을 기준과 바이트로 견줄 수 있다.
     float deltaSeconds = options.fixedDeltaSeconds > 0.0F ? options.fixedDeltaSeconds : HEADLESS_DELTA_SECONDS;
     scene::Scene& scene = scenes.active();
-    for (uint64_t frame = 0; frame < options.frames; ++frame) {
+    // 픽셀 학습은 프레임 하나가 정책 한 걸음이라 --pixel-steps 가 곧 프레임 수다.
+    uint64_t frames = options.trainPixels ? options.pixelSteps : options.frames;
+    for (uint64_t frame = 0; frame < frames; ++frame) {
         scene.update(deltaSeconds, &jobs);
         Services shared = services();
         for (std::unique_ptr<Plugin>& plugin : plugins) {
@@ -1078,7 +1083,7 @@ void Application::runHeadless() {
         stepObservation(frame + 1);
     }
     spdlog::info("헤드리스 {} 프레임 완료 (간격 {:.4f} 초, 강체 {} 개)",
-                 options.frames,
+                 frames,
                  static_cast<double>(deltaSeconds),
                  scene.rigidBodies.size());
     if (!options.savePath.empty()) {
@@ -1093,7 +1098,13 @@ void Application::runHeadless() {
 // **매 프레임 그린다.** 프레임 스택(최근 세 판)이 차 있어야 덤프가 뜻이 있고, 그 스택을 만드는 자리가
 // 12단계의 학습 경로와 같아야 «학습이 보는 것» 과 «사람이 보는 것» 이 어긋나지 않는다.
 bool Application::stepObservation(uint64_t frameCount) {
-    if (!needsObservationDevice() || observationDisabled || context == nullptr || geometry == nullptr) {
+    // **덤프 인자가 있을 때만, 그리고 픽셀 학습이 아닐 때만 그린다.** 픽셀 학습도 장치를 요구하지만
+    // 관측은 플러그인이 자기 것을 그린다. 둘 다 돌면 같은 장면을 프레임마다 두 번 그리고, 프레임 스택과
+    // 걸음 번호가 따로 놀아 «학습이 보는 것» 과 «사람이 보는 것» 이 어긋난다.
+    //   ponytail: 그래서 --train-pixels 와 --observation-dump 를 함께 주면 덤프가 나오지 않는다.
+    //   플러그인의 관측을 덤프로 빼는 훅이 있어야 둘을 함께 쓸 수 있다.
+    if (options.observationDumpPath.empty() || options.trainPixels || observationDisabled || context == nullptr ||
+        geometry == nullptr) {
         return false;
     }
     scene::Scene& scene = scenes.active();

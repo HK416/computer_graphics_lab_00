@@ -689,6 +689,189 @@ bool runPolyakEdges(NeuralExecutor& executor, HeadlessCompute& compute) {
     return exact;
 }
 
+// ---- 합친 표의 구간 디스패치
+//
+// 12단계가 새로 만든 실행기 갈래 넷을 여기서 밟는다: 연산 **구간**만 도는 순·역전파,
+// 손실 텐서에 씨앗 심기, 활성 배열의 한 구간만 올리기·내리기. 넷 다 학습 플러그인만 쓰는데 그쪽은
+// 한 번 돌리는 데 삼십 분이 걸려 검사가 될 수 없다 — 돌연변이를 넣어도 아무 것도 빨개지지 않았다.
+//
+// 요점은 **밟지 않은 구간이 그대로 남아 있는가**다. 구간을 무시하고 처음부터 도는 돌연변이는 값이
+// 맞는 것만 봐서는 잡히지 않고, 「남의 구간을 건드렸는가」로만 드러난다.
+bool runMergedCheck(Context& context, HeadlessCompute& compute) {
+    // 표 둘. 같은 파라미터 배치를 쓰는 것처럼 각각 같은 수만큼 잡는다(에이전트의 표 셋이 그런 꼴이다).
+    Graph first;
+    Graph second;
+    uint32_t firstInput = NO_TENSOR;
+    uint32_t firstLoss = NO_TENSOR;
+    uint32_t secondInput = NO_TENSOR;
+    uint32_t secondLoss = NO_TENSOR;
+    {
+        GraphBuilder builder(first);
+        uint32_t weight = builder.addParameter(6, 5, 1, 1);
+        uint32_t bias = builder.addParameter(6, 1, 1, 1);
+        firstInput = builder.addInput(4, 5, 1, 1);
+        uint32_t hidden = builder.addRelu(builder.addLinear(firstInput, weight, bias));
+        firstLoss = builder.addMean(hidden);
+    }
+    {
+        GraphBuilder builder(second);
+        uint32_t weight = builder.addParameter(6, 5, 1, 1);
+        uint32_t bias = builder.addParameter(6, 1, 1, 1);
+        secondInput = builder.addInput(3, 5, 1, 1);
+        uint32_t hidden = builder.addTanh(builder.addLinear(secondInput, weight, bias));
+        secondLoss = builder.addMean(hidden);
+    }
+    std::vector<const Graph*> sources{&first, &second};
+    MergedGraph merged;
+    if (!mergeGraphs(sources, merged) || !validate(merged.graph)) {
+        std::printf("  합친 표: 잇지 못했습니다\n");
+        return false;
+    }
+
+    NeuralExecutor executor(context);
+    if (!executor.available() || !executor.build(merged.graph) || executor.unsupportedOps() != 0) {
+        std::printf("  합친 표: 실행기를 짓지 못했습니다\n");
+        return false;
+    }
+
+    std::vector<float> parameters(merged.graph.parameterCount, 0.0F);
+    for (size_t i = 0; i < parameters.size(); ++i) {
+        parameters[i] = 0.4F * neuralGaussian(71, i);
+    }
+    // **활성을 알아볼 수 있는 값으로 채운다.** 밟지 않아야 할 구간이 그대로인지 이것으로 본다.
+    std::vector<float> seeded(merged.graph.activationCount, 0.0F);
+    for (size_t i = 0; i < seeded.size(); ++i) {
+        seeded[i] = -7.0F - static_cast<float>(i);
+    }
+
+    // 둘째 표의 입력만 밖에서 밀어 넣는다. recordUploadActivationRange 가 그 자리를 맡는다.
+    uint32_t mergedSecondInput = mergedTensor(merged, 1, secondInput);
+    const Tensor& inputTensor = merged.graph.tensors[mergedSecondInput];
+    Buffer inputBuffer = createBuffer(context,
+                                      static_cast<VkDeviceSize>(inputTensor.count()) * sizeof(float),
+                                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                      MemoryLocation::HOST_WRITE,
+                                      "합친 표 입력");
+    auto* inputStaging = static_cast<float*>(inputBuffer.mapped);
+    std::vector<float> inputValues(inputTensor.count(), 0.0F);
+    for (uint32_t i = 0; i < inputTensor.count(); ++i) {
+        inputValues[i] = neuralGaussian(97, i);
+        inputStaging[i] = inputValues[i];
+    }
+    vmaFlushAllocation(context.allocator, inputBuffer.allocation, 0, VK_WHOLE_SIZE);
+
+    std::copy(parameters.begin(), parameters.end(), executor.parameterStaging());
+    std::copy(seeded.begin(), seeded.end(), executor.activationStaging());
+    std::fill_n(executor.activationGradientStaging(), merged.graph.activationCount, 0.0F);
+
+    uint32_t mergedSecondLoss = mergedTensor(merged, 1, secondLoss);
+    // **구간 길이를 일부러 넘겨 준다.** 실행기가 끝을 자르지 않으면 표 밖의 연산을 디스패치한다.
+    uint32_t overCount = merged.opCount[1] + 32;
+    compute.submit([&](VkCommandBuffer commandBuffer, uint64_t) {
+        executor.recordClearGradients(commandBuffer);
+        executor.recordUpload(commandBuffer);
+        executor.recordUploadActivationRange(
+            commandBuffer, inputBuffer.handle, 0, inputTensor.offset, inputTensor.count());
+        executor.recordForward(commandBuffer, merged.opBegin[1], overCount);
+        executor.recordSeedLossGradient(commandBuffer, mergedSecondLoss);
+        executor.recordBackward(commandBuffer, merged.opBegin[1], overCount);
+        executor.recordDownload(commandBuffer);
+    });
+    executor.invalidateReadback();
+
+    // CPU 기준: 둘째 표만 따로 돌린다. 구간 디스패치가 하는 일이 정확히 그것이다.
+    std::vector<float> secondActivations(second.activationCount, 0.0F);
+    std::copy(seeded.begin() + static_cast<long>(merged.activationBase[1]),
+              seeded.begin() + static_cast<long>(merged.activationBase[1] + second.activationCount),
+              secondActivations.begin());
+    std::copy(inputValues.begin(), inputValues.end(), secondActivations.begin() + second.tensors[secondInput].offset);
+    std::vector<float> secondGradients(second.activationCount, 0.0F);
+    std::vector<float> parameterGradients(second.parameterCount, 0.0F);
+    forward(second, parameters.data(), secondActivations.data());
+    backward(second, parameters.data(), secondActivations.data(), parameterGradients.data(), secondGradients.data());
+
+    // **여기만 허용치를 둔다.** 표에 tanh 와 MEAN 이 있어 비트로 같을 수 없다(근사와 나눗셈). 구간
+    // 규칙이 틀린 돌연변이는 이 허용치의 몇 자릿수 밖으로 벗어나므로 가리지 않는다.
+    constexpr float RANGE_TOLERANCE = 1.0e-6F;
+    uint32_t problems = 0;
+    for (size_t i = 0; i < second.activationCount; ++i) {
+        float difference = std::abs(executor.activationResult()[merged.activationBase[1] + i] - secondActivations[i]);
+        problems += difference <= RANGE_TOLERANCE ? 0U : 1U;
+    }
+    // (2) **첫째 표의 활성은 손대지 않아야 한다.** 구간을 무시하고 처음부터 도는 돌연변이가 여기서 잡힌다.
+    uint32_t touched = 0;
+    for (size_t i = 0; i < first.activationCount; ++i) {
+        touched +=
+            executor.activationResult()[merged.activationBase[0] + i] == seeded[merged.activationBase[0] + i] ? 0U : 1U;
+    }
+    // (3) 파라미터 경사도 CPU 와 같아야 한다. 씨앗을 0 으로 심거나 엉뚱한 배열에 심으면 여기서 갈린다.
+    uint32_t gradientProblems = 0;
+    for (size_t i = 0; i < second.parameterCount; ++i) {
+        float difference = std::abs(executor.parameterGradientResult()[i] - parameterGradients[i]);
+        gradientProblems += difference <= RANGE_TOLERANCE ? 0U : 1U;
+    }
+    // (4) 경사가 실제로 흘렀는가. 전부 0 이면 위 비교가 0 과 0 을 견주는 헛검사다.
+    bool moved = false;
+    for (float value : parameterGradients) {
+        moved = moved || value != 0.0F;
+    }
+
+    // (5) **텐서 하나만 되읽는 갈래.** 학습의 매 걸음이 행동을 이것으로 가져오는데, 위 비교는 전체
+    // 되읽기를 써서 이 자리를 한 번도 밟지 않는다(돌연변이로 확인했다).
+    //
+    // 순서가 요점이다: 위에서 전체를 되읽어 두었으므로 되읽기 버퍼에는 **옛 손실**이 들어 있다. 입력을
+    // 바꿔 다시 돌린 뒤 손실 한 칸만 가져오면, 오프셋을 무시하는 돌연변이는 옛 값을 그대로 남긴다.
+    for (uint32_t i = 0; i < inputTensor.count(); ++i) {
+        inputValues[i] = 3.0F + neuralGaussian(131, i);
+        inputStaging[i] = inputValues[i];
+    }
+    vmaFlushAllocation(context.allocator, inputBuffer.allocation, 0, VK_WHOLE_SIZE);
+    float previousLoss = executor.activationResult()[merged.graph.tensors[mergedSecondLoss].offset];
+    compute.submit([&](VkCommandBuffer commandBuffer, uint64_t) {
+        executor.recordUploadActivationRange(
+            commandBuffer, inputBuffer.handle, 0, inputTensor.offset, inputTensor.count());
+        executor.recordForward(commandBuffer, merged.opBegin[1], merged.opCount[1]);
+        executor.recordDownloadTensor(commandBuffer, mergedSecondLoss);
+    });
+    executor.invalidateReadback();
+    std::copy(inputValues.begin(), inputValues.end(), secondActivations.begin() + second.tensors[secondInput].offset);
+    forward(second, parameters.data(), secondActivations.data());
+    float wantLoss = secondActivations[second.tensors[secondLoss].offset];
+    float gotLoss = executor.activationResult()[merged.graph.tensors[mergedSecondLoss].offset];
+    bool tensorDownload = std::abs(gotLoss - wantLoss) <= RANGE_TOLERANCE;
+    // 값이 실제로 바뀌었어야 한다. 안 바뀌면 이 검사가 «옛 값과 새 값이 같은» 헛검사다.
+    bool lossChanged = std::abs(wantLoss - previousLoss) > 1.0e-3F;
+
+    bool ok = problems == 0 && touched == 0 && gradientProblems == 0 && moved && tensorDownload && lossChanged;
+    std::printf("  합친 표 구간(연산 %u 개 중 %u..%u): %s\n",
+                static_cast<uint32_t>(merged.graph.ops.size()),
+                merged.opBegin[1],
+                merged.opBegin[1] + merged.opCount[1],
+                ok ? "값·경계 모두 맞음" : "갈림");
+    if (problems != 0) {
+        std::printf("      구간 안의 값이 %u 자리에서 갈립니다\n", problems);
+    }
+    if (touched != 0) {
+        std::printf("      **구간 밖의 활성을 %u 자리 건드렸습니다**\n", touched);
+    }
+    if (gradientProblems != 0) {
+        std::printf("      파라미터 경사가 %u 자리에서 갈립니다\n", gradientProblems);
+    }
+    if (!moved) {
+        std::printf("      경사가 흐르지 않아 검사가 헛돕니다\n");
+    }
+    if (!tensorDownload) {
+        std::printf("      텐서 하나만 되읽은 값이 갈립니다: 얻음 %.6f, 원함 %.6f\n",
+                    static_cast<double>(gotLoss),
+                    static_cast<double>(wantLoss));
+    }
+    if (!lossChanged) {
+        std::printf("      입력을 바꿔도 손실이 그대로라 되읽기 검사가 헛돕니다\n");
+    }
+    destroyBuffer(context, inputBuffer);
+    return ok;
+}
+
 // ---- 리플레이 링: 합성 패턴을 담고 뽑아 CPU 계산과 견준다
 //
 // 여기서 재는 것은 **바이트 동일**이다. 링 첨자·에피소드 경계·증강 변위가 모두 정수 산술이라 갈릴
@@ -1463,6 +1646,7 @@ bool runNeuralSelfCheck() {
     }
     // 마지막이 이 스택의 관문이다 — polyak 의 갈래들과 열 걸음 등가 검사. 둘 다 표를 다시 올리므로
     // 위 경우들 뒤에 둔다.
+    ok = runMergedCheck(context, compute) && ok;
     ok = runReplayCheck(context, compute) && ok;
     ok = runReplayBudgetCheck(context) && ok;
     ok = runPolyakEdges(executor, compute) && ok;

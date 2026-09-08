@@ -1063,6 +1063,59 @@ float neuralGaussian(uint64_t seed, uint64_t index) {
     return std::sqrt(-2.0F * std::log(u1)) * std::cos(6.283185307179586F * u2);
 }
 
+bool mergeGraphs(const std::vector<const Graph*>& sources, MergedGraph& out) {
+    if (sources.empty()) {
+        return false;
+    }
+    size_t parameterCount = sources[0]->parameterCount;
+    for (const Graph* source : sources) {
+        if (source == nullptr || source->parameterCount != parameterCount) {
+            return false;
+        }
+    }
+    out = MergedGraph{};
+    out.graph.parameterCount = parameterCount;
+    for (const Graph* source : sources) {
+        auto tensorBase = static_cast<uint32_t>(out.graph.tensors.size());
+        auto activationBase = static_cast<uint32_t>(out.graph.activationCount);
+        out.activationBase.push_back(activationBase);
+        out.tensorBase.push_back(tensorBase);
+        out.tensorCount.push_back(static_cast<uint32_t>(source->tensors.size()));
+        out.opBegin.push_back(static_cast<uint32_t>(out.graph.ops.size()));
+        out.opCount.push_back(static_cast<uint32_t>(source->ops.size()));
+
+        for (const Tensor& tensor : source->tensors) {
+            Tensor copy = tensor;
+            // **파라미터는 밀지 않는다.** 표 셋이 같은 배치를 쓰는 것이 이 합치기의 전제다.
+            if (copy.arena == Arena::ACTIVATION) {
+                copy.offset += activationBase;
+            }
+            out.graph.tensors.push_back(copy);
+        }
+        for (const Op& op : source->ops) {
+            Op copy = op;
+            for (uint32_t& input : copy.inputs) {
+                if (input != NO_TENSOR) {
+                    input += tensorBase;
+                }
+            }
+            if (copy.output != NO_TENSOR) {
+                copy.output += tensorBase;
+            }
+            out.graph.ops.push_back(copy);
+        }
+        out.graph.activationCount += source->activationCount;
+    }
+    return true;
+}
+
+uint32_t mergedTensor(const MergedGraph& merged, size_t which, uint32_t tensor) {
+    if (which >= merged.tensorBase.size() || tensor == NO_TENSOR || tensor >= merged.tensorCount[which]) {
+        return NO_TENSOR;
+    }
+    return merged.tensorBase[which] + tensor;
+}
+
 uint32_t neuralRandomBelow(uint64_t seed, uint64_t index, uint32_t bound) {
     if (bound == 0) {
         return 0;

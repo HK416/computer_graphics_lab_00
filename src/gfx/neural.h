@@ -136,9 +136,29 @@ public:
     // 경사 배열 둘을 0 으로 지운다. CPU 의 backward 가 맨 앞에서 하는 일이다.
     void recordClearGradients(VkCommandBuffer commandBuffer);
     void recordForward(VkCommandBuffer commandBuffer);
+    // 연산 **구간**만 도는 갈래. 표 셋을 한 표로 이어 붙였을 때 그중 한 구간만 밟는 데 쓴다
+    // (gfx::MergedGraph 의 opBegin/opCount 를 그대로 준다).
+    void recordForward(VkCommandBuffer commandBuffer, uint32_t begin, uint32_t count);
     // 표를 거꾸로 훑는다. 씨앗은 부르는 쪽이 미리 올려 둔다(neural_math 의 backwardFrom 과 같은 규약).
     void recordBackward(VkCommandBuffer commandBuffer);
+    void recordBackward(VkCommandBuffer commandBuffer, uint32_t begin, uint32_t count);
+    // 활성 배열의 주소. 리플레이 표집이 배치를 여기 바로 채운다 — 자기 버퍼에 담고 다시 옮기면
+    // 갱신마다 관측 두 벌을 헛되이 복사한다.
+    VkDeviceAddress activationAddress() const { return activationBuffer.address; }
+    // 활성 배열의 한 구간을 다른 버퍼에서 복사해 채운다. 관측 인코드 결과를 관측 텐서에 밀어 넣는 데 쓴다.
+    void recordUploadActivationRange(VkCommandBuffer commandBuffer,
+                                     VkBuffer source,
+                                     VkDeviceSize sourceOffset,
+                                     uint32_t floatOffset,
+                                     uint32_t floats);
+    // 손실 텐서의 경사에 1 을 심는다. 역전파의 출발값이라 이것이 없으면 경사가 통째로 0 이다.
+    // **활성 경사를 통째로 올리는 recordUploadGradientSeed 와 다른 자리다** — 그쪽은 자기 검사가 배열
+    // 전체를 씨앗으로 채울 때 쓰고, 학습은 손실 한 칸만 세운다.
+    void recordSeedLossGradient(VkCommandBuffer commandBuffer, uint32_t tensor);
     void recordDownload(VkCommandBuffer commandBuffer);
+    // 활성 배열의 **한 텐서만** 되읽는다. 학습 루프는 행동 몇 개만 있으면 되는데 recordDownload 는
+    // 가중치·활성·경사를 통째로 가져와, 가중치가 수백만 개면 그 복사가 걸음 하나의 값을 통째로 먹는다.
+    void recordDownloadTensor(VkCommandBuffer commandBuffer, uint32_t tensor);
     // 되읽기 버퍼를 무효화한다. 제출이 끝난 뒤, 결과를 읽기 전에 한 번 부른다.
     void invalidateReadback();
 

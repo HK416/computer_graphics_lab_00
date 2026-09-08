@@ -1,0 +1,165 @@
+{
+  "version": 3,
+  "name": "픽셀 진자",
+  "models": [
+    "<builtin:plane>",
+    "<builtin:box>"
+  ],
+  "camera": {
+    "position": [
+      0.0,
+      2.0,
+      4.0
+    ],
+    "yaw": -90.0,
+    "pitch": 0.0,
+    "fovY": 60.0,
+    "near": 0.05,
+    "moveSpeed": 2.0,
+    "mode": "orbit",
+    "target": [
+      0.0,
+      2.0,
+      0.0
+    ],
+    "distance": 4.0
+  },
+  "ambient": {
+    "color": [
+      0.15,
+      0.15,
+      0.18
+    ],
+    "intensity": 1.0
+  },
+  "lights": [
+    {
+      "type": "directional",
+      "color": [
+        1.0,
+        0.98,
+        0.95
+      ],
+      "intensity": 3.0,
+      "range": 20.0,
+      "innerCone": 20.0,
+      "outerCone": 30.0,
+      "size": [
+        2.0,
+        2.0
+      ],
+      "castsShadow": false
+    }
+  ],
+  "animators": [],
+  "rigidBodies": [
+    {
+      "shape": "box",
+      "mass": 1.0,
+      "useGravity": true,
+      "kinematic": false,
+      "restitution": 0.2,
+      "friction": 0.6,
+      "radius": 0.5,
+      "halfExtents": [
+        0.5,
+        0.05,
+        0.05
+      ],
+      "backend": "cpu"
+    }
+  ],
+  "fluids": [],
+  "joints": [
+    {
+      "type": "hinge",
+      "other": -1,
+      "anchorA": [
+        -0.5,
+        0.0,
+        0.0
+      ],
+      "anchorB": [
+        0.0,
+        2.0,
+        0.0
+      ],
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "length": 1.0,
+      "useLimit": false,
+      "lowerAngle": -90.0,
+      "upperAngle": 90.0,
+      "motor": "velocity",
+      "targetAngle": 180.0,
+      "targetSpeed": 360.0,
+      "motorStiffness": 10.0,
+      "maxTorque": 4.0
+    }
+  ],
+  "particleSystems": [],
+  "cloths": [],
+  "forceFields": [],
+  "ddgiVolumes": [],
+  "cameraComponents": [
+    {
+      "fovY": 40.0,
+      "near": 0.05,
+      "active": false
+    }
+  ],
+  "cameraPaths": [],
+  "objects": [
+    {
+      "name": "막대",
+      "parent": -1,
+      "position": [
+        0.5,
+        2.0,
+        0.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "scale": [
+        0.5,
+        0.05,
+        0.05
+      ],
+      "visible": true,
+      "model": 1,
+      "mesh": 0,
+      "skin": -1,
+      "rigidBody": 0,
+      "joint": 0
+    },
+    {
+      "name": "관측 카메라",
+      "parent": -1,
+      "position": [
+        0.0,
+        2.0,
+        3.5
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "visible": true,
+      "cameraComponent": 0
+    }
+  ]
+}

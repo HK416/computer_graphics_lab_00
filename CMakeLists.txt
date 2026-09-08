@@ -240,6 +240,7 @@ add_executable(cg_lab
     src/app/application.cpp
     src/app/plugins/debug_lines_plugin.cpp
     src/app/plugins/fluid_plugin.cpp
+    src/app/plugins/neural_plugin.cpp
     src/app/plugins/physics_plugin.cpp
     src/app/plugins/robot_plugin.cpp
     src/app/plugins/profiler_plugin.cpp

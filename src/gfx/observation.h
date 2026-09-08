@@ -112,6 +112,8 @@ public:
 
     // 인코드 결과. 신경망 입력 텐서가 이 주소를 그대로 읽는다.
     VkDeviceAddress featureAddress() const { return features.address; }
+    // 같은 버퍼의 핸들. 활성 배열로 복사할 때 쓴다(주소로는 vkCmdCopyBuffer 를 부를 수 없다).
+    VkBuffer featureBuffer() const { return features.handle; }
     size_t featureFloatCount() const { return static_cast<size_t>(layers) * OBSERVATION_VIEW_FLOATS; }
     // 편집기가 「정책이 보는 그림」을 띄울 때 쓰는 bindless 슬롯.
     uint32_t colorSlot() const { return colorBindlessSlot; }

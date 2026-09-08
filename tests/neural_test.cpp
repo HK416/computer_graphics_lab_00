@@ -1254,6 +1254,107 @@ void testParameterFile() {
     assert(loaded == parameters);
 }
 
+// 표 여럿을 한 표로 합치기. 파라미터는 그대로 두고 활성만 미는 것이 요점이다 — 셋이 파라미터 하나를
+// 나눠 쓰는 것이 이 합치기의 존재 이유이므로, 파라미터까지 밀면 학습이 세 갈래로 갈라진다.
+void testMergeGraphs() {
+    // 표 둘. 같은 파라미터 배치를 쓰는 것처럼 꾸민다(파라미터를 먼저 잡아 오프셋을 맞춘다).
+    gfx::Graph first;
+    gfx::Graph second;
+    uint32_t firstWeight = gfx::NO_TENSOR;
+    uint32_t secondWeight = gfx::NO_TENSOR;
+    uint32_t firstOut = gfx::NO_TENSOR;
+    uint32_t secondOut = gfx::NO_TENSOR;
+    {
+        gfx::GraphBuilder builder(first);
+        firstWeight = builder.addParameter(3, 4, 1, 1);
+        uint32_t bias = builder.addParameter(3, 1, 1, 1);
+        uint32_t input = builder.addInput(2, 4, 1, 1);
+        firstOut = builder.addLinear(input, firstWeight, bias);
+    }
+    {
+        gfx::GraphBuilder builder(second);
+        secondWeight = builder.addParameter(3, 4, 1, 1);
+        uint32_t bias = builder.addParameter(3, 1, 1, 1);
+        uint32_t input = builder.addInput(5, 4, 1, 1);
+        secondOut = builder.addRelu(builder.addLinear(input, secondWeight, bias));
+    }
+    assert(first.parameterCount == second.parameterCount);
+
+    std::vector<const gfx::Graph*> sources{&first, &second};
+    gfx::MergedGraph merged;
+    assert(gfx::mergeGraphs(sources, merged));
+    assert(merged.graph.parameterCount == first.parameterCount);
+    assert(merged.graph.activationCount == first.activationCount + second.activationCount);
+    assert(merged.graph.tensors.size() == first.tensors.size() + second.tensors.size());
+    assert(merged.graph.ops.size() == first.ops.size() + second.ops.size());
+    assert(merged.opBegin[0] == 0 && merged.opCount[0] == first.ops.size());
+    assert(merged.opBegin[1] == first.ops.size() && merged.opCount[1] == second.ops.size());
+
+    // **파라미터 오프셋은 그대로다.** 둘째 표의 가중치가 첫째와 같은 자리를 가리켜야 한다.
+    uint32_t mergedFirstWeight = gfx::mergedTensor(merged, 0, firstWeight);
+    uint32_t mergedSecondWeight = gfx::mergedTensor(merged, 1, secondWeight);
+    assert(merged.graph.tensors[mergedFirstWeight].arena == gfx::Arena::PARAMETER);
+    assert(merged.graph.tensors[mergedFirstWeight].offset == first.tensors[firstWeight].offset);
+    assert(merged.graph.tensors[mergedSecondWeight].offset == second.tensors[secondWeight].offset);
+    assert(merged.graph.tensors[mergedFirstWeight].offset == merged.graph.tensors[mergedSecondWeight].offset);
+
+    // **활성은 밀린다.** 둘째 표의 출력이 첫째 표의 활성 뒤에 앉아야 한다.
+    uint32_t mergedSecondOut = gfx::mergedTensor(merged, 1, secondOut);
+    assert(merged.graph.tensors[mergedSecondOut].offset == second.tensors[secondOut].offset + first.activationCount);
+    uint32_t mergedFirstOut = gfx::mergedTensor(merged, 0, firstOut);
+    // 범위를 벗어나면 NO_TENSOR 다. 밖에서 표 목록을 다시 세지 않으므로 여기서 걸린다.
+    assert(gfx::mergedTensor(merged, 2, 0) == gfx::NO_TENSOR);
+    assert(gfx::mergedTensor(merged, 0, static_cast<uint32_t>(first.tensors.size())) == gfx::NO_TENSOR);
+    assert(gfx::mergedTensor(merged, 0, gfx::NO_TENSOR) == gfx::NO_TENSOR);
+    assert(merged.graph.tensors[mergedFirstOut].offset == first.tensors[firstOut].offset);
+
+    // 합친 표가 그대로 돌아야 한다.
+    assert(gfx::validateForward(merged.graph));
+
+    // **합친 표의 순전파가 표를 따로 돌린 것과 같아야 한다.**
+    std::vector<float> parameters(merged.graph.parameterCount, 0.0F);
+    for (size_t i = 0; i < parameters.size(); ++i) {
+        parameters[i] = gfx::neuralGaussian(3, i) * 0.4F;
+    }
+    std::vector<float> mergedActivations(merged.graph.activationCount, 0.0F);
+    std::vector<float> firstActivations(first.activationCount, 0.0F);
+    std::vector<float> secondActivations(second.activationCount, 0.0F);
+    for (size_t i = 0; i < mergedActivations.size(); ++i) {
+        mergedActivations[i] = gfx::neuralGaussian(9, i);
+    }
+    std::copy(mergedActivations.begin(),
+              mergedActivations.begin() + static_cast<long>(first.activationCount),
+              firstActivations.begin());
+    std::copy(mergedActivations.begin() + static_cast<long>(first.activationCount),
+              mergedActivations.end(),
+              secondActivations.begin());
+    gfx::forward(merged.graph, parameters.data(), mergedActivations.data());
+    gfx::forward(first, parameters.data(), firstActivations.data());
+    gfx::forward(second, parameters.data(), secondActivations.data());
+    for (size_t i = 0; i < first.activationCount; ++i) {
+        assert(mergedActivations[i] == firstActivations[i]);
+    }
+    for (size_t i = 0; i < second.activationCount; ++i) {
+        assert(mergedActivations[first.activationCount + i] == secondActivations[i]);
+    }
+
+    // 파라미터 수가 다르면 거절한다. 같은 에이전트에서 나온 표가 아니라는 뜻이다.
+    gfx::Graph odd;
+    {
+        gfx::GraphBuilder builder(odd);
+        uint32_t weight = builder.addParameter(2, 2, 1, 1);
+        uint32_t input = builder.addInput(1, 2, 1, 1);
+        builder.addMul(input, input);
+        (void)weight;
+    }
+    std::vector<const gfx::Graph*> mixed{&first, &odd};
+    gfx::MergedGraph rejected;
+    assert(!gfx::mergeGraphs(mixed, rejected));
+    std::vector<const gfx::Graph*> empty;
+    assert(!gfx::mergeGraphs(empty, rejected));
+    std::printf("표 합치기 통과\n");
+}
+
 // 리플레이 링의 첨자 규칙. **여기가 11단계에서 가장 틀리기 쉬운 자리다** — 링이 되감기고, 에피소드가
 // 경계를 긋고, 창이 앞에서 잘려 나가는 셋이 한 식에서 만난다.
 void testReplayIndex() {
@@ -1372,6 +1473,7 @@ int main() {
     testMeanValue();
     testForwardOnlyGraph();
     testParameterFile();
+    testMergeGraphs();
     testReplayIndex();
     testReplayShift();
     testGradients();

@@ -184,10 +184,11 @@ void ReplayBuffer::beginSlot(
     pendingReady = true;
 }
 
-void ReplayBuffer::recordStore(VkCommandBuffer commandBuffer, VkDeviceAddress observationFeatures) {
+uint32_t ReplayBuffer::recordStore(VkCommandBuffer commandBuffer, VkDeviceAddress observationFeatures) {
     if (!ready || window.capacity == 0 || !pendingReady || observationFeatures == 0) {
-        return;
+        return NO_SLOT;
     }
+    uint32_t stored = window.cursor;
     // **앞에도 배리어를 건다.** 인코드가 features 를 다 썼어야 하고(RAW), 앞의 표집이 frames 를 다
     // 읽었어야 한다(WAR). 뒤에만 걸면 한 명령 버퍼에 [담기][표집][담기] 가 오는 순간 뒤 담기가 앞
     // 표집이 읽는 칸을 덮는다.
@@ -218,6 +219,26 @@ void ReplayBuffer::recordStore(VkCommandBuffer commandBuffer, VkDeviceAddress ob
     window.cursor = (window.cursor + 1) % window.capacity;
     window.count = std::min(window.count + 1, window.capacity);
     pendingReady = false;
+    return stored;
+}
+
+void ReplayBuffer::patchAction(uint32_t slot, const float* action) {
+    if (!ready || slot >= window.capacity || action == nullptr) {
+        return;
+    }
+    auto* target = static_cast<float*>(actions.mapped) + static_cast<size_t>(slot) * actionCount;
+    std::copy(action, action + actionCount, target);
+    vmaFlushAllocation(context.allocator, actions.allocation, 0, VK_WHOLE_SIZE);
+}
+
+void ReplayBuffer::patchOutcome(uint32_t slot, float reward, float discount) {
+    if (!ready || slot >= window.capacity) {
+        return;
+    }
+    slotMirror[slot].reward = reward;
+    slotMirror[slot].discount = discount;
+    static_cast<GpuReplaySlot*>(slots.mapped)[slot] = slotMirror[slot];
+    vmaFlushAllocation(context.allocator, slots.allocation, 0, VK_WHOLE_SIZE);
 }
 
 bool ReplayBuffer::recordSample(VkCommandBuffer commandBuffer,

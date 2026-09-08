@@ -120,6 +120,11 @@ struct Options {
     // (오래된 것부터), 세로가 뷰다. --screenshot-frame 째에 뜨고 그 다음 프레임에 종료한다. 헤드리스에서도
     // 돈다(창 없는 장치를 만들고 모델을 올린다).
     std::filesystem::path observationDumpPath;
+    // --train-pixels: 픽셀만 보고 관절을 모는 정책을 학습한다. 장면에 관측 카메라와 모터 관절이 있어야
+    // 한다. --pixel-steps 로 몇 걸음을 밟을지 정하고, --policy-net 으로 가중치를 읽고 쓴다.
+    bool trainPixels = false;
+    uint64_t pixelSteps = 30000;
+    std::filesystem::path policyNetPath;
 };
 
 class Application {
@@ -132,9 +137,11 @@ public:
     void run();
 
 private:
-    // --observation-dump 가 요구하는 GPU 자원을 헤드리스에서도 만들지. 장면을 열기 **전**에 정해져야
-    // 지오메트리 저장소가 모델을 받을 수 있다.
-    bool needsObservationDevice() const { return !options.observationDumpPath.empty(); }
+    // 관측 렌더가 요구하는 GPU 자원을 헤드리스에서도 만들지. 장면을 열기 **전**에 정해져야 지오메트리
+    // 저장소가 모델을 받을 수 있다. 관측 덤프와 픽셀 학습이 그것을 요구한다.
+    bool needsObservationDevice() const {
+        return !options.observationDumpPath.empty() || options.trainPixels || !options.policyNetPath.empty();
+    }
     // 관측 한 판을 그려 특징을 되읽고, 목표 프레임이면 콘택트 시트를 쓴다. 쓴 경우에만 참.
     bool stepObservation(uint64_t frameCount);
     // 한 번 적재한 모델. 같은 파일을 두 번 올리지 않고, 장면 파일이 가리킬 대상이 된다.
