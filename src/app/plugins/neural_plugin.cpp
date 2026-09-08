@@ -63,9 +63,10 @@ bool NeuralPlugin::ensure(Services& services) {
     physics::restoreAuthoredMotors(scene, robot);
     robot = physics::buildRobotLayout(scene);
     if (layout.empty() || robot.actuators.empty()) {
-        spdlog::warn("픽셀 학습: 관측 카메라 {} 개, 액추에이터 {} 개 — 둘 다 있어야 합니다",
-                     layout.count(),
-                     robot.actuators.size());
+        spdlog::warn(
+            "픽셀 학습: 관측 카메라 {} 개(부품의 «관측 카메라» 를 켠 것), 액추에이터 {} 개 — 둘 다 있어야 합니다",
+            layout.count(),
+            robot.actuators.size());
         disabled = true;
         return false;
     }
@@ -216,9 +217,10 @@ void NeuralPlugin::resetEpisode(Services& services) {
     stepInEpisode = 0;
     lastEpisodeReward = episodeReward;
     bestEpisodeReward = std::max(bestEpisodeReward, episodeReward);
-    // **점수는 진화 전략과 같은 눈금이다** — 걸음마다의 보상 합을 프레임 수로 나눈다. physics::rollout 이
-    // 합을 돌려주고 robot_test 가 그것을 프레임으로 나눠 0.768 을 냈다. 같은 장면·같은 프레임 수라야
-    // 견줄 수 있어 EPISODE_FRAMES 를 RolloutSettings::frames 와 같은 300 으로 두었다.
+    // **점수의 눈금을 저차원 학습과 맞춰 둔다** — 걸음마다의 보상 합을 프레임 수로 나눈다. 같은 장면·
+    // 같은 프레임 수라야 견줄 수 있어 EPISODE_FRAMES 를 physics::RolloutSettings::frames 와 같은 300 으로
+    // 두었다. 진자에서 같은 눈금의 값들은: 진화 전략 0.768, CPU DDPG(저차원 관측) 0.685(rl_agent 테스트),
+    // 이 픽셀 경로 0.62. 픽셀의 비용은 «같은 알고리즘의 저차원 판» 과 견주는 쪽이 뜻이 있다.
     spdlog::info("픽셀 학습 에피소드 {}: 점수 {:.4f} (최고 {:.4f}), 걸음 {}, 리플레이 {}, 잡음 {:.3f}, 갱신 {}",
                  episode - 1,
                  static_cast<double>(lastEpisodeReward / static_cast<float>(EPISODE_FRAMES)),

@@ -1113,7 +1113,7 @@ bool Application::stepObservation(uint64_t frameCount) {
         // 한 번만 알린다. --frames 가 --screenshot-frame 보다 작으면 목표 프레임에 닿지도 못한다.
         if (!observationWarned) {
             observationWarned = true;
-            spdlog::warn("관측 카메라가 없습니다. 장면에 카메라 부품을 붙여야 합니다");
+            spdlog::warn("관측 카메라가 없습니다. 카메라 부품의 «관측 카메라» 를 켜야 합니다");
         }
         return false;
     }

@@ -477,7 +477,12 @@ void Editor::buildInspector(scene::Scene& active, const gfx::GeometryStore& geom
         scene::CameraComponent& camera = active.cameraComponents[static_cast<size_t>(object.cameraComponent)];
         ImGui::Checkbox("활성", &camera.active);
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("재생 중 활성인 첫 카메라가 장면을 본다. 멈추면 편집기 시점으로 돌아온다");
+            ImGui::SetTooltip(
+                "재생 중 활성인 첫 카메라가 장면을 본다(관측 카메라는 빼고). 멈추면 편집기 시점으로 돌아온다");
+        }
+        ImGui::Checkbox("관측 카메라", &camera.observation);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("강화 학습 정책이 보는 시점. 화면 후보에서 빠지고 관측 렌더의 뷰가 된다");
         }
         ImGui::SliderFloat("시야각", &camera.fovYDegrees, 10.0F, 150.0F, "%.0f°");
         ImGui::DragFloat("근평면", &camera.nearPlane, 0.005F, 0.001F, 10.0F, "%.3f");

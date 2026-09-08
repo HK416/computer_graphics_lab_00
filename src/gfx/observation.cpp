@@ -33,7 +33,9 @@ ObservationLayout buildObservationLayout(const scene::Scene& scene) {
     ObservationLayout layout;
     for (uint32_t index = 0; index < scene.objects.size(); ++index) {
         const scene::CameraComponent* camera = scene.component<scene::CameraComponent>(index);
-        if (camera == nullptr) {
+        // **관측 플래그가 선 것만 모은다.** 화면용 카메라까지 뷰로 삼으면 장면에 카메라를 하나 더
+        // 놓는 것만으로 정책의 입력 모양이 바뀌어, 학습한 가중치를 못 읽게 된다.
+        if (camera == nullptr || !camera->observation) {
             continue;
         }
         ObservationLayout::View view;

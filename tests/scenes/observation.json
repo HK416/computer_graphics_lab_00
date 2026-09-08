@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 9,
   "name": "관측 렌더 점검",
   "models": [
     "<builtin:plane>",
@@ -393,12 +393,14 @@
     {
       "fovY": 55.0,
       "near": 0.05,
-      "active": false
+      "active": true,
+      "observation": true
     },
     {
       "fovY": 55.0,
       "near": 0.05,
-      "active": false
+      "active": true,
+      "observation": true
     }
   ]
 }

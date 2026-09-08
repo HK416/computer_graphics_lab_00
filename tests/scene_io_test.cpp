@@ -107,6 +107,8 @@ scene::Scene makeScene() {
     scene::CameraComponent camera;
     camera.fovYDegrees = 35.0F;
     camera.active = true;
+    // 관측 플래그도 왕복해야 한다. 이 테스트가 장면 파일 형식을 지키는 유일한 자동 검사다.
+    camera.observation = true;
     scene.attachCameraComponent(1, camera);
     scene::CameraPath path;
     path.duration = 7.5F;
@@ -195,7 +197,7 @@ int main() {
     assert(loaded.scene.ddgiVolumes[0].probes == 12 && !loaded.scene.ddgiVolumes[0].enabled);
     assert(loaded.scene.cameraComponents.size() == 1 && loaded.scene.objects[1].cameraComponent == 0);
     assert(std::abs(loaded.scene.cameraComponents[0].fovYDegrees - 35.0F) < 1e-5F &&
-           loaded.scene.cameraComponents[0].active);
+           loaded.scene.cameraComponents[0].active && loaded.scene.cameraComponents[0].observation);
     assert(loaded.scene.cameraPaths.size() == 1 && loaded.scene.objects[1].cameraPath == 0);
     assert(loaded.scene.cameraPaths[0].keys.size() == 2 && !loaded.scene.cameraPaths[0].loop);
     assert(std::abs(loaded.scene.cameraPaths[0].duration - 7.5F) < 1e-5F);

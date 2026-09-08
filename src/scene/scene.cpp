@@ -598,8 +598,11 @@ int32_t Scene::attachJoint(uint32_t index, const Joint& joint) {
 int32_t Scene::activeCameraObject() const {
     for (uint32_t index = 0; index < objects.size(); ++index) {
         int32_t slot = objects[index].cameraComponent;
+        // 관측 카메라는 화면 후보가 아니다. 그것을 가리지 않으면 재생을 누르는 순간 정책이 보는
+        // 84 화소 시점으로 화면이 옮겨간다.
         if (slot >= 0 && static_cast<size_t>(slot) < cameraComponents.size() &&
-            cameraComponents[static_cast<size_t>(slot)].active && visibleInTree(index)) {
+            cameraComponents[static_cast<size_t>(slot)].active &&
+            !cameraComponents[static_cast<size_t>(slot)].observation && visibleInTree(index)) {
             return static_cast<int32_t>(index);
         }
     }

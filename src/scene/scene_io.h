@@ -16,7 +16,11 @@ namespace scene {
 // 5: DDGI 볼륨 부품(ddgiVolumes).
 // 6: 카메라 부품(cameraComponents)과 카메라 경로(cameraPaths).
 // 7: 관절 부품(joints).
-inline constexpr uint32_t SCENE_FILE_VERSION = 8;
+// 8: 얇은 렌즈 피사계 심도와 모션 블러 설정.
+// 9: 관측 카메라 플래그(cameraComponents.observation). 강화 학습 정책이 보는 시점을 화면 카메라와 가른다.
+//    옛 판에서는 그 자리를 active:false 로 우회했으므로, 그렇게 만든 장면은 판을 올려도 관측 카메라가
+//    되지 않는다 — 플래그를 손으로 켜야 한다.
+inline constexpr uint32_t SCENE_FILE_VERSION = 9;
 
 // 저장할 때 전역 메쉬 인덱스를 (모델, 모델 안의 메쉬) 로 나누는 데 쓰는 표.
 struct ModelTable {

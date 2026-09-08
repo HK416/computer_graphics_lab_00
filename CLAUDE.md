@@ -86,6 +86,7 @@ cmake --preset debug -DCG_LAB_DLSS_SDK=<NVIDIA/DLSS 경로>   # 주지 않으면
 ./build/release/cg_lab --headless --open tests/scenes/observation.json --play --frames 12 --observation-dump obs.png --screenshot-frame 10   # 「정책이 보는 그림」
 ./build/release/cg_lab --headless --open tests/scenes/pendulum_pixels.json --play --train-pixels --pixel-steps 24000 --policy-net net.json   # 픽셀 학습
 ./build/release/cg_lab --headless --open tests/scenes/pendulum_pixels.json --play --policy-net net.json --frames 1500   # 잡음 없이 평가
+./build/release/cg_lab --headless --open tests/scenes/reacher.json --play --train-pixels --pixel-steps 24000 --policy-net net.json   # 2관절 리처, 뷰 둘
 ```
 
 강체 솔버를 바꾸면 `headless_physics` 기준 파일이 갈린다. 의도한 변화면 위 명령으로 다시 만들어
@@ -334,6 +335,9 @@ MoltenVK(macOS)에는 mesh shader 와 광선 추적이 없어 고전 경로만 �
   평범한 `main()` 이라, `NDEBUG` 가 살아 있으면 검사가 통째로 사라진다.
 - 테스트가 도는 것은 순수 계산 부분(`*_math.cpp`, 장면 그래프, 애니메이션, 직렬화, 잠금 없는 큐)뿐이다.
   Vulkan 을 타는 코드에는 테스트가 없으므로 스크린샷 비교로 확인한다.
+- **강화 학습의 관측 카메라**는 `scene::CameraComponent::observation` 으로 가른다. 참이면 화면 후보에서 빠지고
+  (`Scene::activeCameraObject`) 관측 렌더의 뷰가 된다(`gfx::buildObservationLayout`). 뷰가 여럿인데 화면은 하나라
+  이 플래그가 없으면 «어느 것이 화면인가» 를 정할 수 없다. 장면 파일에 항목을 더했으므로 판이 9 다.
 - **새 장면 부품 종류**는 `scene.h` 의 `forEachComponentKind` 표와 `ComponentSlot` 특수화에 한 쌍씩 더한다. 떼기·삭제·복제·
   배치 비교가 그 표를 돌고, `Scene::component<T>(object)` 가 첨자 가드를 대신한다. `SceneSnapshot`·`scene_io.cpp` 는 따로.
 - **새 렌더 패스**는 `recordCommands` 의 `graph.add` 노드로(또는 플러그인이면 `Renderer::addPass` 훅의 `addAfter` 로)

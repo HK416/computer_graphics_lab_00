@@ -226,7 +226,10 @@ void buildDebugLines(const scene::Scene& scene, const DebugLineOptions& options,
                                              center + up * halfHeight + right * halfWidth,
                                              center - up * halfHeight + right * halfWidth,
                                              center - up * halfHeight - right * halfWidth};
-            uint32_t color = camera.active ? DEBUG_COLOR_CAMERA : DEBUG_COLOR_COLLIDER;
+            // 관측 카메라는 화면을 잡지 않으므로 밝게 그리지 않는다. 이 표시의 뜻이 «이것이 재생 중
+            // 화면을 잡는다» 라 관측 카메라까지 밝히면 반대로 읽힌다.
+            bool takesScreen = camera.active && !camera.observation;
+            uint32_t color = takesScreen ? DEBUG_COLOR_CAMERA : DEBUG_COLOR_COLLIDER;
             for (size_t i = 0; i < corners.size(); ++i) {
                 line(out, eye, corners[i], color);
                 line(out, corners[i], corners[(i + 1) % corners.size()], color);

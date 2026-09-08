@@ -319,6 +319,14 @@ struct CameraComponent {
     float fovYDegrees = 60.0F;
     float nearPlane = 0.05F;
     bool active = true;
+    // **강화 학습의 관측 카메라인가.** 참이면 화면을 보여 주는 카메라 후보에서 빠지고 관측 렌더의
+    // 뷰가 된다. 둘을 가르지 않으면 관측 카메라가 재생 중 장면 카메라를 빼앗아, 정책이 보는 그림을
+    // 사람도 보게 되고 그 반대도 막을 수 없다.
+    //
+    // 다중 뷰에서는 이 플래그가 필수다 — 뷰가 둘인데 화면은 하나라 «어느 것이 화면인가» 를 정할 방법이
+    // 없어진다. 12단계까지는 active 를 거짓으로 두어 우회했지만, 그러면 관측 카메라를 재생용으로 쓰는
+    // 길이 아예 막힌다.
+    bool observation = false;
 
     bool operator==(const CameraComponent&) const = default;
 };

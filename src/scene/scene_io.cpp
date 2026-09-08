@@ -289,8 +289,10 @@ std::string writeScene(const Scene& scene, const ModelTable& models, const std::
 
     json cameraComponents = json::array();
     for (const CameraComponent& camera : scene.cameraComponents) {
-        cameraComponents.push_back(
-            {{"fovY", camera.fovYDegrees}, {"near", camera.nearPlane}, {"active", camera.active}});
+        cameraComponents.push_back({{"fovY", camera.fovYDegrees},
+                                    {"near", camera.nearPlane},
+                                    {"active", camera.active},
+                                    {"observation", camera.observation}});
     }
     document["cameraComponents"] = cameraComponents;
 
@@ -626,6 +628,8 @@ SceneFile readScene(const std::string& text) {
         camera.fovYDegrees = std::clamp(entry.value("fovY", camera.fovYDegrees), 1.0F, 179.0F);
         camera.nearPlane = std::max(entry.value("near", camera.nearPlane), 1.0e-4F);
         camera.active = entry.value("active", camera.active);
+        // 옛 장면 파일에는 이 항목이 없다. 없으면 거짓이라 지금까지처럼 화면 카메라로 남는다.
+        camera.observation = entry.value("observation", camera.observation);
         file.scene.cameraComponents.push_back(camera);
     }
 
