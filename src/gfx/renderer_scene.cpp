@@ -1034,9 +1034,22 @@ void Renderer::updateAccelerationStructures(VkCommandBuffer commandBuffer, const
     if (!clusters && !sceneChangedThisFrame && !anySkinRebuild && rayTracer->ready()) {
         return;
     }
-    // 클러스터 모드는 카메라가 움직이면 LOD 컷이 바뀌므로 프레임마다 세운다. 한 프레임에 여러 노드가 부르니 한 번만.
-    if (clusters && accelerationStructureFrame == frameIndex) {
-        return;
+    // 클러스터 모드는 LOD 컷이 바뀔 때만 세운다. 한 프레임에 여러 노드가 부르니 한 번만.
+    if (clusters) {
+        if (accelerationStructureFrame == frameIndex) {
+            return;
+        }
+        const auto* camera = static_cast<const GpuCamera*>(frames[frameIndex % FRAMES_IN_FLIGHT].cameraBuffer.mapped);
+        ClusterCut cut{camera->position, camera->parameters, settings.useNeuralLod, lodNetwork.weights()};
+        bool sameCut =
+            hasLastClusterCut && cut.position == lastClusterCut.position &&
+            cut.parameters == lastClusterCut.parameters && cut.useNetwork == lastClusterCut.useNetwork &&
+            (!cut.useNetwork || std::memcmp(&cut.network, &lastClusterCut.network, sizeof(cut.network)) == 0);
+        if (sameCut && !sceneChangedThisFrame && !anySkinRebuild && rayTracer->ready()) {
+            return;
+        }
+        lastClusterCut = cut;
+        hasLastClusterCut = true;
     }
     accelerationStructureFrame = frameIndex;
     rayTracer->updateSkinnedBottomLevel(commandBuffer, skinnedVertexBuffer, skinnedInstances);

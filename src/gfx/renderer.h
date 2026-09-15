@@ -728,6 +728,16 @@ private:
     bool anySkinRebuild = false;
     // updateAccelerationStructures 가 마지막으로 세운 프레임. 클러스터 모드가 프레임마다 한 번만 세우는 데 쓴다.
     uint64_t accelerationStructureFrame = ~0ULL;
+    // 클러스터 모드의 LOD 컷을 정하는 입력. 지난 빌드와 같고 장면·포즈도 그대로면 오브젝트 하위 구조와 상위 구조를
+    // 다시 세우지 않는다. selectLod 가 읽는 것(카메라 위치, parameters, 신경망 가중치)과 같아야 한다.
+    struct ClusterCut {
+        glm::vec4 position{0.0F};
+        glm::vec4 parameters{0.0F};
+        bool useNetwork = false;
+        GpuLodNetwork network{};
+    };
+    ClusterCut lastClusterCut;
+    bool hasLastClusterCut = false;
     // 현재 반쪽 내용이 지난 프레임 포즈로 유효한지(버퍼·목록이 그대로). 거짓이면 지난 쪽으로 복사할 것이 없다.
     bool skinCurrentValid = false;
     // 지난 프레임의 목록. 같으면 현재 반쪽 내용이 그대로 유효하다.

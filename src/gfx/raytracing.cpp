@@ -1120,7 +1120,6 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
 // 세우고(주소는 장치가 배열에 써 준다), 오브젝트의 하위 구조는 명시적 목적지로 세운다 — CPU 가 상위 구조 인스턴스에
 // 그 주소를 써야 하므로 미리 알아야 한다. 클러스터 번호는 meshlet 의 첫 삼각형 번호(indexOffset / 3)라, 히트 셰이더가
 // 표 없이 인덱스 버퍼로 바로 간다.
-// ponytail: 오브젝트 하위 구조를 매 프레임 다시 세운다. 카메라·장면이 그대로면 지난 컷을 그대로 쓸 수 있다.
 
 namespace {
 
