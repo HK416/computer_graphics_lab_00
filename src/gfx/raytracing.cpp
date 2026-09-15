@@ -516,6 +516,7 @@ void RayTracer::barrierBeforeBuild(VkCommandBuffer commandBuffer) {
 void RayTracer::updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
                                          const Buffer& skinnedVertices,
                                          const std::vector<SkinnedInstance>& skinned) {
+    skinnedRebuilt.assign(skinned.size(), 0);
     if (skinned.empty()) {
         return;
     }
@@ -529,6 +530,7 @@ void RayTracer::updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
         bool built = useClusters ? skinnedClusterBuilt(index) : skinnedBottomLevels[index].address != 0;
         if (skinned[index].rebuild || !built) {
             toBuild.push_back(index);
+            skinnedRebuilt[index] = 1;
         }
     }
     if (toBuild.empty()) {
@@ -1479,13 +1481,18 @@ bool RayTracer::selectClusters(VkCommandBuffer commandBuffer,
                                const std::vector<uint32_t>& skinnedBlasSlots,
                                uint32_t frameSlot,
                                const ClusterSelection& selection,
+                               const std::vector<uint8_t>* transformChanged,
                                std::string& reason) {
     const VkPhysicalDeviceClusterAccelerationStructurePropertiesNV& props = context.clusterProperties;
     size_t objectCount = sceneToTrace.objects.size();
     if (objectBottomLevels.size() < objectCount) {
         objectBottomLevels.resize(objectCount);
     }
-    objectHasClusters.assign(objectCount, 0);
+    // 부분 재구축은 지난 프레임의 «세웠다» 표시를 남기고, 다시 세우는 것만 새로 표시한다.
+    bool partial = transformChanged != nullptr && objectHasClusters.size() == objectCount;
+    if (!partial) {
+        objectHasClusters.assign(objectCount, 0);
+    }
 
     // 오브젝트마다 클러스터 주소 배열(정적 벌 또는 스킨 슬롯 벌)과 참조 목록 자리를 정한다.
     std::vector<ClusterSelectObject> objects;
@@ -1496,11 +1503,18 @@ bool RayTracer::selectClusters(VkCommandBuffer commandBuffer,
     uint32_t totalClusters = 0;
     for (uint32_t index = 0; index < objectCount; ++index) {
         uint32_t mesh = sceneToTrace.meshOf(index);
+        uint32_t skinnedSlot = index < skinnedBlasSlots.size() ? skinnedBlasSlots[index] : NO_SKINNED_BLAS;
+        if (partial && objectHasClusters[index] != 0 && (*transformChanged)[index] == 0 &&
+            (skinnedSlot == NO_SKINNED_BLAS || skinnedSlot >= skinnedRebuilt.size() ||
+             skinnedRebuilt[skinnedSlot] == 0)) {
+            // 변환도 포즈도 그대로라 지난 구조가 아직 맞는다.
+            continue;
+        }
+        objectHasClusters[index] = 0;
         if (index >= instanceSlots.size() || instanceSlots[index] == INVALID_INSTANCE_SLOT ||
             mesh >= staticClusterBase.size() || !geometry.meshLive(mesh)) {
             continue;
         }
-        uint32_t skinnedSlot = index < skinnedBlasSlots.size() ? skinnedBlasSlots[index] : NO_SKINNED_BLAS;
         ClusterSelectObject object{};
         if (skinnedSlot != NO_SKINNED_BLAS) {
             if (!skinnedClusterBuilt(skinnedSlot)) {

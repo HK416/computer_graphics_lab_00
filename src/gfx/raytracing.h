@@ -146,7 +146,9 @@ public:
         bool useNetwork = false;
     };
     // 클러스터 모드에서 오브젝트마다 이번 프레임의 LOD 컷을 골라 하위 구조를 세운다. updateSkinnedBottomLevel 뒤,
-    // updateTopLevel 앞에 온다. 매 프레임 불러야 한다(카메라가 움직이면 컷이 바뀐다). 오브젝트 구조가 GPU 예산을
+    // updateTopLevel 앞에 온다. 컷이 바뀌면(카메라가 움직이면) 불러야 한다. transformChanged 가 있으면 오브젝트
+    // 구성과 컷이 그대로인 프레임이라는 뜻이라, 변환이 바뀐 오브젝트(참인 항목)와 이번 프레임에 포즈를 다시 세운 스킨
+    // 오브젝트, 아직 구조가 없는 오브젝트만 다시 세우고 나머지는 지난 구조를 그대로 둔다. 오브젝트 구조가 GPU 예산을
     // 넘으면 아무것도 기록하지 않고 사유를 적은 뒤 거짓을 돌려준다 — 호출자가 광선 기능을 끈다.
     bool selectClusters(VkCommandBuffer commandBuffer,
                         const scene::Scene& sceneToTrace,
@@ -154,6 +156,7 @@ public:
                         const std::vector<uint32_t>& skinnedBlasSlots,
                         uint32_t frameSlot,
                         const ClusterSelection& selection,
+                        const std::vector<uint8_t>* transformChanged,
                         std::string& reason);
     void trace(VkCommandBuffer commandBuffer,
                VkExtent2D extent,
@@ -245,6 +248,8 @@ private:
     // 한다.
     std::unique_ptr<ClusterSet> staticClusters;
     std::vector<std::unique_ptr<ClusterSet>> skinnedClusters;
+    // 마지막 updateSkinnedBottomLevel 이 다시 세운 슬롯. 부분 재구축이 그 오브젝트를 고르는 데 쓴다.
+    std::vector<uint8_t> skinnedRebuilt;
     // 메쉬 번호 -> 정적 벌 안의 첫 클러스터 자리. 없으면 NO_CLUSTERS.
     static constexpr uint32_t NO_CLUSTERS = 0xFFFFFFFFU;
     std::vector<uint32_t> staticClusterBase;

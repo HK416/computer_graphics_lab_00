@@ -738,6 +738,9 @@ private:
     };
     ClusterCut lastClusterCut;
     bool hasLastClusterCut = false;
+    // 이번 프레임이 부분 재구축인지와, 그때 오브젝트마다 변환이 바뀌었는지(Scene::objectDirty 의 사본).
+    bool partialClusterRebuild = false;
+    std::vector<uint8_t> clusterTransformChanged;
     // 현재 반쪽 내용이 지난 프레임 포즈로 유효한지(버퍼·목록이 그대로). 거짓이면 지난 쪽으로 복사할 것이 없다.
     bool skinCurrentValid = false;
     // 지난 프레임의 목록. 같으면 현재 반쪽 내용이 그대로 유효하다.

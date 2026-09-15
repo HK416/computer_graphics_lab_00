@@ -1048,6 +1048,16 @@ void Renderer::updateAccelerationStructures(VkCommandBuffer commandBuffer, const
         if (sameCut && !sceneChangedThisFrame && !anySkinRebuild && rayTracer->ready()) {
             return;
         }
+        // 컷과 오브젝트 구성(그림자 캐시와 같은 판정)이 그대로면 변환이 바뀐 오브젝트와 포즈를 다시 세운 스킨
+        // 오브젝트만 다시 세운다. 관절 오브젝트가 움직여 장면 리비전이 올라도 메쉬 오브젝트의 변환은 그대로인 것이
+        // 보통이라 이 경우가 애니메이션 프레임의 대부분이다.
+        partialClusterRebuild = sameCut && !shadowStructureChanged && rayTracer->ready();
+        if (partialClusterRebuild) {
+            clusterTransformChanged.resize(scene.objects.size());
+            for (uint32_t index = 0; index < scene.objects.size(); ++index) {
+                clusterTransformChanged[index] = scene.objectDirty(index) ? 1 : 0;
+            }
+        }
         lastClusterCut = cut;
         hasLastClusterCut = true;
     }
@@ -1065,6 +1075,7 @@ void Renderer::updateAccelerationStructures(VkCommandBuffer commandBuffer, const
                                         frame.cameraBuffer.address,
                                         frame.lodNetworkBuffer.address,
                                         settings.useNeuralLod},
+                                       partialClusterRebuild ? &clusterTransformChanged : nullptr,
                                        reason)) {
             // 폴백은 두지 않는다. 이번 프레임은 지난 상위 구조로 마치고 다음 프레임부터 광선 기능이 꺼진다.
             rayTracingBlockedReason = reason;
