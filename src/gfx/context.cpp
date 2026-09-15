@@ -123,9 +123,11 @@ struct FeatureChain {
     VkPhysicalDeviceRayQueryFeaturesKHR rayQuery{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
+    VkPhysicalDeviceClusterAccelerationStructureFeaturesNV cluster{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CLUSTER_ACCELERATION_STRUCTURE_FEATURES_NV};
 
     // 드라이버가 광고하지 않은 확장의 구조체를 체인에 넣는 것은 규정 밖이므로 지원 여부로 걸러 연결한다.
-    void link(bool withMesh, bool withAccel, bool withRayTracing, bool withRayQuery, bool withCoop) {
+    void link(bool withMesh, bool withAccel, bool withRayTracing, bool withRayQuery, bool withCoop, bool withCluster) {
         features2.pNext = nullptr;
         void** next = &features2.pNext;
         auto append = [&next](auto& node) {
@@ -150,6 +152,9 @@ struct FeatureChain {
         }
         if (withCoop) {
             append(coop);
+        }
+        if (withCluster) {
+            append(cluster);
         }
     }
 };
@@ -365,6 +370,7 @@ Capabilities queryCapabilities(const FeatureChain& f,
     caps.rayQuery = caps.accelerationStructure && f.rayQuery.rayQuery == VK_TRUE;
     caps.accelerationStructureIndirectBuild =
         caps.accelerationStructure && f.accel.accelerationStructureIndirectBuild == VK_TRUE;
+    caps.clusterAccelerationStructure = caps.accelerationStructure && f.cluster.clusterAccelerationStructure == VK_TRUE;
     caps.drawIndirectCount = f.v12.drawIndirectCount == VK_TRUE;
     caps.pipelineStatistics = f.features2.features.pipelineStatisticsQuery == VK_TRUE;
     caps.depthClamp = f.features2.features.depthClamp == VK_TRUE;
@@ -433,8 +439,9 @@ DeviceCandidate evaluateDevice(VkInstance instance, VkPhysicalDevice device, VkS
     bool rayTracingExt = accelExt && contains(extensions, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
     bool rayQueryExt = accelExt && contains(extensions, VK_KHR_RAY_QUERY_EXTENSION_NAME);
     bool coopExt = contains(extensions, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+    bool clusterExt = accelExt && contains(extensions, VK_NV_CLUSTER_ACCELERATION_STRUCTURE_EXTENSION_NAME);
 
-    candidate.features.link(meshExt, accelExt, rayTracingExt, rayQueryExt, coopExt);
+    candidate.features.link(meshExt, accelExt, rayTracingExt, rayQueryExt, coopExt, clusterExt);
     vkGetPhysicalDeviceFeatures2(device, &candidate.features.features2);
 
     std::vector<const char*> missing = missingRequiredFeatures(candidate.features);
@@ -500,6 +507,9 @@ DeviceCandidate evaluateDevice(VkInstance instance, VkPhysicalDevice device, VkS
     if (candidate.caps.rayQuery) {
         candidate.enabledExtensions.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
     }
+    if (candidate.caps.clusterAccelerationStructure) {
+        candidate.enabledExtensions.push_back(VK_NV_CLUSTER_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+    }
     if (candidate.caps.cooperativeMatrix) {
         candidate.enabledExtensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
     }
@@ -546,7 +556,10 @@ void logCapabilities(const VkPhysicalDeviceProperties& properties,
                  families.transfer,
                  families.hasSeparateTransfer() ? " (별도)" : " (공유)");
     spdlog::info("mesh shader: {}, task shader: {}", caps.meshShader, caps.taskShader);
-    spdlog::info("ray tracing pipeline: {}, ray query: {}", caps.rayTracingPipeline, caps.rayQuery);
+    spdlog::info("ray tracing pipeline: {}, ray query: {}, cluster acceleration structure: {}",
+                 caps.rayTracingPipeline,
+                 caps.rayQuery,
+                 caps.clusterAccelerationStructure);
     spdlog::info("drawIndirectCount: {}, subgroup {}", caps.drawIndirectCount, caps.subgroupSize);
     if (caps.cooperativeMatrix) {
         spdlog::info("협력 행렬: {}x{}x{} ({} A/B, fp32 누산기)",
@@ -689,8 +702,12 @@ Context::Context(SDL_Window* window) {
 
     // 조회 결과를 그대로 넘기면 robustBufferAccess 같은 비용 있는 기능까지 켜지므로 필요한 것만 다시 세운다.
     FeatureChain enabled;
-    enabled.link(
-        caps.meshShader, caps.accelerationStructure, caps.rayTracingPipeline, caps.rayQuery, caps.cooperativeMatrix);
+    enabled.link(caps.meshShader,
+                 caps.accelerationStructure,
+                 caps.rayTracingPipeline,
+                 caps.rayQuery,
+                 caps.cooperativeMatrix,
+                 caps.clusterAccelerationStructure);
     enabled.features2.features.multiDrawIndirect = VK_TRUE;
     enabled.features2.features.drawIndirectFirstInstance = VK_TRUE;
     enabled.features2.features.fillModeNonSolid = VK_TRUE;
@@ -742,6 +759,7 @@ Context::Context(SDL_Window* window) {
     enabled.rayTracing.rayTracingPipeline = caps.rayTracingPipeline ? VK_TRUE : VK_FALSE;
     enabled.rayQuery.rayQuery = caps.rayQuery ? VK_TRUE : VK_FALSE;
     enabled.coop.cooperativeMatrix = caps.cooperativeMatrix ? VK_TRUE : VK_FALSE;
+    enabled.cluster.clusterAccelerationStructure = caps.clusterAccelerationStructure ? VK_TRUE : VK_FALSE;
 
     VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     deviceInfo.pNext = &enabled.features2;
@@ -768,6 +786,10 @@ Context::Context(SDL_Window* window) {
     if (caps.rayTracingPipeline) {
         *propertyNext = &rayTracingPipelineProperties;
         propertyNext = &rayTracingPipelineProperties.pNext;
+    }
+    if (caps.clusterAccelerationStructure) {
+        *propertyNext = &clusterProperties;
+        propertyNext = &clusterProperties.pNext;
     }
     *propertyNext = nullptr;
     vkGetPhysicalDeviceProperties2(physicalDevice, &properties2);

@@ -347,6 +347,8 @@ public:
     uint32_t lastSelectedTriangles = 0;
 
     bool pathTracingAvailable() const { return rayTracer != nullptr && rayTracingBlockedReason.empty(); }
+    // 클러스터 하위 가속 구조(VK_NV_cluster_acceleration_structure)를 세울 수 있는 장치인지.
+    bool clusterAccelAvailable() const { return rayTracer != nullptr && rayTracer->clusterAvailable(); }
     // 하위 가속 구조를 세우지 못한 사유. 비어 있으면 광선 기능을 쓸 수 있다. 편집기가 보여 준다.
     const std::string& rayTracingBlocked() const { return rayTracingBlockedReason; }
     void invalidateEnvironment() {

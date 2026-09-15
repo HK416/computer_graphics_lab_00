@@ -65,12 +65,75 @@ VkGeometryFlagsKHR geometryFlagsFor(const asset::Material& material) {
     return material.alphaMode == asset::AlphaMode::SOLID ? VK_GEOMETRY_OPAQUE_BIT_KHR : 0;
 }
 
+// shaders/cluster_gather.comp 의 푸시 상수와 배치가 같아야 한다.
+struct ClusterGatherPushConstants {
+    VkDeviceAddress vertices;
+    VkDeviceAddress meshlets;
+    VkDeviceAddress meshletVertices;
+    VkDeviceAddress positions;
+    uint32_t meshletOffset;
+    uint32_t meshletCount;
+    uint32_t meshVertexOffset;
+    uint32_t sourceVertexOffset;
+    uint32_t meshletVertexBase;
+    uint32_t positionBase;
+};
+
+VkPipeline createComputePipeline(Context& context, VkPipelineLayout layout, const char* shaderName) {
+    VkShaderModule module = createShaderModule(context.device, shaderName);
+    VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    info.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    info.stage.module = module;
+    info.stage.pName = "main";
+    info.layout = layout;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline));
+    vkDestroyShaderModule(context.device, module, nullptr);
+    return pipeline;
+}
+
 } // namespace
+
+struct RayTracer::ClusterSet {
+    Buffer positions;
+    Buffer clusterInfos;     // VkClusterAccelerationStructureBuildTriangleClusterInfoNV[], CPU 가 쓴다
+    Buffer clusterStorage;   // 암시적 목적지
+    Buffer clusterAddresses; // 클러스터 주소. 클러스터 빌드가 쓰고 하위 구조 빌드가 읽는다
+    Buffer bottomInfos;      // VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV[], CPU 가 쓴다
+    Buffer bottomAddresses;  // 명시적 목적지 주소, CPU 가 쓴다
+    Buffer scratch;
+    VkClusterAccelerationStructureTriangleClusterInputNV triangleInput{
+        VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_TRIANGLE_CLUSTER_INPUT_NV};
+    VkClusterAccelerationStructureClustersBottomLevelInputNV bottomInput{
+        VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_CLUSTERS_BOTTOM_LEVEL_INPUT_NV};
+    VkClusterAccelerationStructureInputInfoNV clusterBuild{
+        VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV};
+    VkClusterAccelerationStructureInputInfoNV bottomBuild{
+        VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV};
+    VkDeviceSize clusterScratch = 0;
+    VkDeviceSize bottomScratch = 0;
+    struct Gather {
+        ClusterGatherPushConstants push;
+        uint32_t groups;
+    };
+    std::vector<Gather> gathers;
+};
 
 RayTracer::RayTracer(Context& context, GeometryStore& geometry, BindlessTextures& bindless)
     : context(context), geometry(geometry), bindless(bindless) {
     loadFunctions();
     createPipeline();
+    if (context.caps.clusterAccelerationStructure) {
+        VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ClusterGatherPushConstants)};
+        VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges = &range;
+        VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &gatherLayout));
+        gatherPipeline = createComputePipeline(context, gatherLayout, "cluster_gather.comp.spv");
+        // 하드웨어 가속 경로가 있으면 그것이 기본이다.
+        useClusters = true;
+    }
 }
 
 RayTracer::~RayTracer() {
@@ -85,6 +148,26 @@ RayTracer::~RayTracer() {
         destroyStructure(dynamic.structure);
         destroyBuffer(context, dynamic.scratch);
     }
+    auto destroySet = [this](std::unique_ptr<ClusterSet>& set) {
+        if (set == nullptr) {
+            return;
+        }
+        for (Buffer* buffer : {&set->positions,
+                               &set->clusterInfos,
+                               &set->clusterStorage,
+                               &set->clusterAddresses,
+                               &set->bottomInfos,
+                               &set->bottomAddresses,
+                               &set->scratch}) {
+            destroyBuffer(context, *buffer);
+        }
+    };
+    destroySet(staticClusters);
+    for (std::unique_ptr<ClusterSet>& set : skinnedClusters) {
+        destroySet(set);
+    }
+    vkDestroyPipeline(context.device, gatherPipeline, nullptr);
+    vkDestroyPipelineLayout(context.device, gatherLayout, nullptr);
     destroyBuffer(context, shaderBindingTable);
     destroyBuffer(context, scratchBuffer);
     destroyBuffer(context, skinnedScratchBuffer);
@@ -111,6 +194,15 @@ void RayTracer::loadFunctions() {
     if (context.caps.accelerationStructureIndirectBuild) {
         cmdBuildAccelerationStructuresIndirect = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresIndirectKHR>(
             load("vkCmdBuildAccelerationStructuresIndirectKHR"));
+    }
+    if (context.caps.clusterAccelerationStructure) {
+        getClusterBuildSizes = reinterpret_cast<PFN_vkGetClusterAccelerationStructureBuildSizesNV>(
+            load("vkGetClusterAccelerationStructureBuildSizesNV"));
+        cmdBuildClusters = reinterpret_cast<PFN_vkCmdBuildClusterAccelerationStructureIndirectNV>(
+            load("vkCmdBuildClusterAccelerationStructureIndirectNV"));
+        if (getClusterBuildSizes == nullptr || cmdBuildClusters == nullptr) {
+            core::fatal("클러스터 가속 구조 진입점을 찾을 수 없습니다");
+        }
     }
     getStructureAddress = reinterpret_cast<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
         load("vkGetAccelerationStructureDeviceAddressKHR"));
@@ -195,6 +287,9 @@ void RayTracer::invalidateBottomLevel() {
 
 bool RayTracer::buildBottomLevel(std::string& reason) {
     invalidateBottomLevel();
+    if (useClusters) {
+        return buildClusterBottomLevel(reason);
+    }
     auto buildStart = std::chrono::steady_clock::now();
 
     // 먼저 크기만 재서 예산에 들어가는지 본다. 넘기면 할당이 시스템 메모리로 넘어가 통과한 뒤 빌드
@@ -345,7 +440,7 @@ bool RayTracer::buildBottomLevel(std::string& reason) {
 
     size_t built = 0;
     for (const AccelerationStructure& structure : bottomLevels) {
-        built += structure.handle != VK_NULL_HANDLE ? 1 : 0;
+        built += structure.address != 0 ? 1 : 0;
     }
     double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - buildStart).count();
     spdlog::info("하위 가속 구조 {}개 생성: {:.0f} MB, 스크래치 {:.0f} MB, 제출 {}회, {:.1f} ms",
@@ -361,8 +456,10 @@ void RayTracer::barrierBeforeBuild(VkCommandBuffer commandBuffer) {
     // 구조와 스크래치 버퍼는 하나씩만 두고 프레임마다 다시 쓴다. 진행 중인 프레임이 아직 이전
     // 구조를 추적하거나 광선 질의로 읽고 있을 수 있으므로, 덮어쓰기 전에 그것들이 끝나야 한다.
     VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    // 반사·DDGI·입자는 컴퓨트 광선 질의로 읽으므로 그 단계도 기다린다.
     barrier.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
-                           VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+                           VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                           VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     // 스크래치 버퍼 접근도 구축 단계에서는 가속 구조 읽기/쓰기로 친다.
     barrier.srcAccessMask =
         VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
@@ -388,11 +485,15 @@ void RayTracer::updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
     // 포즈가 바뀐 것과 아직 구조가 없는 것만 세운다. 번호는 skinnedBottomLevels 와 같다.
     std::vector<size_t> toBuild;
     for (size_t index = 0; index < skinned.size(); ++index) {
-        if (skinned[index].rebuild || skinnedBottomLevels[index].handle == VK_NULL_HANDLE) {
+        if (skinned[index].rebuild || skinnedBottomLevels[index].address == 0) {
             toBuild.push_back(index);
         }
     }
     if (toBuild.empty()) {
+        return;
+    }
+    if (useClusters) {
+        updateSkinnedClusterBottomLevel(commandBuffer, skinnedVertices, skinned, toBuild);
         return;
     }
 
@@ -442,8 +543,10 @@ void RayTracer::updateSkinnedBottomLevel(VkCommandBuffer commandBuffer,
                       &primitiveCount,
                       &sizes);
 
-        // 같은 메쉬가 계속 오면 자리를 그대로 다시 쓴다. 크기가 모자랄 때만 새로 잡는다.
-        if (skinnedBottomLevels[index].storage.size < sizes.accelerationStructureSize) {
+        // 같은 메쉬가 계속 오면 자리를 그대로 다시 쓴다. 크기가 모자라거나 클러스터 구조(핸들이 없다)가 들어
+        // 있던 자리면 새로 잡는다.
+        if (skinnedBottomLevels[index].handle == VK_NULL_HANDLE ||
+            skinnedBottomLevels[index].storage.size < sizes.accelerationStructureSize) {
             retireStructure(skinnedBottomLevels[index]);
             skinnedBottomLevels[index] =
                 createStructure(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, sizes.accelerationStructureSize);
@@ -615,7 +718,7 @@ void* RayTracer::instanceBufferMapped(uint32_t frameSlot) const {
 }
 
 VkDeviceAddress RayTracer::bottomLevelAddress(uint32_t mesh) const {
-    if (mesh >= bottomLevels.size() || bottomLevels[mesh].handle == VK_NULL_HANDLE) {
+    if (mesh >= bottomLevels.size() || bottomLevels[mesh].address == 0) {
         return 0;
     }
     return bottomLevels[mesh].address;
@@ -633,7 +736,7 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
     for (uint32_t index = 0; index < sceneToTrace.objects.size(); ++index) {
         uint32_t mesh = sceneToTrace.meshOf(index);
         if (index >= instanceSlots.size() || instanceSlots[index] == INVALID_INSTANCE_SLOT ||
-            mesh >= bottomLevels.size() || bottomLevels[mesh].handle == VK_NULL_HANDLE) {
+            mesh >= bottomLevels.size() || bottomLevels[mesh].address == 0) {
             continue;
         }
         // 스킨 오브젝트는 이번 프레임의 포즈로 다시 세운 구조를 가리킨다. 바인드 포즈 구조를
@@ -641,7 +744,7 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
         uint32_t skinnedSlot = index < skinnedBlasSlots.size() ? skinnedBlasSlots[index] : NO_SKINNED_BLAS;
         VkDeviceAddress blasAddress = bottomLevels[mesh].address;
         if (skinnedSlot != NO_SKINNED_BLAS && skinnedSlot < skinnedBottomLevels.size() &&
-            skinnedBottomLevels[skinnedSlot].handle != VK_NULL_HANDLE) {
+            skinnedBottomLevels[skinnedSlot].address != 0) {
             blasAddress = skinnedBottomLevels[skinnedSlot].address;
         }
 
@@ -788,8 +891,12 @@ void RayTracer::createPipeline() {
     VkShaderModule raygenModule = createShaderModule(context.device, "pathtrace.rgen.spv");
     VkShaderModule missModule = createShaderModule(context.device, "pathtrace.rmiss.spv");
     VkShaderModule shadowMissModule = createShaderModule(context.device, "pathtrace_shadow.rmiss.spv");
-    VkShaderModule hitModule = createShaderModule(context.device, "pathtrace.rchit.spv");
-    VkShaderModule anyHitModule = createShaderModule(context.device, "pathtrace.rahit.spv");
+    // 클러스터 장치는 gl_ClusterIDNV 를 읽는 변종을 쓴다. 클러스터가 아닌 구조를 맞히면 -1 이라 두 방식을 다 푼다.
+    bool clusters = context.caps.clusterAccelerationStructure;
+    VkShaderModule hitModule =
+        createShaderModule(context.device, clusters ? "pathtrace_cluster.rchit.spv" : "pathtrace.rchit.spv");
+    VkShaderModule anyHitModule =
+        createShaderModule(context.device, clusters ? "pathtrace_cluster.rahit.spv" : "pathtrace.rahit.spv");
 
     std::array<VkPipelineShaderStageCreateInfo, 5> stages{};
     stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
@@ -840,6 +947,13 @@ void RayTracer::createPipeline() {
     pipelineInfo.pGroups = groups.data();
     pipelineInfo.maxPipelineRayRecursionDepth = 1;
     pipelineInfo.layout = pipelineLayout;
+    // 클러스터 하위 구조를 추적하려면 파이프라인에 허용을 걸어야 한다.
+    VkRayTracingPipelineClusterAccelerationStructureCreateInfoNV clusterInfo{
+        VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CLUSTER_ACCELERATION_STRUCTURE_CREATE_INFO_NV};
+    clusterInfo.allowClusterAccelerationStructure = VK_TRUE;
+    if (clusters) {
+        pipelineInfo.pNext = &clusterInfo;
+    }
     VK_CHECK(createRayTracingPipelines(
         context.device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
 
@@ -941,6 +1055,439 @@ void RayTracer::trace(VkCommandBuffer commandBuffer,
                        &pushConstants);
     cmdTraceRays(
         commandBuffer, &raygenRegion, &missRegion, &hitRegion, &callableRegion, extent.width, extent.height, 1);
+}
+
+// ---- 클러스터 하위 구조(VK_NV_cluster_acceleration_structure) ----
+//
+// meshlet 하나가 클러스터 가속 구조(CLAS) 하나다. 클러스터의 입력은 «클러스터 안 지역 인덱스 + 빽빽한 위치 배열»
+// 인데, meshlet 삼각형 버퍼가 이미 지역 인덱스(8비트)이므로 위치만 meshlet 정점 목록 순서로 모으면(cluster_gather.comp)
+// 그 둘이 짝이 된다. 클러스터는 암시적 목적지로 한 버퍼에 몰아 세우고(주소는 장치가 배열에 써 준다), 메쉬의 하위
+// 구조는 명시적 목적지로 세운다 — CPU 가 상위 구조 인스턴스에 그 주소를 써야 하므로 미리 알아야 한다.
+// 클러스터 번호는 meshlet 의 첫 삼각형 번호(indexOffset / 3)라, 히트 셰이더가 표 없이 인덱스 버퍼로 바로 간다.
+// ponytail: LOD 0 만 올린다. 래스터가 고른 LOD 의 meshlet 로 세우면 mesh shader 경로와 기하가 정확히 같아진다.
+
+bool RayTracer::clusterAvailable() const {
+    return context.caps.clusterAccelerationStructure && gatherPipeline != VK_NULL_HANDLE;
+}
+
+void RayTracer::setClusterMode(bool enabled) {
+    enabled = enabled && clusterAvailable();
+    if (enabled == useClusters) {
+        return;
+    }
+    useClusters = enabled;
+    // 프레임 기록 중에 불리므로 바로 지우지 않고 맡겨 둔다. 주소가 0 이면 다음에 다시 세운다.
+    for (AccelerationStructure& structure : bottomLevels) {
+        retireStructure(structure);
+    }
+    bottomLevels.clear();
+    bottomLevelBuilt = false;
+    retireStructure(topLevel);
+    for (AccelerationStructure& structure : skinnedBottomLevels) {
+        retireStructure(structure);
+    }
+}
+
+namespace {
+
+// 크기가 모자랄 때만 새로 잡는다. 기록 중일 수 있어 옛 버퍼는 맡겨 둔다.
+void ensureBuffer(Context& context,
+                  Buffer& buffer,
+                  VkDeviceSize size,
+                  VkBufferUsageFlags usage,
+                  MemoryLocation location,
+                  const char* debugName,
+                  VkDeviceSize alignment = 0) {
+    if (buffer.size >= size) {
+        return;
+    }
+    context.retireBuffer(buffer);
+    buffer = createBuffer(context, std::max<VkDeviceSize>(size, 16), usage, location, debugName, alignment);
+}
+
+constexpr VkBufferUsageFlags CLUSTER_INPUT_USAGE =
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+constexpr VkBufferUsageFlags CLUSTER_STORAGE_USAGE =
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
+
+} // namespace
+
+bool RayTracer::prepareClusterBuild(ClusterSet& set,
+                                    const std::vector<uint32_t>& meshes,
+                                    const std::vector<AccelerationStructure*>& destinations,
+                                    const Buffer* skinnedVertices,
+                                    const std::vector<uint32_t>& skinnedVertexOffsets,
+                                    VkBuildAccelerationStructureFlagsKHR flags,
+                                    bool budgetCheck,
+                                    std::string& reason) {
+    const VkPhysicalDeviceClusterAccelerationStructurePropertiesNV& props = context.clusterProperties;
+    std::vector<VkClusterAccelerationStructureBuildTriangleClusterInfoNV> clusterInfos;
+    std::vector<VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV> bottomInfos(meshes.size());
+    set.gathers.clear();
+    set.triangleInput = VkClusterAccelerationStructureTriangleClusterInputNV{
+        VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_TRIANGLE_CLUSTER_INPUT_NV};
+    set.triangleInput.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    set.triangleInput.maxClusterUniqueGeometryCount = 1;
+    uint32_t positionCount = 0;
+    uint32_t maxClustersPerMesh = 0;
+
+    for (size_t i = 0; i < meshes.size(); ++i) {
+        const GpuMesh& mesh = geometry.mesh(meshes[i]);
+        const GpuMeshLod& lod = geometry.lod(mesh.lodOffset);
+        bool opaque = geometryFlagsFor(geometry.material(mesh.materialIndex)) == VK_GEOMETRY_OPAQUE_BIT_KHR;
+        uint32_t firstEntry = geometry.meshlet(lod.meshletOffset).vertexOffset;
+
+        ClusterSet::Gather gather{};
+        gather.push.vertices = skinnedVertices != nullptr ? skinnedVertices->address : geometry.vertexBuffer.address;
+        gather.push.meshlets = geometry.meshletBuffer.address;
+        gather.push.meshletVertices = geometry.meshletVertexBuffer.address;
+        gather.push.meshletOffset = lod.meshletOffset;
+        gather.push.meshletCount = lod.meshletCount;
+        gather.push.meshVertexOffset = skinnedVertices != nullptr ? static_cast<uint32_t>(mesh.vertexOffset) : 0;
+        gather.push.sourceVertexOffset = skinnedVertices != nullptr ? skinnedVertexOffsets[i] : 0;
+        gather.push.meshletVertexBase = firstEntry;
+        gather.push.positionBase = positionCount;
+        gather.groups = lod.meshletCount;
+        set.gathers.push_back(gather);
+
+        bottomInfos[i].clusterReferencesCount = lod.meshletCount;
+        bottomInfos[i].clusterReferencesStride = sizeof(VkDeviceAddress);
+        // 주소 배열은 아직 없을 수 있어 아래서 기준 주소를 더한다.
+        bottomInfos[i].clusterReferences = clusterInfos.size() * sizeof(VkDeviceAddress);
+        maxClustersPerMesh = std::max(maxClustersPerMesh, lod.meshletCount);
+
+        for (uint32_t m = 0; m < lod.meshletCount; ++m) {
+            const GpuMeshlet& meshlet = geometry.meshlet(lod.meshletOffset + m);
+            VkClusterAccelerationStructureBuildTriangleClusterInfoNV info{};
+            info.clusterID = meshlet.indexOffset / 3;
+            info.triangleCount = meshlet.triangleCount;
+            info.vertexCount = meshlet.vertexCount;
+            info.indexType = VK_CLUSTER_ACCELERATION_STRUCTURE_INDEX_FORMAT_8BIT_NV;
+            info.baseGeometryIndexAndGeometryFlags.geometryFlags =
+                opaque ? VK_CLUSTER_ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT_NV : 0;
+            info.indexBufferStride = 1;
+            info.vertexBufferStride = sizeof(float) * 3;
+            info.indexBuffer = geometry.meshletTriangleBuffer.address + meshlet.triangleOffset;
+            info.vertexBuffer =
+                static_cast<VkDeviceSize>(positionCount + meshlet.vertexOffset - firstEntry) * sizeof(float) * 3;
+            clusterInfos.push_back(info);
+            set.triangleInput.maxClusterTriangleCount =
+                std::max(set.triangleInput.maxClusterTriangleCount, meshlet.triangleCount);
+            set.triangleInput.maxClusterVertexCount =
+                std::max(set.triangleInput.maxClusterVertexCount, meshlet.vertexCount);
+            set.triangleInput.maxTotalTriangleCount += meshlet.triangleCount;
+            set.triangleInput.maxTotalVertexCount += meshlet.vertexCount;
+        }
+        const GpuMeshlet& last = geometry.meshlet(lod.meshletOffset + lod.meshletCount - 1);
+        positionCount += last.vertexOffset + last.vertexCount - firstEntry;
+    }
+    if (set.triangleInput.maxClusterTriangleCount > props.maxTrianglesPerCluster ||
+        set.triangleInput.maxClusterVertexCount > props.maxVerticesPerCluster) {
+        core::fatal("meshlet 이 장치의 클러스터 한도를 넘습니다: 삼각형 {} / {}, 정점 {} / {}",
+                    set.triangleInput.maxClusterTriangleCount,
+                    props.maxTrianglesPerCluster,
+                    set.triangleInput.maxClusterVertexCount,
+                    props.maxVerticesPerCluster);
+    }
+    auto clusterCount = static_cast<uint32_t>(clusterInfos.size());
+
+    // 크기. 클러스터는 암시적 목적지라 합이 나오고, 하위 구조는 명시적이라 메쉬마다 따로 묻는다.
+    set.clusterBuild =
+        VkClusterAccelerationStructureInputInfoNV{VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV};
+    set.clusterBuild.maxAccelerationStructureCount = clusterCount;
+    set.clusterBuild.flags = flags;
+    set.clusterBuild.opType = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_BUILD_TRIANGLE_CLUSTER_NV;
+    set.clusterBuild.opMode = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_MODE_IMPLICIT_DESTINATIONS_NV;
+    set.clusterBuild.opInput.pTriangleClusters = &set.triangleInput;
+    VkAccelerationStructureBuildSizesInfoKHR clusterSizes{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    getClusterBuildSizes(context.device, &set.clusterBuild, &clusterSizes);
+    set.clusterScratch = clusterSizes.buildScratchSize;
+
+    set.bottomInput = VkClusterAccelerationStructureClustersBottomLevelInputNV{
+        VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_CLUSTERS_BOTTOM_LEVEL_INPUT_NV};
+    set.bottomInput.maxTotalClusterCount = clusterCount;
+    set.bottomInput.maxClusterCountPerAccelerationStructure = maxClustersPerMesh;
+    set.bottomBuild =
+        VkClusterAccelerationStructureInputInfoNV{VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV};
+    set.bottomBuild.maxAccelerationStructureCount = static_cast<uint32_t>(meshes.size());
+    set.bottomBuild.flags = flags;
+    set.bottomBuild.opType = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_BUILD_CLUSTERS_BOTTOM_LEVEL_NV;
+    set.bottomBuild.opMode = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_MODE_EXPLICIT_DESTINATIONS_NV;
+    set.bottomBuild.opInput.pClustersBottomLevel = &set.bottomInput;
+    VkAccelerationStructureBuildSizesInfoKHR bottomSizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    getClusterBuildSizes(context.device, &set.bottomBuild, &bottomSizes);
+    set.bottomScratch = bottomSizes.buildScratchSize;
+
+    std::vector<VkDeviceSize> bottomBytes(meshes.size());
+    VkDeviceSize structureBytes = clusterSizes.accelerationStructureSize;
+    for (size_t i = 0; i < meshes.size(); ++i) {
+        VkClusterAccelerationStructureClustersBottomLevelInputNV one = set.bottomInput;
+        one.maxTotalClusterCount = bottomInfos[i].clusterReferencesCount;
+        one.maxClusterCountPerAccelerationStructure = bottomInfos[i].clusterReferencesCount;
+        VkClusterAccelerationStructureInputInfoNV query = set.bottomBuild;
+        query.maxAccelerationStructureCount = 1;
+        query.opInput.pClustersBottomLevel = &one;
+        VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+        getClusterBuildSizes(context.device, &query, &sizes);
+        bottomBytes[i] = sizes.accelerationStructureSize;
+        structureBytes += bottomBytes[i];
+    }
+    VkDeviceSize scratchBytes = std::max(set.clusterScratch, set.bottomScratch);
+    // 일반 경로와 달리 입력(모은 위치, 주소 배열, 서술)도 새로 잡는 버퍼라 예산에 넣는다.
+    VkDeviceSize positionBytes = VkDeviceSize{positionCount} * sizeof(float) * 3;
+    VkDeviceSize inputBytes = positionBytes +
+                              VkDeviceSize{clusterCount} * (sizeof(VkDeviceAddress) + sizeof(clusterInfos[0])) +
+                              meshes.size() * (sizeof(bottomInfos[0]) + sizeof(VkDeviceAddress));
+    constexpr double MB = 1024.0 * 1024.0;
+    if (budgetCheck) {
+        Context::MemoryBudget budget = context.deviceMemoryBudget();
+        VkDeviceSize available = budget.budget > budget.usage ? budget.budget - budget.usage : 0;
+        if (structureBytes + inputBytes + scratchBytes > available) {
+            reason = std::format("클러스터 하위 가속 구조 {:.0f} MB, 입력 {:.0f} MB, 스크래치 {:.0f} MB 가 남은 GPU "
+                                 "예산 {:.0f} MB 를 넘습니다",
+                                 static_cast<double>(structureBytes) / MB,
+                                 static_cast<double>(inputBytes) / MB,
+                                 static_cast<double>(scratchBytes) / MB,
+                                 static_cast<double>(available) / MB);
+            return false;
+        }
+    }
+
+    // 버퍼. 목적지는 명시적이라 여기서 잡은 주소가 곧 하위 구조 주소다.
+    ensureBuffer(
+        context, set.positions, positionBytes, CLUSTER_INPUT_USAGE, MemoryLocation::DEVICE, "클러스터 정점 위치");
+    ensureBuffer(context,
+                 set.clusterInfos,
+                 clusterInfos.size() * sizeof(clusterInfos[0]),
+                 CLUSTER_INPUT_USAGE,
+                 MemoryLocation::HOST_WRITE,
+                 "클러스터 빌드 서술");
+    ensureBuffer(context,
+                 set.clusterStorage,
+                 clusterSizes.accelerationStructureSize,
+                 CLUSTER_STORAGE_USAGE,
+                 MemoryLocation::DEVICE,
+                 "클러스터 가속 구조",
+                 props.clusterByteAlignment);
+    ensureBuffer(context,
+                 set.clusterAddresses,
+                 VkDeviceSize{clusterCount} * sizeof(VkDeviceAddress),
+                 CLUSTER_INPUT_USAGE,
+                 MemoryLocation::DEVICE,
+                 "클러스터 주소");
+    ensureBuffer(context,
+                 set.bottomInfos,
+                 bottomInfos.size() * sizeof(bottomInfos[0]),
+                 CLUSTER_INPUT_USAGE,
+                 MemoryLocation::HOST_WRITE,
+                 "클러스터 하위 구조 서술");
+    ensureBuffer(context,
+                 set.bottomAddresses,
+                 meshes.size() * sizeof(VkDeviceAddress),
+                 CLUSTER_INPUT_USAGE,
+                 MemoryLocation::HOST_WRITE,
+                 "클러스터 하위 구조 주소");
+    ensureBuffer(context,
+                 set.scratch,
+                 scratchBytes,
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 MemoryLocation::DEVICE,
+                 "클러스터 빌드 스크래치",
+                 props.clusterScratchByteAlignment);
+
+    std::vector<VkDeviceAddress> bottomAddresses(meshes.size());
+    for (size_t i = 0; i < meshes.size(); ++i) {
+        AccelerationStructure& destination = *destinations[i];
+        // 일반 구조가 들어 있던 자리(핸들이 있다)거나 모자라면 새로 잡는다. 같은 메쉬가 계속 오면 그대로 쓴다.
+        if (destination.handle != VK_NULL_HANDLE || destination.storage.size < bottomBytes[i]) {
+            retireStructure(destination);
+            destination.storage = createBuffer(context,
+                                               bottomBytes[i],
+                                               CLUSTER_STORAGE_USAGE,
+                                               MemoryLocation::DEVICE,
+                                               "클러스터 하위 가속 구조",
+                                               props.clusterBottomLevelByteAlignment);
+        }
+        destination.address = destination.storage.address;
+        bottomAddresses[i] = destination.address;
+        bottomInfos[i].clusterReferences += set.clusterAddresses.address;
+    }
+    for (VkClusterAccelerationStructureBuildTriangleClusterInfoNV& info : clusterInfos) {
+        info.vertexBuffer += set.positions.address;
+    }
+    for (ClusterSet::Gather& gather : set.gathers) {
+        gather.push.positions = set.positions.address;
+    }
+    std::memcpy(set.clusterInfos.mapped, clusterInfos.data(), clusterInfos.size() * sizeof(clusterInfos[0]));
+    std::memcpy(set.bottomInfos.mapped, bottomInfos.data(), bottomInfos.size() * sizeof(bottomInfos[0]));
+    std::memcpy(set.bottomAddresses.mapped, bottomAddresses.data(), bottomAddresses.size() * sizeof(VkDeviceAddress));
+    return true;
+}
+
+void RayTracer::recordClusterBuild(VkCommandBuffer commandBuffer, ClusterSet& set) {
+    auto memoryBarrier = [commandBuffer](VkPipelineStageFlags2 srcStage,
+                                         VkAccessFlags2 srcAccess,
+                                         VkPipelineStageFlags2 dstStage,
+                                         VkAccessFlags2 dstAccess) {
+        VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        barrier.srcStageMask = srcStage;
+        barrier.srcAccessMask = srcAccess;
+        barrier.dstStageMask = dstStage;
+        barrier.dstAccessMask = dstAccess;
+        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dependency.memoryBarrierCount = 1;
+        dependency.pMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(commandBuffer, &dependency);
+    };
+    constexpr VkAccessFlags2 BUILD_ACCESS =
+        VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+
+    // 지난 프레임의 빌드가 아직 위치를 읽고 있을 수 있다. 스킨 컴퓨트의 변형 정점 쓰기는 호출자가 막는다.
+    memoryBarrier(VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                  VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR,
+                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_WRITE_BIT);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, gatherPipeline);
+    for (const ClusterSet::Gather& gather : set.gathers) {
+        vkCmdPushConstants(
+            commandBuffer, gatherLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gather.push), &gather.push);
+        vkCmdDispatch(commandBuffer, gather.groups, 1, 1);
+    }
+    memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                  VK_ACCESS_2_SHADER_READ_BIT | BUILD_ACCESS);
+    // 지난 프레임의 추적이 덮어쓸 구조를 아직 읽고 있을 수 있다.
+    barrierBeforeBuild(commandBuffer);
+
+    VkClusterAccelerationStructureCommandsInfoNV commands{
+        VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_COMMANDS_INFO_NV};
+    commands.input = set.clusterBuild;
+    commands.dstImplicitData = set.clusterStorage.address;
+    commands.scratchData = set.scratch.address;
+    commands.dstAddressesArray = {set.clusterAddresses.address, sizeof(VkDeviceAddress), set.clusterAddresses.size};
+    commands.srcInfosArray = {set.clusterInfos.address,
+                              sizeof(VkClusterAccelerationStructureBuildTriangleClusterInfoNV),
+                              set.clusterInfos.size};
+    cmdBuildClusters(commandBuffer, &commands);
+
+    // 하위 구조 빌드가 클러스터와 그 주소 배열을 읽고, 같은 스크래치를 다시 쓴다.
+    memoryBarrier(VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                  BUILD_ACCESS,
+                  VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                  VK_ACCESS_2_SHADER_READ_BIT | BUILD_ACCESS);
+
+    commands =
+        VkClusterAccelerationStructureCommandsInfoNV{VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_COMMANDS_INFO_NV};
+    commands.input = set.bottomBuild;
+    commands.scratchData = set.scratch.address;
+    commands.dstAddressesArray = {set.bottomAddresses.address, sizeof(VkDeviceAddress), set.bottomAddresses.size};
+    commands.srcInfosArray = {set.bottomInfos.address,
+                              sizeof(VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV),
+                              set.bottomInfos.size};
+    cmdBuildClusters(commandBuffer, &commands);
+
+    // 상위 구조가 이 결과를 읽고, 스크래치도 다시 쓴다.
+    memoryBarrier(VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                  BUILD_ACCESS,
+                  VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                  BUILD_ACCESS);
+}
+
+bool RayTracer::buildClusterBottomLevel(std::string& reason) {
+    auto buildStart = std::chrono::steady_clock::now();
+    uint32_t meshCount = geometry.meshCount();
+    bottomLevels.resize(meshCount);
+    std::vector<uint32_t> meshes;
+    std::vector<AccelerationStructure*> destinations;
+    for (uint32_t index = 0; index < meshCount; ++index) {
+        // 무덤 메쉬는 세우지 않고 주소를 0 으로 둔다.
+        if (geometry.meshLive(index) && geometry.meshVertexCount(index) > 0) {
+            meshes.push_back(index);
+            destinations.push_back(&bottomLevels[index]);
+        }
+    }
+    if (staticClusters == nullptr) {
+        staticClusters = std::make_unique<ClusterSet>();
+    }
+    if (!meshes.empty()) {
+        if (!prepareClusterBuild(*staticClusters,
+                                 meshes,
+                                 destinations,
+                                 nullptr,
+                                 {},
+                                 VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
+                                 true,
+                                 reason)) {
+            return false;
+        }
+        VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        poolInfo.queueFamilyIndex = context.queueFamilies.graphics;
+        VkCommandPool pool = VK_NULL_HANDLE;
+        VK_CHECK(vkCreateCommandPool(context.device, &poolInfo, nullptr, &pool));
+        VkCommandBufferAllocateInfo allocateInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        allocateInfo.commandPool = pool;
+        allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocateInfo.commandBufferCount = 1;
+        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+        VK_CHECK(vkAllocateCommandBuffers(context.device, &allocateInfo, &commandBuffer));
+        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+        recordClusterBuild(commandBuffer, *staticClusters);
+        VK_CHECK(vkEndCommandBuffer(commandBuffer));
+        VkCommandBufferSubmitInfo commandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+        commandInfo.commandBuffer = commandBuffer;
+        VkSubmitInfo2 submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+        submitInfo.commandBufferInfoCount = 1;
+        submitInfo.pCommandBufferInfos = &commandInfo;
+        VK_CHECK(vkQueueSubmit2(context.graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE));
+        VK_CHECK(vkQueueWaitIdle(context.graphicsQueue));
+        vkDestroyCommandPool(context.device, pool, nullptr);
+    }
+    bottomLevelBuilt = true;
+    double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - buildStart).count();
+    constexpr double MB = 1024.0 * 1024.0;
+    spdlog::info("클러스터 하위 가속 구조 {}개 생성: 클러스터 {}개 {:.0f} MB, {:.1f} ms",
+                 meshes.size(),
+                 meshes.empty() ? 0 : staticClusters->clusterBuild.maxAccelerationStructureCount,
+                 static_cast<double>(staticClusters->clusterStorage.size) / MB,
+                 elapsed);
+    return true;
+}
+
+void RayTracer::updateSkinnedClusterBottomLevel(VkCommandBuffer commandBuffer,
+                                                const Buffer& skinnedVertices,
+                                                const std::vector<SkinnedInstance>& skinned,
+                                                const std::vector<size_t>& toBuild) {
+    // 포즈가 바뀐 슬롯 전부를 한 벌로 세운다. 벌은 진행 중인 프레임 수만큼 돌려 쓴다 — CPU 가 채우는 서술과
+    // 컴퓨트가 채우는 위치를 지난 프레임의 빌드가 아직 읽고 있을 수 있다(인스턴스 버퍼와 같은 이유).
+    std::unique_ptr<ClusterSet>& set = skinnedClusters[skinnedClusterCursor++ % skinnedClusters.size()];
+    if (set == nullptr) {
+        set = std::make_unique<ClusterSet>();
+    }
+    std::vector<uint32_t> meshes;
+    std::vector<AccelerationStructure*> destinations;
+    std::vector<uint32_t> vertexOffsets;
+    for (size_t index : toBuild) {
+        meshes.push_back(skinned[index].meshIndex);
+        destinations.push_back(&skinnedBottomLevels[index]);
+        vertexOffsets.push_back(skinned[index].vertexOffset);
+    }
+    // 포즈가 바뀌는 프레임마다 다시 세우므로 추적 속도보다 구축 속도를 고른다. 예산은 보지 않는다(일반 스킨 경로와
+    // 같다).
+    std::string reason;
+    prepareClusterBuild(*set,
+                        meshes,
+                        destinations,
+                        &skinnedVertices,
+                        vertexOffsets,
+                        VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR,
+                        false,
+                        reason);
+    recordClusterBuild(commandBuffer, *set);
 }
 
 } // namespace gfx

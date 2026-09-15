@@ -1388,6 +1388,8 @@ bool Renderer::ensureBottomLevel() {
     if (rayTracer == nullptr || !rayTracingBlockedReason.empty()) {
         return false;
     }
+    // 방식이 바뀌면 하위 구조가 버려져 아래서 다시 세운다.
+    rayTracer->setClusterMode(settings.useClusterAccel);
     if (rayTracer->bottomLevelReady()) {
         return true;
     }

@@ -172,6 +172,7 @@ Application::Application(const Options& options) : jobs(options.threadCount), op
         if (!options.meshShader) {
             settings.useMeshShader = false;
         }
+        settings.useClusterAccel = options.clusterAccel;
         applyHardwareProfile();
         orbitDegreesPerFrame = options.orbitDegreesPerFrame;
         renderer->setUiCallback([this](VkCommandBuffer commandBuffer) { editorUi->record(commandBuffer); });

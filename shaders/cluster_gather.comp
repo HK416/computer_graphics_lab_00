@@ -1,0 +1,45 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+#include "scene_types.glsl"
+
+// 클러스터 가속 구조(CLAS)의 입력은 «클러스터 안에서만 유효한 지역 인덱스 + 빽빽한 위치 배열» 이다. meshlet 의
+// 삼각형 버퍼가 이미 지역 인덱스이므로, 여기서 meshlet 정점 목록 순서대로 위치만 모아 두면 그 둘이 짝이 된다.
+// 워크그룹 하나가 meshlet 하나를 맡는다. 정적 메쉬는 한 번, 스킨 인스턴스는 포즈가 바뀔 때마다 변형 정점에서.
+layout(local_size_x = 64) in;
+
+layout(buffer_reference, scalar) writeonly buffer ClusterPositionBuffer {
+    vec3 items[];
+};
+
+layout(push_constant, scalar) uniform ClusterGatherPushConstants {
+    VertexBuffer vertices;
+    MeshletBuffer meshlets;
+    MeshletVertexBuffer meshletVertices;
+    ClusterPositionBuffer positions;
+    // 이 디스패치가 맡는 meshlet 구간(LOD 0).
+    uint meshletOffset;
+    uint meshletCount;
+    // 정점 번호 보정. 목록의 전역 번호에서 meshVertexOffset 을 빼고 sourceVertexOffset 을 더한다. 정적 메쉬는
+    // 둘 다 0(전역 정점 버퍼를 그대로 읽는다), 스킨은 (메쉬 첫 정점, 변형 구간 시작).
+    uint meshVertexOffset;
+    uint sourceVertexOffset;
+    // 출력 자리. meshlet.vertexOffset 에서 meshletVertexBase 를 빼고 positionBase 를 더한다.
+    uint meshletVertexBase;
+    uint positionBase;
+} push;
+
+void main() {
+    uint index = gl_WorkGroupID.x;
+    if (index >= push.meshletCount) {
+        return;
+    }
+    Meshlet meshlet = push.meshlets.items[push.meshletOffset + index];
+    uint destination = meshlet.vertexOffset - push.meshletVertexBase + push.positionBase;
+    for (uint i = gl_LocalInvocationIndex; i < meshlet.vertexCount; i += 64u) {
+        uint globalVertex = push.meshletVertices.items[meshlet.vertexOffset + i];
+        uint source = globalVertex - push.meshVertexOffset + push.sourceVertexOffset;
+        push.positions.items[destination + i] = push.vertices.items[source].position;
+    }
+}

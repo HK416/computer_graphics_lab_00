@@ -83,7 +83,10 @@ void ParticleSimulator::createPipelines(VkDescriptorSetLayout accelerationLayout
     }
     layoutInfo.setLayoutCount = 2;
     VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &rayQueryLayout));
-    rayQueryPipeline = createComputePipeline(context, rayQueryLayout, "particles_rq.comp.spv");
+    rayQueryPipeline = createComputePipeline(context,
+                                             rayQueryLayout,
+                                             context.caps.clusterAccelerationStructure ? "particles_cluster_rq.comp.spv"
+                                                                                       : "particles_rq.comp.spv");
     if (rayQueryPipeline == VK_NULL_HANDLE) {
         spdlog::warn("입자 광선 질의 변종을 만들지 못해 입자가 장면과 부딪히지 않는다");
     }

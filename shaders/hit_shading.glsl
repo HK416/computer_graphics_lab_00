@@ -66,7 +66,7 @@ vec3 shadeWaterHit(Camera camera, vec3 origin, vec3 direction, float hitDistance
 
 // 히트 표면을 직접광 한 표본 + 환경광으로 셰이딩한다. 재귀는 없다(환경광이 프로브를 읽으면 다중 반사가 한 프레임씩
 // 번져 간다).
-vec3 shadeHit(Camera camera, vec3 origin, vec3 direction, float hitDistance, uint instanceIndex, uint primitive, vec2 barycentrics, inout uint seed) {
+vec3 shadeHit(Camera camera, vec3 origin, vec3 direction, float hitDistance, uint instanceIndex, int clusterId, uint primitive, vec2 barycentrics, inout uint seed) {
     HitSurface hit = interpolateHit(push.instances,
                                     push.meshes,
                                     push.lods,
@@ -74,6 +74,7 @@ vec3 shadeHit(Camera camera, vec3 origin, vec3 direction, float hitDistance, uin
                                     push.skinnedVertices,
                                     push.indices,
                                     instanceIndex,
+                                    clusterId,
                                     primitive,
                                     barycentrics);
     Material material = push.materials.items[hit.materialIndex];
@@ -106,7 +107,7 @@ const float MISS_DISTANCE = 1.0e4;
 
 // 컷오프 재질의 알파를 보고 후보를 확정한다. 반투명은 그냥 통과시킨다(ponytail: 유리 뒤의 반사가 유리를 무시한다).
 // rayQueryEXT 는 함수 인자로 넘길 수 없어 매크로다.
-bool cutoffCandidateOpaque(uint instanceIndex, uint primitive, vec2 barycentrics) {
+bool cutoffCandidateOpaque(uint instanceIndex, int clusterId, uint primitive, vec2 barycentrics) {
     Instance instance = push.instances.items[instanceIndex];
     Mesh mesh = push.meshes.items[instance.meshIndex];
     Material material = push.materials.items[mesh.materialIndex];
@@ -120,6 +121,7 @@ bool cutoffCandidateOpaque(uint instanceIndex, uint primitive, vec2 barycentrics
                                push.skinnedVertices,
                                push.indices,
                                instanceIndex,
+                               clusterId,
                                primitive,
                                barycentrics);
     return materialAlpha(material, uv) >= material.emissiveAndCutoff.w;
@@ -128,6 +130,7 @@ bool cutoffCandidateOpaque(uint instanceIndex, uint primitive, vec2 barycentrics
     while (rayQueryProceedEXT(query)) { \
         if (rayQueryGetIntersectionTypeEXT(query, false) == gl_RayQueryCandidateIntersectionTriangleEXT && \
             cutoffCandidateOpaque(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, false)), \
+                                  QUERY_CLUSTER_ID(query, false), \
                                   uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, false)), \
                                   rayQueryGetIntersectionBarycentricsEXT(query, false))) { \
             rayQueryConfirmIntersectionEXT(query); \
@@ -135,11 +138,11 @@ bool cutoffCandidateOpaque(uint instanceIndex, uint primitive, vec2 barycentrics
     }
 
 // 확정된 히트를 셰이딩한다. 물 표면 인스턴스는 표식으로 가른다.
-vec3 shadeCommittedHit(Camera camera, vec3 origin, vec3 direction, float hitDistance, uint customIndex, uint primitive, vec2 barycentrics, inout uint seed) {
+vec3 shadeCommittedHit(Camera camera, vec3 origin, vec3 direction, float hitDistance, uint customIndex, int clusterId, uint primitive, vec2 barycentrics, inout uint seed) {
     if ((customIndex & FLUID_SURFACE_CUSTOM_INDEX) != 0u) {
         return shadeWaterHit(camera, origin, direction, hitDistance, customIndex, primitive, barycentrics, seed);
     }
-    return shadeHit(camera, origin, direction, hitDistance, customIndex, primitive, barycentrics, seed);
+    return shadeHit(camera, origin, direction, hitDistance, customIndex, clusterId, primitive, barycentrics, seed);
 }
 
 // 반사 광선. 단면 재질은 후면을 컬링해 래스터와 같은 면만 보이게 한다. 컷오프·반투명 재질은 가속 구조에
@@ -162,6 +165,7 @@ vec3 traceReflection(Camera camera, vec3 origin, vec3 normal, vec3 direction, fl
                              direction,
                              hitDistance,
                              uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, true)),
+                             QUERY_CLUSTER_ID(query, true),
                              uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, true)),
                              rayQueryGetIntersectionBarycentricsEXT(query, true),
                              seed);

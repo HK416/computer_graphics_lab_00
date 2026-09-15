@@ -34,7 +34,8 @@ void Renderer::createDdgiPipelines() {
     VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &ddgiPipelineLayout));
 
     // 네 단계가 한 셰이더의 특수화 상수로 갈린다.
-    VkShaderModule module = createShaderModule(context.device, "ddgi.comp.spv");
+    VkShaderModule module = createShaderModule(
+        context.device, context.caps.clusterAccelerationStructure ? "ddgi_cluster.comp.spv" : "ddgi.comp.spv");
     uint32_t stage = 0;
     VkSpecializationMapEntry entry{0, 0, sizeof(uint32_t)};
     VkSpecializationInfo specialization{};

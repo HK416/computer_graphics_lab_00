@@ -126,13 +126,13 @@ HitSurface interpolateHit(InstanceBuffer instances,
                           VertexBuffer skinnedVertices,
                           IndexBuffer indices,
                           uint instanceIndex,
+                          int clusterId,
                           uint primitiveIndex,
                           vec2 barycentrics) {
     Instance instance = instances.items[instanceIndex];
     Mesh mesh = meshes.items[instance.meshIndex];
-    MeshLod lod = lods.items[mesh.lodOffset];
 
-    uint base = lod.indexOffset + primitiveIndex * 3;
+    uint base = hitIndexBase(lods, mesh, clusterId, primitiveIndex);
     bool skinned = instance.skinnedVertexOffset != NO_SKINNED_VERTICES;
     VertexBuffer source = skinned ? skinnedVertices : vertices;
     uint vertexBase = skinned ? instance.skinnedVertexOffset : uint(mesh.vertexOffset);
@@ -179,12 +179,12 @@ vec2 interpolateHitUv(InstanceBuffer instances,
                       VertexBuffer skinnedVertices,
                       IndexBuffer indices,
                       uint instanceIndex,
+                      int clusterId,
                       uint primitiveIndex,
                       vec2 barycentrics) {
     Instance instance = instances.items[instanceIndex];
     Mesh mesh = meshes.items[instance.meshIndex];
-    MeshLod lod = lods.items[mesh.lodOffset];
-    uint base = lod.indexOffset + primitiveIndex * 3;
+    uint base = hitIndexBase(lods, mesh, clusterId, primitiveIndex);
     bool skinned = instance.skinnedVertexOffset != NO_SKINNED_VERTICES;
     VertexBuffer source = skinned ? skinnedVertices : vertices;
     uint vertexBase = skinned ? instance.skinnedVertexOffset : uint(mesh.vertexOffset);

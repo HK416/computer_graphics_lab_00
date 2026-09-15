@@ -1,5 +1,6 @@
 #version 460
 #extension GL_EXT_nonuniform_qualifier : require
+#include "cluster_hit.glsl"
 
 #include "bindless.glsl"
 #include "material.glsl"
@@ -26,6 +27,7 @@ void main() {
                                pathTrace.skinnedVertices,
                                pathTrace.indices,
                                uint(gl_InstanceCustomIndexEXT),
+                               HIT_CLUSTER_ID,
                                uint(gl_PrimitiveID),
                                barycentrics);
     float alpha = materialAlpha(material, uv);

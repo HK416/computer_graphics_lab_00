@@ -62,6 +62,8 @@ struct Options {
     // 스크린샷 비교용. 두 패스 오클루전 컬링을 끄거나 mesh shader 경로 대신 컴퓨트 컬링 경로를 쓴다.
     bool occlusionCulling = true;
     bool meshShader = true;
+    // 클러스터 하위 가속 구조 대신 메쉬 단위 일반 구조로 시작한다(비교용).
+    bool clusterAccel = true;
     // 콜라이더 표시. 스크린샷으로 렌더 결과만 견줄 때 끈다.
     bool showColliders = true;
     // 시작할 때 광선 반사를 켠다. 광선 질의가 없으면 렌더러가 스스로 끈다. --no-reflections 로 끄면

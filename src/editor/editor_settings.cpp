@@ -449,6 +449,16 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         ImGui::BeginDisabled(!renderer.pathTracingAvailable());
         ImGui::Checkbox("Path Tracing", &renderer.settings.usePathTracing);
         ImGui::EndDisabled();
+        ImGui::BeginDisabled(!renderer.clusterAccelAvailable());
+        ImGui::Checkbox("Cluster BLAS (CLAS)", &renderer.settings.useClusterAccel);
+        ImGui::EndDisabled();
+        if (!renderer.clusterAccelAvailable()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(VK_NV_cluster_acceleration_structure 미지원)");
+        } else {
+            ImGui::SameLine();
+            ImGui::TextDisabled("meshlet 단위 하위 구조. 반사·그림자·경로 추적이 함께 쓴다");
+        }
         if (!renderer.pathTracingAvailable()) {
             ImGui::SameLine();
             ImGui::TextDisabled("(미지원)");

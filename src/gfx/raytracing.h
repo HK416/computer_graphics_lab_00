@@ -1,6 +1,8 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -129,6 +131,13 @@ public:
     void* instanceBufferMapped(uint32_t frameSlot) const;
     // 메쉬의 하위 가속 구조 주소. 없으면(무덤, 미구축) 0.
     VkDeviceAddress bottomLevelAddress(uint32_t mesh) const;
+    // 하위 구조를 클러스터 가속 구조(VK_NV_cluster_acceleration_structure)로 세울지. meshlet 하나가 클러스터(CLAS)
+    // 하나가 되고 그것들로 메쉬의 하위 구조를 짓는다 — mesh shader 경로와 같은 단위다. 장치가 지원하면 기본 참.
+    // 바꾸면 하위 구조를 전부 버려 다음에 새 방식으로 다시 세운다. 히트 셰이더는 두 방식을 클러스터 번호로
+    // 가르므로(shaders/cluster_hit.glsl) 파이프라인은 그대로다.
+    void setClusterMode(bool enabled);
+    bool clusterMode() const { return useClusters; }
+    bool clusterAvailable() const;
     void trace(VkCommandBuffer commandBuffer,
                VkExtent2D extent,
                VkDeviceAddress cameraAddress,
@@ -155,8 +164,28 @@ public:
     VkDescriptorSet accelerationSet() const { return descriptorSet; }
 
 private:
+    struct ClusterSet;
+
     void loadFunctions();
     void createPipeline();
+    // 클러스터 경로. meshes[i] 의 하위 구조를 destinations[i] 에 세울 재료(모은 위치, 클러스터·하위 구조 서술, 저장,
+    // 스크래치)를 set 에 준비한다. skinnedVertices 가 있으면 그 구간의 변형 정점에서 위치를 모은다. 저장이
+    // 모자라면 새로 잡고, 예산을 넘으면 사유를 적고 거짓을 돌려준다(budgetCheck 가 참일 때만 본다).
+    bool prepareClusterBuild(ClusterSet& set,
+                             const std::vector<uint32_t>& meshes,
+                             const std::vector<AccelerationStructure*>& destinations,
+                             const Buffer* skinnedVertices,
+                             const std::vector<uint32_t>& skinnedVertexOffsets,
+                             VkBuildAccelerationStructureFlagsKHR flags,
+                             bool budgetCheck,
+                             std::string& reason);
+    // 준비한 벌을 기록한다: 위치 모으기 컴퓨트 → 클러스터 빌드 → 하위 구조 빌드. 뒤에 상위 구조가 읽을 배리어까지.
+    void recordClusterBuild(VkCommandBuffer commandBuffer, ClusterSet& set);
+    bool buildClusterBottomLevel(std::string& reason);
+    void updateSkinnedClusterBottomLevel(VkCommandBuffer commandBuffer,
+                                         const Buffer& skinnedVertices,
+                                         const std::vector<SkinnedInstance>& skinned,
+                                         const std::vector<size_t>& toBuild);
     // 이번 프레임의 구축이 지난 프레임의 추적/질의와 겹치지 않게 막는다. 구조와 스크래치 버퍼를
     // 하나씩만 두고 프레임마다 다시 쓰기 때문에 필요하다.
     void barrierBeforeBuild(VkCommandBuffer commandBuffer);
@@ -194,6 +223,14 @@ private:
     // 상위 구조 차례에 버퍼가 커지면서 이미 기록해 둔 주소가 날아간다.
     Buffer skinnedScratchBuffer;
 
+    bool useClusters = false;
+    // 정적 메쉬 전부가 한 벌. 스킨은 포즈가 바뀐 슬롯 전부가 한 벌인데 프레임마다 돌려 쓴다.
+    std::unique_ptr<ClusterSet> staticClusters;
+    std::array<std::unique_ptr<ClusterSet>, 3> skinnedClusters;
+    uint32_t skinnedClusterCursor = 0;
+    VkPipelineLayout gatherLayout = VK_NULL_HANDLE;
+    VkPipeline gatherPipeline = VK_NULL_HANDLE;
+
     VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
@@ -214,6 +251,8 @@ private:
     PFN_vkCreateRayTracingPipelinesKHR createRayTracingPipelines = nullptr;
     PFN_vkGetRayTracingShaderGroupHandlesKHR getShaderGroupHandles = nullptr;
     PFN_vkCmdTraceRaysKHR cmdTraceRays = nullptr;
+    PFN_vkGetClusterAccelerationStructureBuildSizesNV getClusterBuildSizes = nullptr;
+    PFN_vkCmdBuildClusterAccelerationStructureIndirectNV cmdBuildClusters = nullptr;
 };
 
 } // namespace gfx

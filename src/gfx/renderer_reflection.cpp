@@ -21,7 +21,8 @@ void Renderer::createReflectionPipelines() {
     VK_CHECK(vkCreatePipelineLayout(context.device, &layoutInfo, nullptr, &reflectionPipelineLayout));
 
     // 추적과 해결은 한 셰이더의 특수화 상수로 갈린다.
-    VkShaderModule module = createShaderModule(context.device, "reflect.comp.spv");
+    VkShaderModule module = createShaderModule(
+        context.device, context.caps.clusterAccelerationStructure ? "reflect_cluster.comp.spv" : "reflect.comp.spv");
     uint32_t stage = 0;
     VkSpecializationMapEntry entry{0, 0, sizeof(uint32_t)};
     VkSpecializationInfo specialization{};

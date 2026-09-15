@@ -24,6 +24,9 @@ struct Capabilities {
     // 하위 가속 구조의 삼각형 수를 장치 버퍼에서 읽어 세울 수 있는지(간접 구축). GPU 가 만든 물 표면을
     // 광선 경로에 올리는 데 쓴다. 없으면 물 표면은 Path Tracing 에 보이지 않는다.
     bool accelerationStructureIndirectBuild = false;
+    // VK_NV_cluster_acceleration_structure. meshlet 하나를 클러스터 가속 구조(CLAS)로 세우고 그것들로
+    // 하위 구조를 짓는다. 있으면 광선 경로가 mesh shader 와 같은 meshlet 단위로 기하를 올린다.
+    bool clusterAccelerationStructure = false;
     // 간접 그리기 개수를 GPU 버퍼에서 읽어 압축 드로우가 가능한지. 없으면 고정 개수로 디스패치하고
     // 컬링된 드로우는 instanceCount 를 0 으로 기록한다.
     bool drawIndirectCount = false;
@@ -110,6 +113,8 @@ struct Context {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR rayTracingPipelineProperties{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
+    VkPhysicalDeviceClusterAccelerationStructurePropertiesNV clusterProperties{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CLUSTER_ACCELERATION_STRUCTURE_PROPERTIES_NV};
 
     QueueFamilies queueFamilies;
     VkQueue graphicsQueue = VK_NULL_HANDLE;

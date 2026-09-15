@@ -108,6 +108,7 @@ set(shader_sources
     shaders/cull_meshlets.comp
     shaders/skin.comp
     shaders/skin_bounds.comp
+    shaders/cluster_gather.comp
     shaders/fluid_emit.comp
     shaders/fluid_grid.comp
     shaders/fluid_density.comp
@@ -187,6 +188,13 @@ set(shader_variants
     "shaders/mesh_oit.frag|mesh_oit_rq.frag.spv|RAY_QUERY_SHADOWS"
     "shaders/particles.comp|particles_rq.comp.spv|PARTICLE_RAY_QUERY"
     "shaders/cloth_finish.comp|cloth_finish_rq.comp.spv|CLOTH_RAY_QUERY"
+    # 클러스터 가속 구조(VK_NV_cluster_acceleration_structure) 히트 변종. gl_ClusterIDNV 의 SPIR-V 능력은 확장이
+    # 없는 장치에서 파이프라인 생성을 거부하므로 기본 변종과 따로 둔다. 장치가 지원하면 이쪽만 쓴다.
+    "shaders/pathtrace.rchit|pathtrace_cluster.rchit.spv|CLUSTER_HITS"
+    "shaders/pathtrace.rahit|pathtrace_cluster.rahit.spv|CLUSTER_HITS"
+    "shaders/reflect.comp|reflect_cluster.comp.spv|CLUSTER_HITS"
+    "shaders/ddgi.comp|ddgi_cluster.comp.spv|CLUSTER_HITS"
+    "shaders/particles.comp|particles_cluster_rq.comp.spv|PARTICLE_CLUSTER_RAY_QUERY"
     # 협력 행렬은 모양이 SPIR-V 에 박히므로 런타임 분기가 안 된다. 모양마다 한 벌씩 컴파일해 두고
     # 장치가 광고하는 것과 맞는 것만 파이프라인으로 만든다. src/gfx/context.cpp 의 COOP_CANDIDATES 와
     # 한 줄씩 짝이 맞아야 한다.

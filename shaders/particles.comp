@@ -1,5 +1,11 @@
 #version 460
 
+// 클러스터 히트 변종은 광선 질의 변종 위에 얹힌다.
+#ifdef PARTICLE_CLUSTER_RAY_QUERY
+#define PARTICLE_RAY_QUERY
+#define CLUSTER_HITS
+#endif
+#include "cluster_hit.glsl"
 #include "particle_common.glsl"
 #include "sampling.glsl"
 
@@ -23,11 +29,10 @@ vec3 coneDirection(float cosHalfAngle, inout uint seed) {
 
 #ifdef PARTICLE_RAY_QUERY
 // 히트 삼각형의 기하 법선(월드). 셰이딩 법선이 아니라 면 법선이라 튕김이 면에 맞는다.
-vec3 hitNormal(ParticleParams params, uint instanceIndex, uint primitiveIndex) {
+vec3 hitNormal(ParticleParams params, uint instanceIndex, int clusterId, uint primitiveIndex) {
     Instance instance = params.instances.items[instanceIndex];
     Mesh mesh = params.meshes.items[instance.meshIndex];
-    MeshLod lod = params.lods.items[mesh.lodOffset];
-    uint base = lod.indexOffset + primitiveIndex * 3u;
+    uint base = hitIndexBase(params.lods, mesh, clusterId, primitiveIndex);
     bool skinned = instance.skinnedVertexOffset != NO_SKINNED_VERTICES;
     VertexBuffer source = skinned ? params.skinnedVertices : params.vertices;
     uint vertexBase = skinned ? instance.skinnedVertexOffset : uint(mesh.vertexOffset);
@@ -92,6 +97,7 @@ void main() {
             float hitDistance = rayQueryGetIntersectionTEXT(query, true);
             vec3 normal = hitNormal(params,
                                     uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, true)),
+                                    QUERY_CLUSTER_ID(query, true),
                                     uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, true)));
             if (dot(normal, direction) > 0.0) {
                 normal = -normal;

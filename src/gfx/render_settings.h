@@ -103,6 +103,10 @@ struct RenderSettings {
     // 경로 추적. 하드웨어가 지원하고 가속 구조가 예산에 들어갈 때만 켤 수 있다.
     bool usePathTracing = false;
     PathTraceOptions pathTrace;
+    // 하위 가속 구조를 meshlet 단위 클러스터(VK_NV_cluster_acceleration_structure)로 세운다. 경로 추적·광선 반사·
+    // 광선 질의 그림자가 모두 같은 구조를 본다. 장치가 지원하지 않으면 무시된다. 비교용으로 끈다.
+    // 자동 튜닝 등급표에는 두지 않는다 — 결과가 바이트로 같아 화질·비용 조절이 아니라 능력 게이트일 뿐이다.
+    bool useClusterAccel = true;
     // 누적 표본이 이 수에 못 미치는 동안 표시용으로 à-trous 를 돌린다. 누적 버퍼는 건드리지 않는다.
     bool pathTraceDenoise = true;
     uint32_t pathTraceDenoiseSamples = 64;

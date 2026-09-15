@@ -125,6 +125,8 @@ int main(int argc, char* argv[]) {
             options.occlusionCulling = false;
         } else if (argument == "--no-mesh-shader") {
             options.meshShader = false;
+        } else if (argument == "--no-clas") {
+            options.clusterAccel = false;
         } else if (argument == "--orbit" && i + 1 < argc) {
             options.orbitDegreesPerFrame = static_cast<float>(std::atof(argv[++i]));
         } else if (argument == "--no-light-clusters") {

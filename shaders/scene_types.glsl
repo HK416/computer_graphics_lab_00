@@ -352,6 +352,16 @@ layout(buffer_reference, scalar) buffer VisibilityBuffer {
 layout(buffer_reference, scalar) readonly buffer MeshLodBuffer {
     MeshLod items[];
 };
+
+// 히트 삼각형의 첫 인덱스(전역 인덱스 버퍼 기준). 클러스터 하위 구조(CLAS)를 맞혔으면 clusterId 가 그 meshlet 의
+// 첫 삼각형 번호(RayTracer 가 meshlet.indexOffset / 3 으로 붙인다)이고 primitiveIndex 는 클러스터 안 번호다. meshlet
+// 의 삼각형이 인덱스 버퍼에 그 순서 그대로 놓이므로 둘을 더하면 된다. 아니면 LOD 0 의 인덱스 구간이다.
+uint hitIndexBase(MeshLodBuffer lods, Mesh mesh, int clusterId, uint primitiveIndex) {
+    if (clusterId >= 0) {
+        return (uint(clusterId) + primitiveIndex) * 3u;
+    }
+    return lods.items[mesh.lodOffset].indexOffset + primitiveIndex * 3u;
+}
 layout(buffer_reference, scalar) readonly buffer MeshBuffer {
     Mesh items[];
 };
