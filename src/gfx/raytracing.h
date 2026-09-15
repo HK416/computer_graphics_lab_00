@@ -138,6 +138,23 @@ public:
     void setClusterMode(bool enabled);
     bool clusterMode() const { return useClusters; }
     bool clusterAvailable() const;
+    // 클러스터 모드의 LOD 선택 입력. 래스터 컬링이 쓰는 것과 같은 프레임 버퍼 주소여야 두 경로가 같은 컷을 고른다.
+    struct ClusterSelection {
+        VkDeviceAddress instances = 0;
+        VkDeviceAddress camera = 0;
+        VkDeviceAddress network = 0;
+        bool useNetwork = false;
+    };
+    // 클러스터 모드에서 오브젝트마다 이번 프레임의 LOD 컷을 골라 하위 구조를 세운다. updateSkinnedBottomLevel 뒤,
+    // updateTopLevel 앞에 온다. 매 프레임 불러야 한다(카메라가 움직이면 컷이 바뀐다). 오브젝트 구조가 GPU 예산을
+    // 넘으면 아무것도 기록하지 않고 사유를 적은 뒤 거짓을 돌려준다 — 호출자가 광선 기능을 끈다.
+    bool selectClusters(VkCommandBuffer commandBuffer,
+                        const scene::Scene& sceneToTrace,
+                        const std::vector<uint32_t>& instanceSlots,
+                        const std::vector<uint32_t>& skinnedBlasSlots,
+                        uint32_t frameSlot,
+                        const ClusterSelection& selection,
+                        std::string& reason);
     void trace(VkCommandBuffer commandBuffer,
                VkExtent2D extent,
                VkDeviceAddress cameraAddress,
@@ -168,19 +185,19 @@ private:
 
     void loadFunctions();
     void createPipeline();
-    // 클러스터 경로. meshes[i] 의 하위 구조를 destinations[i] 에 세울 재료(모은 위치, 클러스터·하위 구조 서술, 저장,
-    // 스크래치)를 set 에 준비한다. skinnedVertices 가 있으면 그 구간의 변형 정점에서 위치를 모은다. 저장이
-    // 모자라면 새로 잡고, 예산을 넘으면 사유를 적고 거짓을 돌려준다(budgetCheck 가 참일 때만 본다).
+    // 클러스터 경로. meshes 의 모든 LOD meshlet 을 클러스터로 세울 재료(모은 위치, 서술, 저장, 스크래치)를 set 에
+    // 준비한다. skinnedVertices 가 있으면 그 구간의 변형 정점에서 위치를 모은다. 저장이 모자라면 새로 잡고, 예산을
+    // 넘으면 사유를 적고 거짓을 돌려준다(budgetCheck 가 참일 때만 본다).
     bool prepareClusterBuild(ClusterSet& set,
                              const std::vector<uint32_t>& meshes,
-                             const std::vector<AccelerationStructure*>& destinations,
                              const Buffer* skinnedVertices,
                              const std::vector<uint32_t>& skinnedVertexOffsets,
                              VkBuildAccelerationStructureFlagsKHR flags,
                              bool budgetCheck,
                              std::string& reason);
-    // 준비한 벌을 기록한다: 위치 모으기 컴퓨트 → 클러스터 빌드 → 하위 구조 빌드. 뒤에 상위 구조가 읽을 배리어까지.
+    // 준비한 벌을 기록한다: 위치 모으기 컴퓨트 → 클러스터 빌드. 뒤에 선택 컴퓨트·하위 구조 빌드가 읽을 배리어까지.
     void recordClusterBuild(VkCommandBuffer commandBuffer, ClusterSet& set);
+    bool skinnedClusterBuilt(size_t slot) const;
     bool buildClusterBottomLevel(std::string& reason);
     void updateSkinnedClusterBottomLevel(VkCommandBuffer commandBuffer,
                                          const Buffer& skinnedVertices,
@@ -224,12 +241,31 @@ private:
     Buffer skinnedScratchBuffer;
 
     bool useClusters = false;
-    // 정적 메쉬 전부가 한 벌. 스킨은 포즈가 바뀐 슬롯 전부가 한 벌인데 프레임마다 돌려 쓴다.
+    // 정적 메쉬 전부가 한 벌, 스킨 슬롯마다 한 벌. 오브젝트 하위 구조가 벌의 클러스터를 가리키므로 벌은 살아 있어야
+    // 한다.
     std::unique_ptr<ClusterSet> staticClusters;
-    std::array<std::unique_ptr<ClusterSet>, 3> skinnedClusters;
-    uint32_t skinnedClusterCursor = 0;
+    std::vector<std::unique_ptr<ClusterSet>> skinnedClusters;
+    // 메쉬 번호 -> 정적 벌 안의 첫 클러스터 자리. 없으면 NO_CLUSTERS.
+    static constexpr uint32_t NO_CLUSTERS = 0xFFFFFFFFU;
+    std::vector<uint32_t> staticClusterBase;
+    // 메쉬 번호 -> 모든 meshlet 을 담는 하위 구조 크기. 0 이면 아직 묻지 않았다.
+    std::vector<VkDeviceSize> clusterBottomBytes;
+    // 오브젝트 번호마다 하나. 이번 프레임에 세웠는지는 objectHasClusters 가 말한다.
+    std::vector<AccelerationStructure> objectBottomLevels;
+    std::vector<uint8_t> objectHasClusters;
+    // 선택 컴퓨트의 입력·출력. CPU 가 쓰는 것이 있어 프레임마다 나눈다.
+    struct ClusterSelectBuffers {
+        Buffer objects;         // ClusterSelectObject[], CPU 가 쓴다
+        Buffer bottomAddresses; // 명시적 목적지, CPU 가 쓴다
+        Buffer references;      // 고른 클러스터 주소, 컴퓨트가 쓴다
+        Buffer bottomInfos;     // 하위 구조 빌드 서술, 컴퓨트가 쓴다
+        Buffer scratch;
+    };
+    std::array<ClusterSelectBuffers, 3> selectBuffers;
     VkPipelineLayout gatherLayout = VK_NULL_HANDLE;
     VkPipeline gatherPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout selectLayout = VK_NULL_HANDLE;
+    VkPipeline selectPipeline = VK_NULL_HANDLE;
 
     VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;

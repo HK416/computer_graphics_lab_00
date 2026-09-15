@@ -1030,10 +1030,38 @@ void Renderer::updateAccelerationStructures(VkCommandBuffer commandBuffer, const
     if (!ensureBottomLevel()) {
         return;
     }
-    if (!sceneChangedThisFrame && !anySkinRebuild && rayTracer->ready()) {
+    bool clusters = rayTracer->clusterMode();
+    if (!clusters && !sceneChangedThisFrame && !anySkinRebuild && rayTracer->ready()) {
         return;
     }
+    // 클러스터 모드는 카메라가 움직이면 LOD 컷이 바뀌므로 프레임마다 세운다. 한 프레임에 여러 노드가 부르니 한 번만.
+    if (clusters && accelerationStructureFrame == frameIndex) {
+        return;
+    }
+    accelerationStructureFrame = frameIndex;
     rayTracer->updateSkinnedBottomLevel(commandBuffer, skinnedVertexBuffer, skinnedInstances);
+    if (clusters) {
+        const Frame& frame = frames[frameIndex % FRAMES_IN_FLIGHT];
+        std::string reason;
+        if (!rayTracer->selectClusters(commandBuffer,
+                                       scene,
+                                       objectInstanceSlots,
+                                       objectSkinnedBlas,
+                                       static_cast<uint32_t>(frameIndex % FRAMES_IN_FLIGHT),
+                                       {frame.instanceBuffer.address,
+                                        frame.cameraBuffer.address,
+                                        frame.lodNetworkBuffer.address,
+                                        settings.useNeuralLod},
+                                       reason)) {
+            // 폴백은 두지 않는다. 이번 프레임은 지난 상위 구조로 마치고 다음 프레임부터 광선 기능이 꺼진다.
+            rayTracingBlockedReason = reason;
+            settings.usePathTracing = false;
+            settings.useRayQueryShadows = false;
+            settings.useReflections = false;
+            spdlog::warn("광선 기능을 끕니다: {}", reason);
+            return;
+        }
+    }
     rayTracer->updateTopLevel(commandBuffer,
                               scene,
                               objectInstanceSlots,

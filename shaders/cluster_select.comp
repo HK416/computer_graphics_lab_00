@@ -1,0 +1,91 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+#include "culling.glsl"
+#include "scene_types.glsl"
+
+// 오브젝트 하나에 워크그룹 하나. 래스터 컬링(cull_meshlets.comp)과 같은 selectLod 로 이번 프레임의 LOD 컷을 고르되
+// 절두체·가림·원뿔은 보지 않는다 — 광선은 화면 밖도 맞힌다. 고른 meshlet 의 클러스터 주소를 오브젝트의 참조
+// 목록에 모으고, 클러스터 하위 구조 빌드 서술의 개수를 쓴다. 그래서 광선 경로가 mesh shader 경로와 같은 기하를 본다.
+layout(local_size_x = 64) in;
+
+// src/gfx/raytracing.cpp 의 ClusterSelectObject 와 배치가 같아야 한다.
+struct ClusterSelectObject {
+    uint64_t clusterAddresses; // 이 오브젝트 메쉬의 클러스터 주소 배열(정적 벌 또는 스킨 슬롯 벌)
+    uint64_t references;       // 출력: 고른 클러스터 주소 목록. 메쉬의 meshlet 수만큼 자리가 있다
+    uint64_t info;             // 출력: VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV
+    uint instanceSlot;
+    uint clusterBase; // clusterAddresses 안에서 이 메쉬의 첫 meshlet 자리
+};
+layout(buffer_reference, scalar) readonly buffer ClusterSelectObjectBuffer {
+    ClusterSelectObject items[];
+};
+// 주소·참조 목록은 8 바이트 단위로 잘려 들어오므로 기본 16 정렬을 요구하면 안 된다.
+layout(buffer_reference, scalar, buffer_reference_align = 8) readonly buffer ClusterAddressBuffer {
+    uint64_t items[];
+};
+layout(buffer_reference, scalar, buffer_reference_align = 8) writeonly buffer ClusterReferenceBuffer {
+    uint64_t items[];
+};
+// VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV
+layout(buffer_reference, scalar, buffer_reference_align = 8) writeonly buffer ClusterBottomInfoBuffer {
+    uint clusterReferencesCount;
+    uint clusterReferencesStride;
+    uint64_t clusterReferences;
+};
+
+layout(push_constant, scalar) uniform ClusterSelectPushConstants {
+    InstanceBuffer instances;
+    MeshBuffer meshes;
+    MeshletBuffer meshlets;
+    CameraBuffer camera;
+    LodNetworkBuffer network;
+    ClusterSelectObjectBuffer objects;
+    uint objectCount;
+    uint useNetwork;
+} push;
+
+shared uint selectedCount;
+
+void main() {
+    uint objectIndex = gl_WorkGroupID.x;
+    if (objectIndex >= push.objectCount) {
+        return;
+    }
+    ClusterSelectObject object = push.objects.items[objectIndex];
+    Instance instance = push.instances.items[object.instanceSlot];
+    Mesh mesh = push.meshes.items[instance.meshIndex];
+    Camera camera = push.camera.item;
+    LodNetwork network = push.network.item;
+    bool useNetwork = push.useNetwork != 0u;
+    ClusterAddressBuffer addresses = ClusterAddressBuffer(object.clusterAddresses);
+    ClusterReferenceBuffer references = ClusterReferenceBuffer(object.references);
+
+    if (gl_LocalInvocationIndex == 0u) {
+        selectedCount = 0u;
+    }
+    barrier();
+    for (uint i = gl_LocalInvocationIndex; i < mesh.meshletCount; i += gl_WorkGroupSize.x) {
+        Meshlet meshlet = push.meshlets.items[mesh.meshletOffset + i];
+        if (selectLod(meshlet,
+                      instance.model,
+                      camera.position.xyz,
+                      camera.parameters.y,
+                      camera.parameters.z,
+                      camera.parameters.w,
+                      useNetwork,
+                      network)) {
+            uint slot = atomicAdd(selectedCount, 1u);
+            references.items[slot] = addresses.items[object.clusterBase + i];
+        }
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u) {
+        ClusterBottomInfoBuffer info = ClusterBottomInfoBuffer(object.info);
+        info.clusterReferencesCount = selectedCount;
+        info.clusterReferencesStride = 8u;
+        info.clusterReferences = object.references;
+    }
+}

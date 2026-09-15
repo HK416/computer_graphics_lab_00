@@ -726,6 +726,8 @@ private:
     std::vector<uint8_t> skinDispatchChanged;
     // 이번 프레임에 다시 세울 스킨 하위 가속 구조가 하나라도 있는지. 상위 구조도 그때 다시 세운다.
     bool anySkinRebuild = false;
+    // updateAccelerationStructures 가 마지막으로 세운 프레임. 클러스터 모드가 프레임마다 한 번만 세우는 데 쓴다.
+    uint64_t accelerationStructureFrame = ~0ULL;
     // 현재 반쪽 내용이 지난 프레임 포즈로 유효한지(버퍼·목록이 그대로). 거짓이면 지난 쪽으로 복사할 것이 없다.
     bool skinCurrentValid = false;
     // 지난 프레임의 목록. 같으면 현재 반쪽 내용이 그대로 유효하다.

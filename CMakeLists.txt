@@ -109,6 +109,7 @@ set(shader_sources
     shaders/skin.comp
     shaders/skin_bounds.comp
     shaders/cluster_gather.comp
+    shaders/cluster_select.comp
     shaders/fluid_emit.comp
     shaders/fluid_grid.comp
     shaders/fluid_density.comp

@@ -288,7 +288,7 @@ memcpy 하므로 겹치지 않는다. 상위 가속 구조 인스턴스 버퍼�
 | `scene::ColliderShape` (`src/scene/scene.h`) | `COLLIDER_SHAPE_*` (`collider_shapes.glsl`; `RIGID_SHAPE_*` `FLUID_COLLIDER_*` 는 그 별칭) |
 
 | `Options::debugMode`, `RenderSettings::debugMode` (`src/gfx/render_settings.h`) | `DEBUG_MODE_*` (`scene_types.glsl`) |
-| `ClusterGatherPushConstants` (`src/gfx/raytracing.cpp`) | 동명 블록 (`shaders/cluster_gather.comp`) — 클러스터 번호 규칙 `meshlet.indexOffset / 3`(`prepareClusterBuild`) ↔ `hitIndexBase`(`scene_types.glsl`)도 짝이다. 클러스터 히트를 푸는 셰이더는 `cluster_hit.glsl` 을 include 하고 `CLUSTER_HITS` 변종을 `shader_variants` 에 둔다 |
+| `ClusterGatherPushConstants` `ClusterSelectObject` `ClusterSelectPushConstants` (`src/gfx/raytracing.cpp`) | 동명 블록·구조체 (`shaders/cluster_gather.comp`, `cluster_select.comp`; 선택이 쓰는 서술은 `VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV` 배치) — 클러스터 번호 규칙 `meshlet.indexOffset / 3`(`prepareClusterBuild`) ↔ `hitIndexBase`(`scene_types.glsl`)도 짝이다. LOD 컷은 래스터 `cull_meshlets.comp` 와 같은 `selectLod` 를 같은 카메라·인스턴스·신경망 버퍼로 불러야 두 경로가 같은 meshlet 을 본다. 클러스터 히트를 푸는 셰이더는 `cluster_hit.glsl` 을 include 하고 `CLUSTER_HITS` 변종을 `shader_variants` 에 둔다 |
 | `DebugLineVertex` (`src/gfx/debug_lines.h`), `DebugLinePushConstants` (`src/app/plugins/debug_lines_plugin.cpp`) | 동명 구조체 (`shaders/debug_line_common.glsl`) |
 | `GpuReplaySlot` `GpuReplaySample` `ReplayStorePushConstants` `ReplaySamplePushConstants` (`src/gfx/replay.h`) | `ReplaySlot` `ReplaySample`·동명 블록 (`shaders/replay_common.glsl`, `neural_replay_*.comp`) — **첨자 규칙이 두 벌이다**: `replayStackIndex`(`src/gfx/neural_math.h`) ↔ 동명 함수(`replay_common.glsl`). 링 되감기·에피소드 경계·창 잘림 셋이 한 식에서 만나는 자리라 C++ 쪽을 순수 함수로 떼어 `neural` 테스트가 본다. 한쪽을 고치면 다른 쪽도 고친다 |
 
