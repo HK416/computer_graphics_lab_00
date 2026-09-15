@@ -860,7 +860,8 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
     // 갱신은 같은 구조(ALLOW_UPDATE 로 세운 것)에 같은 수의 인스턴스일 때만 된다. 변환과 하위 구조 참조는 바뀌어도
     // 된다.
     bool refit = refitAllowed && useClusters && topLevel.handle != VK_NULL_HANDLE &&
-                 topLevelInstanceCount == instanceCount && topLevel.storage.size >= sizes.accelerationStructureSize;
+                 topLevelInstanceCount == instanceCount && topLevel.storage.size >= sizes.accelerationStructureSize &&
+                 topLevelRefits < TOP_LEVEL_REFIT_LIMIT;
     if (topLevel.storage.size < sizes.accelerationStructureSize) {
         retireStructure(topLevel);
         topLevel = createStructure(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, sizes.accelerationStructureSize);
@@ -893,6 +894,7 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
     buildInfo.dstAccelerationStructure = topLevel.handle;
     buildInfo.scratchData.deviceAddress = scratchBuffer.address;
     topLevelInstanceCount = instanceCount;
+    topLevelRefits = refit ? topLevelRefits + 1 : 0;
 
     VkAccelerationStructureBuildRangeInfoKHR range{};
     range.primitiveCount = instanceCount;
