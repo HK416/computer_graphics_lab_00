@@ -107,6 +107,9 @@ struct RenderSettings {
     // 광선 질의 그림자가 모두 같은 구조를 본다. 장치가 지원하지 않으면 무시된다. 비교용으로 끈다.
     // 자동 튜닝 등급표에는 두지 않는다 — 결과가 바이트로 같아 화질·비용 조절이 아니라 능력 게이트일 뿐이다.
     bool useClusterAccel = true;
+    // 변환·포즈만 바뀐 프레임에 상위 구조를 제자리 갱신(refit)으로 이어 가는 최대 프레임 수. 갱신은 경계 상자만
+    // 고쳐 트리 모양이 처음 구축에 묶이므로 이 수에 닿으면 새로 세운다. 0 이면 늘 새로 세운다.
+    uint32_t clusterRefitLimit = 64;
     // 누적 표본이 이 수에 못 미치는 동안 표시용으로 à-trous 를 돌린다. 누적 버퍼는 건드리지 않는다.
     bool pathTraceDenoise = true;
     uint32_t pathTraceDenoiseSamples = 64;

@@ -1092,7 +1092,7 @@ void Renderer::updateAccelerationStructures(VkCommandBuffer commandBuffer, const
                               objectSkinnedBlas,
                               static_cast<uint32_t>(frameIndex % FRAMES_IN_FLIGHT),
                               fluidTlasPrepended,
-                              clusters && partialClusterRebuild);
+                              clusters && partialClusterRebuild ? settings.clusterRefitLimit : 0);
 }
 
 } // namespace gfx

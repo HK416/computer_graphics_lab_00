@@ -458,6 +458,14 @@ void Editor::buildRenderSettings(scene::Scene& active, float deltaSeconds) {
         } else {
             ImGui::SameLine();
             ImGui::TextDisabled("meshlet 단위 하위 구조. 반사·그림자·경로 추적이 함께 쓴다");
+            ImGui::BeginDisabled(!renderer.settings.useClusterAccel);
+            int refitLimit = static_cast<int>(renderer.settings.clusterRefitLimit);
+            if (ImGui::SliderInt("TLAS Refit 상한 (프레임)", &refitLimit, 0, 256)) {
+                renderer.settings.clusterRefitLimit = static_cast<uint32_t>(refitLimit);
+            }
+            ImGui::EndDisabled();
+            ImGui::TextDisabled(
+                "변환·포즈만 바뀐 프레임은 상위 구조를 제자리 갱신하고, 이 수만큼 이어지면 새로 세운다. 0 은 늘 새로");
         }
         if (!renderer.pathTracingAvailable()) {
             ImGui::SameLine();
