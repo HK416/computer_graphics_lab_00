@@ -773,7 +773,8 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
                                const std::vector<uint32_t>& instanceSlots,
                                const std::vector<uint32_t>& skinnedBlasSlots,
                                uint32_t frameSlot,
-                               uint32_t prependedInstances) {
+                               uint32_t prependedInstances,
+                               bool refitAllowed) {
     std::vector<VkAccelerationStructureInstanceKHR> instances;
     instances.reserve(sceneToTrace.objects.size());
 
@@ -844,6 +845,10 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
     buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    // 클러스터 모드는 부분 재구축 프레임에 제자리 갱신을 쓰므로 그 허용을 걸고 세운다. 일반 모드는 그대로 둔다.
+    if (useClusters) {
+        buildInfo.flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    }
     buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     buildInfo.geometryCount = 1;
     buildInfo.pGeometries = &geometryInfo;
@@ -852,6 +857,10 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
     VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     getBuildSizes(context.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &instanceCount, &sizes);
 
+    // 갱신은 같은 구조(ALLOW_UPDATE 로 세운 것)에 같은 수의 인스턴스일 때만 된다. 변환과 하위 구조 참조는 바뀌어도
+    // 된다.
+    bool refit = refitAllowed && useClusters && topLevel.handle != VK_NULL_HANDLE &&
+                 topLevelInstanceCount == instanceCount && topLevel.storage.size >= sizes.accelerationStructureSize;
     if (topLevel.storage.size < sizes.accelerationStructureSize) {
         retireStructure(topLevel);
         topLevel = createStructure(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, sizes.accelerationStructureSize);
@@ -873,10 +882,17 @@ void RayTracer::updateTopLevel(VkCommandBuffer commandBuffer,
     if (topLevel.handle == VK_NULL_HANDLE) {
         return;
     }
-    reserveScratch(scratchBuffer, std::max<VkDeviceSize>(sizes.buildScratchSize, 256), "가속 구조 스크래치");
+    reserveScratch(scratchBuffer,
+                   std::max<VkDeviceSize>(refit ? sizes.updateScratchSize : sizes.buildScratchSize, 256),
+                   "가속 구조 스크래치");
 
+    if (refit) {
+        buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+        buildInfo.srcAccelerationStructure = topLevel.handle;
+    }
     buildInfo.dstAccelerationStructure = topLevel.handle;
     buildInfo.scratchData.deviceAddress = scratchBuffer.address;
+    topLevelInstanceCount = instanceCount;
 
     VkAccelerationStructureBuildRangeInfoKHR range{};
     range.primitiveCount = instanceCount;

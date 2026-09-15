@@ -117,12 +117,16 @@ public:
     // frameSlot 은 진행 중인 프레임 번호. 인스턴스 버퍼를 프레임마다 나눠 쓰는 데 쓴다.
     // prependedInstances 는 GPU(유체 컴퓨트)가 인스턴스 버퍼 앞쪽에 이미 써 둔 개수. 오브젝트 인스턴스는
     // 그 뒤에 이어 붙고 구축 개수에 합쳐진다.
+    // refitAllowed 가 참이면(클러스터 모드의 부분 재구축 프레임: 오브젝트 구성은 그대로, 변환·포즈만 바뀜) 인스턴스
+    // 수가 지난 구축과 같을 때 새로 세우지 않고 제자리에서 갱신(refit)한다. 클러스터 모드의 상위 구조는 그러려고
+    // ALLOW_UPDATE 로 세운다.
     void updateTopLevel(VkCommandBuffer commandBuffer,
                         const scene::Scene& sceneToTrace,
                         const std::vector<uint32_t>& instanceSlots,
                         const std::vector<uint32_t>& skinnedBlasSlots,
                         uint32_t frameSlot,
-                        uint32_t prependedInstances = 0);
+                        uint32_t prependedInstances = 0,
+                        bool refitAllowed = false);
     // 인스턴스 버퍼를 미리 잡는다. GPU 가 앞쪽을 쓰는 패스는 updateTopLevel 이 버퍼를 다시 잡기 전에
     // 주소를 기록하므로 먼저 불러야 한다.
     void reserveInstances(uint32_t frameSlot, uint32_t count);
@@ -234,6 +238,8 @@ private:
     };
     std::vector<DynamicBottomLevel> dynamicBottomLevels;
     AccelerationStructure topLevel;
+    // 지난 상위 구조 구축의 인스턴스 수. refit 은 수가 같을 때만 된다.
+    uint32_t topLevelInstanceCount = 0;
     // 구축 입력은 CPU 가 기록 시점에 채우므로 진행 중인 프레임 수만큼 나눠 둬야 한다. 하나만
     // 두면 지난 프레임의 구축이 아직 읽는 중에 덮어쓰게 된다.
     std::vector<Buffer> instanceBuffers;

@@ -1091,7 +1091,8 @@ void Renderer::updateAccelerationStructures(VkCommandBuffer commandBuffer, const
                               objectInstanceSlots,
                               objectSkinnedBlas,
                               static_cast<uint32_t>(frameIndex % FRAMES_IN_FLIGHT),
-                              fluidTlasPrepended);
+                              fluidTlasPrepended,
+                              clusters && partialClusterRebuild);
 }
 
 } // namespace gfx
